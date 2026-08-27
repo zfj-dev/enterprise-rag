@@ -1,0 +1,13 @@
+# 真实模式（需 GPU / Postgres / API Key）——在真机额外安装：
+#   pip install -r requirements-real.txt
+# 本地嵌入/重排（GPU）
+sentence-transformers>=2.7
+transformers>=4.44
+torch>=2.1
+# 复杂文档解析（表格/扫描件）
+docling>=2.0
+paddleocr>=2.7
+paddlepaddle>=2.6
+# pgvector / postgres 驱动
+pgvector>=0.3
+psycopg[binary]>=3.1

@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>企业智能文档问答</title>
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  body { background: #f5f6f8; color: #1f2933; }
+  .wrap { max-width: 900px; margin: 24px auto; padding: 0 16px; }
+  .card { background: #fff; border-radius: 12px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 16px; }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  .sub { color: #6b7280; font-size: 13px; margin-bottom: 16px; }
+  input, select, button, textarea { font-size: 14px; padding: 8px 12px; border-radius: 8px; border: 1px solid #d1d5db; }
+  input, select { width: 100%; margin-bottom: 10px; }
+  button { cursor: pointer; background: #2563eb; color: #fff; border: none; }
+  button.ghost { background: #fff; color: #2563eb; border: 1px solid #2563eb; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row .grow { flex: 1; }
+  #chatBox { min-height: 220px; max-height: 420px; overflow-y: auto; border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; background: #fafafa; }
+  .msg { margin-bottom: 12px; padding: 10px 12px; border-radius: 8px; }
+  .msg.user { background: #eff6ff; }
+  .msg.ai { background: #f0fdf4; }
+  .src { font-size: 12px; color: #6b7280; margin-top: 6px; }
+  .src b { color: #2563eb; }
+  .feedback { margin-top: 6px; font-size: 13px; }
+  .hide { display: none; }
+  .tag { font-size: 12px; padding: 2px 6px; border-radius: 6px; background: #eef2ff; color: #4f46e5; margin-left: 6px; }
+  #debugOut { font-family: monospace; font-size: 12px; max-height: 200px; overflow: auto; background: #0f172a; color: #e2e8f0; padding: 10px; border-radius: 8px; white-space: pre-wrap; }
+  .list-item { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #f1f5f9; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>企业智能文档问答 <span class="tag">RAG v1.1</span></h1>
+  <div class="sub">上传文档 → 语义问答（带引用溯源）· 局域网演示版</div>
+
+  <!-- 登录 -->
+  <div class="card" id="loginCard">
+    <input id="u" placeholder="用户名" value="admin">
+    <input id="p" type="password" placeholder="密码" value="admin123">
+    <div class="row">
+      <button class="grow" onclick="login()">登录</button>
+      <button class="grow ghost" onclick="register()">注册</button>
+    </div>
+    <div id="loginMsg" class="sub" style="margin-top:8px"></div>
+  </div>
+
+  <!-- 主界面 -->
+  <div class="card hide" id="appCard">
+    <div class="row">
+      <select id="kbSel" class="grow"></select>
+      <button onclick="loadKbs()">刷新</button>
+      <button class="ghost" onclick="createKb()">新建</button>
+    </div>
+    <div class="sub">当前知识库：<span id="kbName">-</span> · <span id="userRole">viewer</span></div>
+
+    <div class="row">
+      <input id="fileIn" type="file" class="grow">
+      <button onclick="upload()">上传文档</button>
+    </div>
+    <div id="docsBox" class="sub"></div>
+
+    <div style="margin-top:14px">
+      <textarea id="question" rows="2" placeholder="输入问题，如：比亚迪 电池 规范"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="grow" onclick="ask()">提问</button>
+        <button class="grow ghost" onclick="debug()">调试(看检索)</button>
+      </div>
+    </div>
+
+    <div id="chatBox" style="margin-top:14px"></div>
+    <div id="debugCard" class="hide"><div class="sub">检索中间结果：</div><div id="debugOut"></div></div>
+  </div>
+</div>
+
+<script>
+const API = '/api/v1';
+let TOKEN = localStorage.getItem('_rag_tok') || '';
+let KB = null;
+
+function h(k){ return { 'Authorization':'Bearer '+TOKEN, 'Content-Type':'application/json' }; }
+async function api(path, opts={}){
+  const o = Object.assign({ headers: h(opts.form?{}:{'Content-Type':'application/json'}) }, opts);
+  if(opts.body && !opts.form) o.body = JSON.stringify(opts.body);
+  const r = await fetch(API+path, o);
+  const text = await r.text();
+  try { return { ok:r.ok, data: JSON.parse(text) }; } catch(e){ return { ok:r.ok, data:text }; }
+}
+function esc(s){ return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+async function init(){
+  if(!TOKEN) return;
+  const ok = await api('/auth/health');
+  if(ok.ok){ showApp(); }
+}
+function showApp(){
+  document.getElementById('loginCard').classList.add('hide');
+  document.getElementById('appCard').classList.remove('hide');
+  loadKbs();
+}
+async function login(){
+  const r = await api('/auth/login', {method:'POST', body:{username:u.value, password:p.value}});
+  if(r.ok){ TOKEN=r.data.access_token; localStorage.setItem('_rag_tok', TOKEN); document.getElementById('userRole').textContent=r.data.role; showApp(); }
+  else document.getElementById('loginMsg').textContent = r.data.detail || '登录失败';
+}
+async function register(){
+  const r = await api('/auth/register', {method:'POST', body:{username:u.value, password:p.value}});
+  document.getElementById('loginMsg').textContent = r.ok ? '注册成功，请登录' : (r.data.detail||'注册失败');
+}
+async function loadKbs(){
+  const r = await api('/knowledge');
+  if(!r.ok){ alert('未登录'); location.reload(); return; }
+  const sel = document.getElementById('kbSel');
+  sel.innerHTML = r.data.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');
+  KB = r.data[0] || null;
+  document.getElementById('kbName').textContent = KB? KB.name : '未创建';
+  if(KB) loadDocs();
+}
+async function createKb(){
+  const name = prompt('知识库名称','我的资料库');
+  if(!name) return;
+  const r = await api('/knowledge', {method:'POST', body:{name, description:''}});
+  if(r.ok) loadKbs();
+  else alert(r.data.detail||'失败');
+}
+async function upload(){
+  const file = document.getElementById('fileIn').files[0];
+  if(!file || !KB){ alert('请先选文件与知识库'); return; }
+  const fd = new FormData(); fd.append('file', file);
+  const r = await fetch(`${API}/documents?kb_id=${KB.id}`, {method:'POST', headers:{'Authorization':'Bearer '+TOKEN}, body:fd});
+  const d = await r.json();
+  if(d.status==='indexed') alert('已入库 '+d.filename+'，分块 '+d.chunk_count);
+  else alert('处理失败：'+d.error);
+  loadDocs();
+}
+async function loadDocs(){
+  if(!KB) return;
+  const r = await api('/documents?kb_id='+KB.id);
+  document.getElementById('docsBox').innerHTML = (r.data||[]).map(d=>`<div class="list-item"><span>${esc(d.filename)}</span><span>${d.status} · ${d.chunk_count}块</span></div>`).join('') || '（暂无文档）';
+}
+function addMsg(role, text){
+  const box = document.getElementById('chatBox');
+  const div = document.createElement('div'); div.className='msg '+(role==='user'?'user':'ai');
+  div.innerHTML = (role==='user'?'你：':'助手：')+esc(text);
+  box.appendChild(div); box.scrollTop = box.scrollHeight;
+  return div;
+}
+async function ask(){
+  const q = document.getElementById('question').value.trim();
+  if(!q || !KB){ alert('请输入问题'); return; }
+  addMsg('user', q);
+  const aiDiv = addMsg('ai', '思考中…');
+  const resp = await fetch(`${API}/chat/stream`, {method:'POST', headers:h({}), body:JSON.stringify({kb_id:KB.id, question:q, stream:true})});
+  const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf=''; let answer=''; let sources=[];
+  while(true){
+    const {done, value} = await reader.read();
+    if(done) break;
+    buf += dec.decode(value, {stream:true});
+    const lines = buf.split('\n\n'); buf = lines.pop();
+    for(const line of lines){
+      if(!line.startsWith('data:')) continue;
+      const payload = line.slice(5).trim();
+      if(payload==='[DONE]') continue;
+      try{
+        const ev = JSON.parse(payload);
+        if(ev.type==='sources') sources = ev.data;
+        else if(ev.type==='delta'){ answer += ev.text; aiDiv.innerHTML = '助手：'+esc(answer); aiDiv.scrollIntoView(); }
+        else if(ev.type==='done'){ finalize(aiDiv, answer, sources, ev.message_id); }
+      }catch(e){}
+    }
+  }
+}
+function finalize(div, answer, sources, messageId){
+  div.innerHTML = '助手：'+esc(answer);
+  if(sources && sources.length){
+    div.innerHTML += '<div class="src">来源：'+ sources.map(s=>`<b>${esc(s.doc_name)}</b>·第${s.page}页`).join('、') +'</div>';
+  }
+  div.innerHTML += `<div class="feedback"><button onclick="fb('${messageId}',1)">👍 有用</button> <button onclick="fb('${messageId}',-1)">👎 没用</button></div>`;
+}
+async function fb(messageId, rating){
+  const r = await api('/feedback', {method:'POST', body:{message_id:messageId, rating}});
+  alert(r.ok ? '已记录反馈' : '反馈失败');
+}
+async function debug(){
+  const q = document.getElementById('question').value.trim();
+  if(!q||!KB) return;
+  const r = await api(`/debug/query?kb_id=${KB.id}&question=${encodeURIComponent(q)}`);
+  const card = document.getElementById('debugCard'); card.classList.remove('hide');
+  document.getElementById('debugOut').textContent = JSON.stringify(r.data, null, 2);
+}
+init();
+</script>
+</body>
+</html>

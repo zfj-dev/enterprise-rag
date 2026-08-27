@@ -1,0 +1,26 @@
+# A+B 部署（本机 + 局域网给身边人用）——演示模式开箱即用（sqlite + 内存向量 + 假模型）。
+# 真实模式（Multi-user + pgvector + 云 API + 本地 GPU 嵌入/重排）见 README "真实模式"。
+services:
+  api:
+    build: ../backend
+    container_name: rag-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:////app/data/rag.db
+      - SECRET_KEY=change-me-in-prod
+      - USE_REAL=false
+      - EMBEDDING_PROVIDER=fake
+      - RERANKER_PROVIDER=fake
+      - LLM_PROVIDER=fake
+      - VECTOR_STORE=inmemory
+      - MAX_UPLOAD_MB=50
+    volumes:
+      - rag_data:/app/data
+      - rag_upload:/app/uploaded_files
+      - ../frontend:/frontend:ro     # 挂前端，让 / 与 /static 能托管 UI
+    restart: unless-stopped
+
+volumes:
+  rag_data:
+  rag_upload:
