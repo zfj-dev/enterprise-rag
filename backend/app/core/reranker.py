@@ -1,7 +1,7 @@
 """Reranker 抽象与实现（重排是检索质量最高 ROI 的一步）。
 
-- FakeReranker: 用查询/文档词重叠给出确定性分数（无需模型），demo/测试可用。
-- BgeReranker:  真实 bge-reranker-large（惰性 import transformers，需 GPU）。
+- FakeReranker: 词重叠分数（演示/测试）。
+- BgeReranker:  真实 bge-reranker-large（本地 GPU，需 torch + transformers；宿主跑）。
 """
 from __future__ import annotations
 
@@ -10,13 +10,12 @@ from typing import Sequence
 
 from app.config import get_settings
 
-_RELEVANCE_OFFSET = 0.15  # Fake 分数叠加一个常数，保证与检索阈值语义兼容
+_RELEVANCE_OFFSET = 0.15
 
 
 class Reranker(ABC):
     @abstractmethod
     def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
-        """输入候选（已含 retrieval score），输出按重排分数排序的列表（新增 'rank_score'）。"""
         ...
 
 
@@ -34,20 +33,27 @@ class FakeReranker(Reranker):
 
 
 class BgeReranker(Reranker):
-    def __init__(self, model_name: str | None = None):
-        from transformers import AutoModelForSequenceClassification, AutoTokenizer  # 惰性
+    def __init__(self, model_name: str | None = None, device: str | None = None):
+        import torch
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
         s = get_settings()
+        dev = device or s.reranker_device
+        if dev == "cuda" and not torch.cuda.is_available():
+            dev = "cpu"
+        self._torch = torch
+        self.device = dev
+        print(f"[bge] reranker device={self.device}")
         self.tokenizer = AutoTokenizer.from_pretrained(model_name or s.reranker_model)
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name or s.reranker_model)
+        self.model.to(self.device)
         self.model.eval()
 
     def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
-        import torch  # 惰性
-
         pairs = [(query, c.get("content", "")) for c in candidates]
         enc = self.tokenizer(pairs, padding=True, truncation=True, return_tensors="pt")
-        with torch.no_grad():
+        enc = {k: v.to(self.device) for k, v in enc.items()}
+        with self._torch.no_grad():
             scores = self.model(**enc).logits.squeeze(-1).tolist()
         out = []
         for c, sc in zip(candidates, scores):

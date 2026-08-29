@@ -32,3 +32,7 @@ build/
 Thumbs.db
 .vscode/
 .idea/
+
+# 用户测试文件（论文 PDF）
+backend/paper.pdf
+backend/verify_paper.pdf

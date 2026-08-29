@@ -3,7 +3,7 @@
 # 本地嵌入/重排（GPU）
 sentence-transformers>=2.7
 transformers>=4.44
-torch>=2.1
+torch>=2.1    # 已装 GPU 版(2.13.0+cu130)则满足；如需 GPU 用 scripts\enable_gpu.ps1
 # 复杂文档解析（表格/扫描件）
 docling>=2.0
 paddleocr>=2.7
@@ -11,3 +11,6 @@ paddlepaddle>=2.6
 # pgvector / postgres 驱动
 pgvector>=0.3
 psycopg[binary]>=3.1
+
+# docling 版面/表格模型（onnxruntime，Windows wheel 不随 docling-slim standard 自动带）
+onnxruntime>=1.17

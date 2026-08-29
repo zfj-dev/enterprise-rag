@@ -1,8 +1,10 @@
 # A+B 部署（本机 + 局域网给身边人用）——演示模式开箱即用（sqlite + 内存向量 + 假模型）。
-# 真实模式（Multi-user + pgvector + 云 API + 本地 GPU 嵌入/重排）见 README "真实模式"。
+# 前端已烤进镜像，不依赖宿主挂载/文件共享。
 services:
   api:
-    build: ../backend
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
     container_name: rag-api
     ports:
       - "8000:8000"
@@ -12,13 +14,15 @@ services:
       - USE_REAL=false
       - EMBEDDING_PROVIDER=fake
       - RERANKER_PROVIDER=fake
-      - LLM_PROVIDER=fake
+      - LLM_PROVIDER=openai
+      - LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+      - LLM_API_KEY=sk-ws-H.ELRPLRR.ex4P.MEUCIEWZNJT0xbwtUrffniAIgnpxamUG62FjBpdfe0iYzJX4AiEA7ZrXL6bQ4jBwMWUpEcweB1vHF-l4Sf4VmdVOrtBiTic
+      - LLM_MODEL=qwen-plus
       - VECTOR_STORE=inmemory
       - MAX_UPLOAD_MB=50
     volumes:
       - rag_data:/app/data
       - rag_upload:/app/uploaded_files
-      - ../frontend:/frontend:ro     # 挂前端，让 / 与 /static 能托管 UI
     restart: unless-stopped
 
 volumes:

@@ -1,6 +1,8 @@
 """BM25 关键词检索（InMemory 实现，用 rank_bm25；支持按元数据过滤）。"""
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -23,7 +25,22 @@ class InMemoryBm25:
         self._corpus: list[str] = []
 
     def _tok(self, text: str) -> list[str]:
-        return str(text).lower().split()
+        """中文感知分词：去空白后，ASCII 词整词保留，中文按字符双字组。
+
+        修复中文无空格时 BM25 整句挤成 1 个 token 的问题（如"表3.1""比亚迪"等标识/关键词能命中）。
+        """
+        t = re.sub(r"\s+", "", str(text).lower())
+        if not t:
+            return []
+        words = re.findall(r"[a-z0-9]+", t)
+        rest = re.sub(r"[a-z0-9]+", "", t)
+        grams = list(words)
+        if len(rest) == 1:
+            grams.append(rest)
+        else:
+            for i in range(len(rest) - 1):
+                grams.append(rest[i:i + 2])
+        return grams
 
     def add(self, docs: Sequence[Any]) -> None:
         for d in docs:

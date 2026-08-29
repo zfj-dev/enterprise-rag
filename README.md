@@ -127,3 +127,25 @@ python -m pytest tests/ -v                # 单元 + API 集成
 2. Docling/PP-Structure 接入解析路由（`core/parser.py`）。
 3. 问题优化（LLM 改写）在真实模式启用（`chat_service._maybe_rewrite` 已留）。
 4. 语义缓存（Redis）+ 评估管线（RAGAS / 黄金集）。
+
+---
+
+## 真实语义检索（宿主 + bge，推荐）
+
+bge 嵌入/重排需要 GPU + torch，**建议直接在宿主（你的 4050）跑，不在 Docker 容器里**（容器 GPU 复杂）。步骤：
+
+```powershell
+# 1) 装环境（一次）：venv + torch + sentence-transformers + bge
+powershell -ExecutionPolicy Bypass -File scripts\setup_real.ps1
+
+# 2) 先编辑 scripts\run_real.ps1，把 $env:LLM_API_KEY 填成你 DashScope 的 Key
+# 3) 启动（本机 GPU 跑 bge 嵌入/重排）
+powershell -ExecutionPolicy Bypass -File scripts\run_real.ps1
+# 浏览器打开 http://localhost:8000，首次会下载 bge 模型(~2GB)，然后重新上传文档即可
+```
+
+- 首次运行：自动下载 `bge-large-zh` + `bge-reranker-large`，并把已入库文档用 bge **重嵌入**（启动时 `reindex`）。
+- 之后问"比亚迪25年营收"这类**需要语义理解**的问题，检索质量明显优于字符级假嵌入。
+- 若显存紧张（6G），可把 `$env:RERANKER_DEVICE="cpu"`，让重排放 CPU、嵌入留 GPU。
+
+> 演示模式（docker compose，无 GPU/无 Key）仍用字符级假嵌入，能跑通全链路；真要语义检索就用上面这套宿主模式。

@@ -48,6 +48,26 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
     return sess
 
 
+def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
+    """取最近几轮的 {user, assistant} 对，用于多轮指代消解与上下文。"""
+    msgs = (db.query(ChatMessage)
+            .filter(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at.desc()).limit(limit).all())
+    msgs = list(reversed(msgs))
+    pairs: list[dict] = []
+    cur: dict | None = None
+    for m in msgs:
+        if m.role == "user":
+            if cur:
+                pairs.append(cur)
+            cur = {"user": m.content, "assistant": ""}
+        elif m.role == "assistant" and cur is not None:
+            cur["assistant"] = m.content
+    if cur:
+        pairs.append(cur)
+    return pairs
+
+
 def _to_sources(candidates: list[dict]) -> list[dict]:
     out = []
     for c in candidates:
@@ -64,12 +84,13 @@ def _to_sources(candidates: list[dict]) -> list[dict]:
 
 def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
             session_id: str | None = None) -> Prep:
-    q2 = _maybe_rewrite(rt, question, [])
+    sess = _get_or_create_session(db, user, kb_id, session_id)
+    history = _load_history(db, sess.id, limit=6)
+    q2 = _maybe_rewrite(rt, question, history)
     candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
     ccit = validate_sources(candidates)
     context = format_context(candidates)
-    prompt = build_prompt(question, context)
-    sess = _get_or_create_session(db, user, kb_id, session_id)
+    prompt = build_prompt(question, context, history=history)
 
     user_msg = ChatMessage(session_id=sess.id, role="user", content=question)
     db.add(user_msg)
@@ -79,20 +100,37 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     return Prep(
         session_id=sess.id, user=user, kb_id=kb_id, question=question, rewrite=q2,
         candidates=candidates, sources=_to_sources(candidates), prompt=prompt, _ccit=ccit,
-        trace={"query": question, "rewrite": q2,
+        trace={"query": question, "rewrite": q2, "history_turns": len(history),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
 
 
 def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
-    """流式生成：先给 sources，再增量给 answer，最后 done。"""
-    yield {"type": "sources", "data": prep.sources}
-    chunks: list[str] = []
-    for piece in rt.llm.stream([{"role": "user", "content": prep.prompt}]):
-        chunks.append(piece)
-        yield {"type": "delta", "text": piece}
-    answer = "".join(chunks)
+    """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。"""
+    yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
+    cache_hit = False
+    if get_settings().semantic_cache:
+        hit = rt.semantic_cache.get(prep.question, prep.kb_id)
+        if hit:
+            cache_hit = True
+            yield {"type": "delta", "text": hit["answer"]}
+    if not cache_hit:
+        chunks: list[str] = []
+        for piece in rt.llm.stream([{"role": "user", "content": prep.prompt}]):
+            chunks.append(piece)
+            yield {"type": "delta", "text": piece}
+        if get_settings().semantic_cache:
+            rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
+    answer = "".join(chunks) if not cache_hit else hit["answer"]
     answer = apply_no_source_no_claim(answer, prep._ccit)
+
+    if get_settings().llm_provider != "fake":  # 真实模式：逐句校验引用覆盖率
+        try:
+            from app.core.citation import verify_claims
+            cov = verify_claims(answer, prep.sources, rt.llm)
+            prep.trace["citation_coverage"] = cov.get("coverage")
+        except Exception:
+            pass
 
     asst = ChatMessage(session_id=prep.session_id, role="assistant", content=answer)
     db.add(asst)
@@ -100,7 +138,10 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     db.refresh(asst)
 
     prep.trace["message_id"] = asst.id
-    yield {"type": "done", "message_id": asst.id, "sources": prep.sources, "answer": answer}
+    prep.trace["cache_hit"] = cache_hit
+    yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
+           "answer": answer, "cache_hit": cache_hit,
+           "citation_coverage": prep.trace.get("citation_coverage")}
 
 
 def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,

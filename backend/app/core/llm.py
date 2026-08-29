@@ -68,7 +68,7 @@ class CloudLLM(LLM):
 
 def get_llm(provider: str | None = None) -> LLM:
     provider = provider or get_settings().llm_provider
-    if provider in ("deepseek", "siliconflow", "openai"):
+    if provider in ("deepseek", "siliconflow", "openai", "dashscope"):
         return CloudLLM()
     return FakeLLM()
 

@@ -51,9 +51,10 @@
   <!-- 主界面 -->
   <div class="card hide" id="appCard">
     <div class="row">
-      <select id="kbSel" class="grow"></select>
+      <select id="kbSel" class="grow" onchange="selectKb()"></select>
       <button onclick="loadKbs()">刷新</button>
       <button class="ghost" onclick="createKb()">新建</button>
+      <button class="ghost" onclick="deleteKb()">删除</button>
     </div>
     <div class="sub">当前知识库：<span id="kbName">-</span> · <span id="userRole">viewer</span></div>
 
@@ -64,7 +65,7 @@
     <div id="docsBox" class="sub"></div>
 
     <div style="margin-top:14px">
-      <textarea id="question" rows="2" placeholder="输入问题，如：比亚迪 电池 规范"></textarea>
+      <textarea id="question" rows="2" placeholder="输入问题，如：比亚迪25年营收如何"></textarea>
       <div class="row" style="margin-top:8px">
         <button class="grow" onclick="ask()">提问</button>
         <button class="grow ghost" onclick="debug()">调试(看检索)</button>
@@ -79,7 +80,7 @@
 <script>
 const API = '/api/v1';
 let TOKEN = localStorage.getItem('_rag_tok') || '';
-let KB = null;
+let KBS = [], DOCS = [], KB = null, SESSION = null;
 
 function h(k){ return { 'Authorization':'Bearer '+TOKEN, 'Content-Type':'application/json' }; }
 async function api(path, opts={}){
@@ -93,8 +94,12 @@ function esc(s){ return (s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','
 
 async function init(){
   if(!TOKEN) return;
-  const ok = await api('/auth/health');
-  if(ok.ok){ showApp(); }
+  showApp();   // loadKbs 会校验 token；失效则自动清 token 回登录
+}
+function clearAuth(){
+  TOKEN = ''; localStorage.removeItem('_rag_tok');
+  document.getElementById('appCard').classList.add('hide');
+  document.getElementById('loginCard').classList.remove('hide');
 }
 function showApp(){
   document.getElementById('loginCard').classList.add('hide');
@@ -112,34 +117,79 @@ async function register(){
 }
 async function loadKbs(){
   const r = await api('/knowledge');
-  if(!r.ok){ alert('未登录'); location.reload(); return; }
+  if(!r.ok){ clearAuth(); document.getElementById('loginMsg').textContent='登录已过期，请重新登录'; return; }
+  KBS = r.data;
   const sel = document.getElementById('kbSel');
-  sel.innerHTML = r.data.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');
-  KB = r.data[0] || null;
-  document.getElementById('kbName').textContent = KB? KB.name : '未创建';
+  sel.innerHTML = KBS.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');
+  const curId = KB ? KB.id : (KBS[0] ? KBS[0].id : null);
+  if(curId){ sel.value = curId; KB = KBS.find(k=>k.id===curId) || KBS[0] || null; }
+  document.getElementById('kbName').textContent = KB ? KB.name : '未创建';
   if(KB) loadDocs();
+}
+function selectKb(){
+  const sel = document.getElementById('kbSel');
+  KB = KBS.find(k=>k.id===sel.value) || null;
+  document.getElementById('kbName').textContent = KB ? KB.name : '';
+  if(KB) loadDocs(); else document.getElementById('docsBox').innerHTML = '';
 }
 async function createKb(){
   const name = prompt('知识库名称','我的资料库');
   if(!name) return;
   const r = await api('/knowledge', {method:'POST', body:{name, description:''}});
-  if(r.ok) loadKbs();
-  else alert(r.data.detail||'失败');
+  if(r.ok){
+    await loadKbs();
+    const sel = document.getElementById('kbSel');
+    sel.value = r.data.id;   // 选中新建的库
+    selectKb();
+  } else alert(r.data.detail||'失败');
+}
+async function deleteKb(){
+  if(!KB) return;
+  if(!confirm('确定删除知识库「'+KB.name+'」及其所有文档？')) return;
+  const r = await api('/knowledge/'+KB.id, {method:'DELETE'});
+  if(r.ok){ KB = null; await loadKbs(); } else alert(r.data.detail||'删除失败');
+}
+async function deleteDoc(id){
+  if(!confirm('确定删除该文档？')) return;
+  const r = await api('/documents/'+id, {method:'DELETE'});
+  if(r.ok) loadDocs(); else alert(r.data.detail||'删除失败');
 }
 async function upload(){
   const file = document.getElementById('fileIn').files[0];
   if(!file || !KB){ alert('请先选文件与知识库'); return; }
+  let overwrite = false;
+  const dup = DOCS.find(d=>d.filename === file.name);
+  if(dup){
+    if(!confirm('知识库中已有同名文档「'+file.name+'」\n【确定】=覆盖重传，【取消】=跳过')) return;
+    overwrite = true;
+  }
   const fd = new FormData(); fd.append('file', file);
-  const r = await fetch(`${API}/documents?kb_id=${KB.id}`, {method:'POST', headers:{'Authorization':'Bearer '+TOKEN}, body:fd});
+  const r = await fetch(`${API}/documents?kb_id=${KB.id}&overwrite=${overwrite}`, {method:'POST', headers:{'Authorization':'Bearer '+TOKEN}, body:fd});
   const d = await r.json();
-  if(d.status==='indexed') alert('已入库 '+d.filename+'，分块 '+d.chunk_count);
-  else alert('处理失败：'+d.error);
-  loadDocs();
+  if(d.status==='indexed'){ alert('已入库 '+d.filename+'，分块 '+d.chunk_count); loadDocs(); }
+  else if(d.status==='processing' || d.status==='pending'){ loadDocs(); pollDoc(d.id); }
+  else if(d.error) alert('处理失败：'+d.error);
+}
+function pollDoc(id){
+  let tries = 0;
+  const t = setInterval(async () => {
+    tries++;
+    await loadDocs();
+    const doc = DOCS.find(x=>x.id===id);
+    if(!doc || doc.status==='indexed' || doc.status==='failed' || tries>150){
+      clearInterval(t);
+      if(doc && doc.status==='indexed') alert('已入库 '+doc.filename+'，分块 '+doc.chunk_count);
+      if(doc && doc.status==='failed') alert('处理失败：'+doc.error);
+    }
+  }, 2000);
 }
 async function loadDocs(){
   if(!KB) return;
   const r = await api('/documents?kb_id='+KB.id);
-  document.getElementById('docsBox').innerHTML = (r.data||[]).map(d=>`<div class="list-item"><span>${esc(d.filename)}</span><span>${d.status} · ${d.chunk_count}块</span></div>`).join('') || '（暂无文档）';
+  const arr = r.data || [];
+  const seen = {}; DOCS = [];
+  for(const d of arr){ if(!seen[d.filename]){ seen[d.filename]=true; DOCS.push(d); } } // 同名只留最新一条
+  document.getElementById('docsBox').innerHTML = DOCS.map(d=>`<div class="list-item"><span>${esc(d.filename)}</span><span>${d.status} · ${d.chunk_count}块 <button class="ghost" onclick="deleteDoc('${d.id}')">删</button></span></div>`).join('') || '（暂无文档）';
 }
 function addMsg(role, text){
   const box = document.getElementById('chatBox');
@@ -153,7 +203,7 @@ async function ask(){
   if(!q || !KB){ alert('请输入问题'); return; }
   addMsg('user', q);
   const aiDiv = addMsg('ai', '思考中…');
-  const resp = await fetch(`${API}/chat/stream`, {method:'POST', headers:h({}), body:JSON.stringify({kb_id:KB.id, question:q, stream:true})});
+  const resp = await fetch(`${API}/chat/stream`, {method:'POST', headers:h({}), body:JSON.stringify({kb_id:KB.id, question:q, session_id:SESSION, stream:true})});
   const reader = resp.body.getReader(); const dec = new TextDecoder(); let buf=''; let answer=''; let sources=[];
   while(true){
     const {done, value} = await reader.read();
@@ -166,7 +216,7 @@ async function ask(){
       if(payload==='[DONE]') continue;
       try{
         const ev = JSON.parse(payload);
-        if(ev.type==='sources') sources = ev.data;
+        if(ev.type==='sources'){ sources = ev.data; if(ev.session_id) SESSION = ev.session_id; }
         else if(ev.type==='delta'){ answer += ev.text; aiDiv.innerHTML = '助手：'+esc(answer); aiDiv.scrollIntoView(); }
         else if(ev.type==='done'){ finalize(aiDiv, answer, sources, ev.message_id); }
       }catch(e){}

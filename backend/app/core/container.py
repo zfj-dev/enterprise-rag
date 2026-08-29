@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from app.config import get_settings
 from app.core.bm25 import InMemoryBm25
+from app.core.cache import SemanticCache
 from app.core.chunker import ParentChildChunker
 from app.core.embedding import EmbeddingModel, get_embedding
 from app.core.llm import LLM, get_llm
@@ -24,6 +25,7 @@ class Runtime:
     chunker: ParentChildChunker
     parser: ParserRouter
     retriever: HybridRetriever
+    semantic_cache: SemanticCache
 
 
 def build_runtime() -> Runtime:
@@ -36,5 +38,7 @@ def build_runtime() -> Runtime:
     chunker = ParentChildChunker()
     parser = ParserRouter()
     retriever = HybridRetriever(vector_store=vector_store, bm25=bm25, embedding=embedding, reranker=reranker)
+    semantic_cache = SemanticCache(embedding=embedding)
     return Runtime(embedding=embedding, vector_store=vector_store, bm25=bm25,
-                   reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever)
+                   reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever,
+                   semantic_cache=semantic_cache)
