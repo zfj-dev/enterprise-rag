@@ -23,6 +23,7 @@
 ## 下一步
 - 重启 run_real → 重新上传论文体验 docling 提速（~90s → 15-25s 预期）
 - 路线图 P1 余项：pgvector 持久化 或 前端 Markdown 渲染升级
+- 泛化枚举（所有表格/图片/公式…）已支持（chat_service._enum_intent + _TYPE_RULES）
 - 已知遗留：docling 解析页码全为"第1页"（markdown 导出不保留分页），引用页码不准，后续优化
 
 ## 注意

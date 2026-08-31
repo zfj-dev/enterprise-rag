@@ -1,8 +1,10 @@
 """问答管线：问题优化 → 混合检索 → 引用校验 → Prompt → LLM 生成 → 持久化会话/消息/反馈。"""
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass, field
-from typing import Iterator
+from typing import Callable, Iterator
 
 from sqlalchemy.orm import Session
 
@@ -68,6 +70,119 @@ def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
     return pairs
 
 
+# ---------- 泛化"枚举某类内容"（表/图/公式/代码…） ----------
+# ---------- 泛化"枚举某类内容"（表/图/公式/代码…） ----------
+_ENUM_SIGNALS = ("所有", "全部", "列出", "列举", "有哪些", "哪些", "都有", "给出", "给我", "汇总", "统计")
+
+
+def _looks_like_table(content: str) -> bool:
+    lines = (content or "").splitlines()
+    if sum(1 for ln in lines if ln.lstrip().startswith("|")) >= 2:
+        return True
+    return bool(re.match(r"^(表|Table)\s*\d", (content or "").strip(), re.IGNORECASE))
+
+
+def _looks_like_figure(content: str) -> bool:
+    c = content or ""
+    if "<!-- image -->" in c or "<!-- figure" in c.lower():
+        return True
+    return bool(re.match(r"^(图|Fig)", c.strip(), re.IGNORECASE))
+
+
+def _looks_like_formula(content: str) -> bool:
+    c = content or ""
+    if "formula" in c.lower() and "<!--" in c:
+        return True
+    return bool(re.search(r"\$\$|\\begin\{", c))
+
+
+def _looks_like_code(content: str) -> bool:
+    c = content or ""
+    return "```" in c or "<!-- code" in c.lower()
+
+
+# (类别名, 查询关键词正则, 具体编号排除正则, chunk 判定函数)
+_TYPE_RULES: list[tuple[str, "re.Pattern", "re.Pattern | None", Callable[[str], bool]]] = [
+    ("table",
+     re.compile(r"表|表格|table", re.IGNORECASE),
+     re.compile(r"(表|表格)\s*\d|table\s*\d", re.IGNORECASE),
+     _looks_like_table),
+    ("figure",
+     re.compile(r"图|图片|图像|figure|fig", re.IGNORECASE),
+     re.compile(r"图\s*\d|figure\s*\d", re.IGNORECASE),
+     _looks_like_figure),
+    ("formula",
+     re.compile(r"公式|equation|formula", re.IGNORECASE),
+     re.compile(r"公式\s*[（(]?\s*\d|equation\s*\d", re.IGNORECASE),
+     _looks_like_formula),
+    ("code",
+     re.compile(r"代码|code|程序", re.IGNORECASE),
+     None,
+     _looks_like_code),
+]
+
+
+def _enum_intent(question: str) -> str | None:
+    """检测"枚举某类内容"意图，返回类别名（table/figure/…），否则 None。
+
+    规则：问题含枚举信号词（所有/列出/有哪些/汇总…）且命中某类别关键词，
+    但不是具体编号引用（表3.1/图2.1）→ 属于具体引用，走普通检索。
+    """
+    q = question or ""
+    if not any(s in q for s in _ENUM_SIGNALS):
+        return None
+    for name, kw_re, specific_re, _ in _TYPE_RULES:
+        if kw_re.search(q) and not (specific_re and specific_re.search(q)):
+            return name
+    return None
+
+
+def _classifier_for(category: str) -> Callable[[str], bool]:
+    for name, _, _, classifier in _TYPE_RULES:
+        if name == category:
+            return classifier
+    return lambda c: False
+
+
+def _load_typed_chunks(db: Session, kb_id: str, owner_id: str, classifier: Callable[[str], bool], limit: int = 15) -> list[dict]:
+    """从库里取出命中某分类器的 child chunk，按页序，最多 limit 条。"""
+    from app.models.entities import Chunk, Document
+
+    rows = (db.query(Chunk, Document.filename)
+            .join(Document, Chunk.doc_id == Document.id)
+            .filter(Chunk.kb_id == kb_id, Chunk.owner_id == owner_id,
+                    Chunk.chunk_type == "child")
+            .order_by(Chunk.page_num.asc(), Chunk.id.asc())
+            .all())
+    out: list[dict] = []
+    for r, doc_name in rows:
+        if not classifier(r.content):
+            continue
+        out.append({
+            "chunk_id": r.id,
+            "content": r.content,
+            "parent_content": r.parent_content,
+            "metadata": {
+                "kb_id": kb_id, "owner_id": owner_id, "doc_name": doc_name or "未知文档",
+                "page_num": r.page_num, "content": r.content,
+            },
+            "rank_score": 1.0,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _merge_typed_candidates(base: list[dict], typed: list[dict], max_total: int = 25) -> list[dict]:
+    seen = {c["chunk_id"] for c in base}
+    merged = list(base)
+    for t in typed:
+        if t["chunk_id"] not in seen:
+            seen.add(t["chunk_id"])
+            merged.append(t)
+    return merged[:max_total]
+
+
 def _to_sources(candidates: list[dict]) -> list[dict]:
     out = []
     for c in candidates:
@@ -88,6 +203,11 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     history = _load_history(db, sess.id, limit=6)
     q2 = _maybe_rewrite(rt, question, history)
     candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
+    cat = _enum_intent(question)
+    if cat:
+        typed = _load_typed_chunks(db, kb_id, user.id, _classifier_for(cat))
+        if typed:
+            candidates = _merge_typed_candidates(candidates, typed)
     ccit = validate_sources(candidates)
     context = format_context(candidates)
     prompt = build_prompt(question, context, history=history)
