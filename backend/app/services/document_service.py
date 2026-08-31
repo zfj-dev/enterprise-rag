@@ -14,6 +14,20 @@ from app.core.source_docs import make_meta
 from app.core.vector_store import VectorItem
 from app.models.entities import Chunk, Document
 
+# 上传处理进度（0-100，内存态；重启后按 DB status 判断）
+_PROGRESS: dict[str, int] = {}
+
+
+def _set_progress(doc_id: str, val: int) -> None:
+    _PROGRESS[doc_id] = val
+
+
+def get_progress(doc_id: str) -> int:
+    """返回处理进度；非处理中（indexed/failed/不存在）返回 100/0。"""
+    if doc_id in _PROGRESS:
+        return _PROGRESS[doc_id]
+    return 100
+
 
 def _index_units(rt: Runtime, child_units: list[dict], doc: Document) -> None:
     """把子块同时写入向量库 + BM25（含元数据：kb/owner/doc/page/content）。"""
@@ -33,10 +47,13 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
     try:
         doc.status = "processing"
         db.commit()
+        _set_progress(doc.id, 5)
         if not os.path.exists(doc.file_path):
             raise FileNotFoundError(doc.file_path)
+        _set_progress(doc.id, 15)
 
         parsed = rt.parser.parse(doc.file_path, doc.filename)
+        _set_progress(doc.id, 35)
         if parsed.metadata.get("error"):
             raise ValueError(f"解析失败: {parsed.metadata['error']}")
         doc.page_count = parsed.page_count
@@ -51,6 +68,7 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
             all_chunks.extend(rt.chunker.chunk(page_text, doc_id=doc.id, page_num=pidx))
 
         child_units = [c for c in all_chunks if c["chunk_type"] == "child"]
+        _set_progress(doc.id, 55)
         print(f"[doc] {doc.filename}: pages={doc.page_count} all_chunks={len(all_chunks)} child={len(child_units)}")
 
         # 写关系库
@@ -64,17 +82,21 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
 
         import time as _t
         t0 = _t.time()
+        _set_progress(doc.id, 70)
         _index_units(rt, child_units, doc)
         print(f"[doc] {doc.filename}: embed+index {len(child_units)} chunks in {_t.time()-t0:.1f}s")
+        _set_progress(doc.id, 95)
         doc.chunk_count = len(child_units)
         doc.status = "indexed"
         db.commit()
+        _set_progress(doc.id, 100)
     except Exception as e:  # noqa
         print(f"[doc] {doc.filename} FAILED: {e}")
         try:
             db.rollback()
         except Exception:
             pass
+        _set_progress(doc.id, 0)
         try:
             d2 = db.get(Document, doc.id)
             if d2:

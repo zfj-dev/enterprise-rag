@@ -18,7 +18,8 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 def _to_out(d: Document) -> DocumentOut:
     return DocumentOut(id=d.id, filename=d.filename, status=d.status,
-                       page_count=d.page_count, chunk_count=d.chunk_count, error=d.error)
+                       page_count=d.page_count, chunk_count=d.chunk_count, error=d.error,
+                       progress=document_service.get_progress(d.id))
 
 
 @router.post("", response_model=DocumentOut)

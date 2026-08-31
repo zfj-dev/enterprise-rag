@@ -93,7 +93,7 @@ def _looks_like_formula(content: str) -> bool:
     c = content or ""
     if "formula" in c.lower() and "<!--" in c:
         return True
-    return bool(re.search(r"\$\$|\\begin\{", c))
+    return bool(re.search(r"\$|\\begin\{|\\(", c))
 
 
 def _looks_like_code(content: str) -> bool:
@@ -144,7 +144,7 @@ def _classifier_for(category: str) -> Callable[[str], bool]:
     return lambda c: False
 
 
-def _load_typed_chunks(db: Session, kb_id: str, owner_id: str, classifier: Callable[[str], bool], limit: int = 15) -> list[dict]:
+def _load_typed_chunks(db: Session, kb_id: str, owner_id: str, classifier: Callable[[str], bool], limit: int = 40) -> list[dict]:
     """从库里取出命中某分类器的 child chunk，按页序，最多 limit 条。"""
     from app.models.entities import Chunk, Document
 
@@ -173,7 +173,7 @@ def _load_typed_chunks(db: Session, kb_id: str, owner_id: str, classifier: Calla
     return out
 
 
-def _merge_typed_candidates(base: list[dict], typed: list[dict], max_total: int = 25) -> list[dict]:
+def _merge_typed_candidates(base: list[dict], typed: list[dict], max_total: int = 50) -> list[dict]:
     seen = {c["chunk_id"] for c in base}
     merged = list(base)
     for t in typed:
@@ -201,26 +201,36 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
             session_id: str | None = None) -> Prep:
     sess = _get_or_create_session(db, user, kb_id, session_id)
     history = _load_history(db, sess.id, limit=6)
-    q2 = _maybe_rewrite(rt, question, history)
-    candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
     cat = _enum_intent(question)
+    # 枚举类问题本身已完整清晰：跳过 LLM 改写，避免历史污染查询
+    q2 = question if cat else _maybe_rewrite(rt, question, history)
+    candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
+    enum_hint = None
     if cat:
         typed = _load_typed_chunks(db, kb_id, user.id, _classifier_for(cat))
         if typed:
             candidates = _merge_typed_candidates(candidates, typed)
+        cat_names = {"table": "表格", "figure": "图片/图", "formula": "公式", "code": "代码"}
+        enum_hint = (f"当前问题要求枚举/列出所有【{cat_names.get(cat, cat)}】。"
+                     f"请严格依据【参考资料】中对应类型的块，逐一列出其编号、标题和完整内容，不要遗漏；"
+                     f"历史对话中的列表仅作上下文参考，不要重复其中的其他类型内容。")
     ccit = validate_sources(candidates)
     context = format_context(candidates)
-    prompt = build_prompt(question, context, history=history)
+    prompt = build_prompt(question, context, history=history, enum_hint=enum_hint)
 
     user_msg = ChatMessage(session_id=sess.id, role="user", content=question)
     db.add(user_msg)
     db.commit()
     db.refresh(user_msg)
+    if not sess.title:  # 自动标题：取首个问题前 30 字
+        sess.title = question.strip().replace("\n", " ")[:30] or "新对话"
+        db.commit()
 
     return Prep(
         session_id=sess.id, user=user, kb_id=kb_id, question=question, rewrite=q2,
         candidates=candidates, sources=_to_sources(candidates), prompt=prompt, _ccit=ccit,
         trace={"query": question, "rewrite": q2, "history_turns": len(history),
+               "enum_cat": cat, "candidates": len(candidates),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
 

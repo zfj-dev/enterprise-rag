@@ -48,6 +48,11 @@ class BgeReranker(Reranker):
         self.model = AutoModelForSequenceClassification.from_pretrained(model_name or s.reranker_model)
         self.model.to(self.device)
         self.model.eval()
+        if self.device == "cuda":
+            try:
+                self.model = self.model.half()  # fp16 加速重排
+            except Exception:
+                pass
 
     def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
         pairs = [(query, c.get("content", "")) for c in candidates]

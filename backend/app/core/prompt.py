@@ -19,6 +19,7 @@ def build_prompt(
     history: Sequence[dict] | None = None,
     graph_context: str | None = None,
     system: str = SYSTEM_PROMPT,
+    enum_hint: str | None = None,
 ) -> str:
     parts = [system]
     if context:
@@ -30,6 +31,8 @@ def build_prompt(
         for h in history[-3:]:
             lines.append(f"用户：{h.get('user', '')}\n助手：{h.get('assistant', '')}")
         parts.append("【历史对话】\n" + "\n".join(lines))
+    if enum_hint:
+        parts.append(f"【注意】{enum_hint}")
     parts.append(f"【用户问题】\n{query}")
     return "\n\n".join(parts)
 

@@ -56,6 +56,11 @@ class BgeEmbedding(EmbeddingModel):
             dev = "cpu"
         print(f"[bge] embedding device={dev} model={model_name or s.embedding_model}")
         self.model = SentenceTransformer(model_name or s.embedding_model, device=dev)
+        if dev == "cuda":
+            try:
+                self.model = self.model.half()  # fp16 加速嵌入
+            except Exception:
+                pass
         try:
             self.dim = self.model.get_embedding_dimension()   # 新版 API
         except AttributeError:

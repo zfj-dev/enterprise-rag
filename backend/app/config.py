@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     llm_api_key: str | None = None
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.1
-    llm_max_tokens: int = 1024
+    llm_max_tokens: int = 2048  # 枚举/长回答不截断
 
     chunk_parent_size: int = 512
     chunk_child_size: int = 128
@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     rrf_k: int = 60
 
     parser_use_docling: bool = True  # 装了 docling 且 PDF 走它(表格/版面更好)，否则回退 PyMuPDF
+    docling_images_scale: float = 1.0  # docling 版面分析图像倍率；0.5=更快但小表格/图可能漏
+    docling_table_mode: str = "accurate"  # accurate=更准/fast=更快
+    docling_formula_enrichment: bool = False  # 公式增强(解码公式为LaTeX)，需下 CodeFormulaV2 ~630MB，解析变慢
     semantic_cache: bool = True
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None

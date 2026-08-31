@@ -47,7 +47,7 @@ def _build_docling_converter():
     """
     from docling.document_converter import DocumentConverter, PdfFormatOption  # 惰性
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, TableStructureOptions
     from docling.datamodel.accelerator_options import AcceleratorOptions
     from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
 
@@ -57,6 +57,9 @@ def _build_docling_converter():
         dev = "cuda" if torch.cuda.is_available() else "cpu"
     pipe_opts = PdfPipelineOptions(
         do_ocr=False,  # 文本型 PDF 不需要 OCR（大提速）
+        do_formula_enrichment=get_settings().docling_formula_enrichment,
+        images_scale=get_settings().docling_images_scale,
+        table_structure_options=TableStructureOptions(mode=get_settings().docling_table_mode),
         accelerator_options=AcceleratorOptions(device=dev, num_threads=8),
     )
     print(f"[doc] docling converter: device={dev} ocr=False")
