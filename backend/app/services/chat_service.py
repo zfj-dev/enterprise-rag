@@ -183,6 +183,49 @@ def _merge_typed_candidates(base: list[dict], typed: list[dict], max_total: int 
     return merged[:max_total]
 
 
+def _named_ref_intent(question: str) -> list[tuple[str, str, str | None]]:
+    """检测具体编号引用（表3.2 / 图 3 . 1 / 公式1），返回 [(前缀, 主号, 副号)]。"""
+    out = []
+    for m in re.finditer(r"(表|表格|图|公式)\s*(\d+)\s*(?:[.\-]\s*(\d+))?", question or ""):
+        out.append((m.group(1), m.group(2), m.group(3)))
+    return out
+
+
+def _load_named_chunks(db: Session, kb_id: str, owner_id: str, prefix: str, n1: str, n2: str | None, limit: int = 3) -> list[dict]:
+    """按具体编号引用（如表3.2）取 chunk：优先表格（含 | 行），其次含引用的句子。"""
+    from app.models.entities import Chunk, Document
+    key = f"{prefix}{n1}.{n2}" if n2 else f"{prefix}{n1}"
+    rows = (db.query(Chunk, Document.filename)
+            .join(Document, Chunk.doc_id == Document.id)
+            .filter(Chunk.kb_id == kb_id, Chunk.owner_id == owner_id, Chunk.chunk_type == "child")
+            .all())
+    tables: list[dict] = []
+    refs: list[dict] = []
+    for r, doc_name in rows:
+        compact = re.sub(r"\s+", "", r.content or "")
+        if key not in compact:
+            continue
+        entry = {
+            "chunk_id": r.id, "content": r.content, "parent_content": r.parent_content,
+            "metadata": {"kb_id": kb_id, "owner_id": owner_id, "doc_name": doc_name or "未知文档",
+                         "page_num": r.page_num, "content": r.content},
+            "rank_score": 2.0,
+        }
+        (tables if ("|" in r.content or _looks_like_table(r.content)) else refs).append(entry)
+    return (tables[:2] + refs[:1])[:limit]
+
+
+def _prepend_named(base: list[dict], named: list[dict], max_total: int = 20) -> list[dict]:
+    """把按编号命中的 chunk 前置到候选首位（LLM 优先看到正确表格）。"""
+    seen = {c["chunk_id"] for c in named}
+    merged = list(named)
+    for c in base:
+        if c["chunk_id"] not in seen:
+            seen.add(c["chunk_id"])
+            merged.append(c)
+    return merged[:max_total]
+
+
 def _to_sources(candidates: list[dict]) -> list[dict]:
     out = []
     for c in candidates:
@@ -202,8 +245,9 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     sess = _get_or_create_session(db, user, kb_id, session_id)
     history = _load_history(db, sess.id, limit=6)
     cat = _enum_intent(question)
-    # 枚举类问题本身已完整清晰：跳过 LLM 改写，避免历史污染查询
-    q2 = question if cat else _maybe_rewrite(rt, question, history)
+    refs = [r for r in _named_ref_intent(question) if r[0] in ("表", "表格", "图", "公式")]
+    # 枚举/具体编号类问题本身完整清晰：跳过 LLM 改写，避免历史污染查询
+    q2 = question if (cat or refs) else _maybe_rewrite(rt, question, history)
     candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
     enum_hint = None
     if cat:
@@ -212,8 +256,23 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
             candidates = _merge_typed_candidates(candidates, typed)
         cat_names = {"table": "表格", "figure": "图片/图", "formula": "公式", "code": "代码"}
         enum_hint = (f"当前问题要求枚举/列出所有【{cat_names.get(cat, cat)}】。"
-                     f"请严格依据【参考资料】中对应类型的块，逐一列出其编号、标题和完整内容，不要遗漏；"
+                     f"请严格依据【参考资料】中对应类型的块，逐一列出其编号（如 表3.1、表3.2、表4.1 等）、标题和完整内容，"
+                     f"凡是以'表'+数字编号的都要包含，不要因任何理由遗漏；"
+                     f"若提到数量，数量必须与列出的条目一一对应，不确定时不要输出数量；"
                      f"历史对话中的列表仅作上下文参考，不要重复其中的其他类型内容。")
+    # 具体编号引用（表3.2/图3.1）：强制注入含该编号的 chunk 并前置，避免"如表3.3所示"等句子抢位
+    if refs:
+        for prefix, n1, n2 in refs:
+            named = _load_named_chunks(db, kb_id, user.id, prefix, n1, n2)
+            if named:
+                candidates = _prepend_named(candidates, named)
+        # 只保留含该编号的候选，避免 LLM 被其他表格/段落带偏（选错表）
+        keys = [f"{r[0]}{r[1]}{'.' + r[2] if r[2] else ''}" for r in refs]
+        candidates = [c for c in candidates
+                      if any(k in re.sub(r"\s+", "", c.get("content", "") or "") for k in keys)]
+        ref_str = ", ".join(keys)
+        enum_hint = (f"当前问题要求的是【{ref_str}】的具体内容。"
+                     f"请严格依据【参考资料】中该编号对应的块回答，不要引用历史对话中的其他表格/图片/内容。")
     ccit = validate_sources(candidates)
     context = format_context(candidates)
     prompt = build_prompt(question, context, history=history, enum_hint=enum_hint)
@@ -238,8 +297,11 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
 def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。"""
     yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
+    # 精确编号引用（表3.1 vs 表3.3 只差数字）跳过语义缓存，避免返回相似问题的旧答案
+    precise = bool(_named_ref_intent(prep.question))
+    use_cache = get_settings().semantic_cache and not precise
     cache_hit = False
-    if get_settings().semantic_cache:
+    if use_cache:
         hit = rt.semantic_cache.get(prep.question, prep.kb_id)
         if hit:
             cache_hit = True
@@ -249,7 +311,7 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
         for piece in rt.llm.stream([{"role": "user", "content": prep.prompt}]):
             chunks.append(piece)
             yield {"type": "delta", "text": piece}
-        if get_settings().semantic_cache:
+        if use_cache:
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
     answer = "".join(chunks) if not cache_hit else hit["answer"]
     answer = apply_no_source_no_claim(answer, prep._ccit)

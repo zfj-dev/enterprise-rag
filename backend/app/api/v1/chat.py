@@ -65,6 +65,33 @@ def get_session(session_id: str, user: User = Depends(get_current_user), db: Ses
             "messages": [{"role": m.role, "content": m.content} for m in msgs]}
 
 
+@router.patch("/sessions/{session_id}")
+def rename_session(session_id: str, body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """重命名会话标题。"""
+    from fastapi import HTTPException
+    s = db.get(ChatSession, session_id)
+    if not s or s.user_id != user.id:
+        raise HTTPException(404, "会话不存在")
+    title = (body.get("title") or "").strip()[:50]
+    if title:
+        s.title = title
+        db.commit()
+    return {"ok": True, "title": s.title}
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """删除会话及其消息。"""
+    from fastapi import HTTPException
+    s = db.get(ChatSession, session_id)
+    if not s or s.user_id != user.id:
+        raise HTTPException(404, "会话不存在")
+    db.query(ChatMessage).filter(ChatMessage.session_id == s.id).delete()
+    db.delete(s)
+    db.commit()
+    return {"ok": True}
+
+
 @router.get("/history")
 def chat_history(kb_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """取该知识库最近会话及消息，供刷新页面后恢复对话。"""

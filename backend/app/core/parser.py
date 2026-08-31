@@ -89,15 +89,32 @@ def _parse_pdf_docling(path: str):
     pdf_resources/glyphs/standard/additional.dat（字体表）导致 RuntimeError；
     pdfium 不依赖该文件，版面/表格仍走 StandardPdfPipeline（需 onnxruntime）。
     复用模块级 converter：模型只加载一次，后续解析只需推理。
+
+    按页导出 markdown（export_to_markdown(page_no=...)），使 chunk 带真实页码，
+    引用溯源不再全显示"第1页"。
     """
     import os
 
     converter = _get_docling_converter()
     with _docling_lock:
         res = converter.convert(os.path.abspath(path))  # 绝对路径更稳
-    md = res.document.export_to_markdown()
-    page_count = len(getattr(res.document, "pages", None) or []) or 1
-    return ParsedDocument(text=md, page_count=page_count, pages=[md], metadata={"kind": "pdf", "parser": "docling"})
+
+    pages_map = getattr(res.document, "pages", None) or {}
+    page_objs = list(pages_map.values()) if isinstance(pages_map, dict) else list(pages_map)
+    page_count = len(page_objs) or 1
+    pages: list[str] = []
+    for p in page_objs:
+        pno = getattr(p, "page_no", None)
+        try:
+            md_page = res.document.export_to_markdown(page_no=pno) if pno is not None else ""
+        except Exception:  # noqa
+            md_page = ""
+        pages.append(md_page or "")  # 空页保留占位，保证 page_num 与真实页一致
+    if not any(pg.strip() for pg in pages):  # 极端兜底：整篇单段
+        pages = [res.document.export_to_markdown()]
+    text = "\n\n".join(pages)
+    return ParsedDocument(text=text, page_count=page_count, pages=pages,
+                          metadata={"kind": "pdf", "parser": "docling"})
 
 
 def _parse_pdf(path: str):

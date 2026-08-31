@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     contextual_summary: bool = True
 
     retrieval_top_k: int = 20
-    rerank_top_k: int = 5
+    rerank_top_k: int = 3  # 上下文/来源宽度（具体查询更聚焦）
     min_relevance: float = 0.4
     rrf_k: int = 60
 

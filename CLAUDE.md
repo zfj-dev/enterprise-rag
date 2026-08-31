@@ -77,3 +77,8 @@ AI 求职 + 真给身边人用的**私有化 RAG 文档问答**，单人独立�
 - **UI 重构（2026-08-30）**：前端 `frontend/index.html` 重写为三栏响应式布局（左侧会话边栏 + 中央对话 + 右侧文档/参数面板），支持深色模式、会话历史列表（`GET /chat/sessions` + `/sessions/{id}`）、消息气泡 + Markdown 渲染、流式打字光标、上传进度条、快捷提问卡片、会话自动标题（取首个问题前 30 字）。聊天记录存 localStorage 刷新恢复。
 - **docling 调优配置（2026-08-30）**：`docling_images_scale`(0.5 更快但小表格/图可能漏)、`docling_table_mode`(accurate/fast)、`docling_formula_enrichment`(默认关；开启用 CodeFormulaV2 VLM ~630MB 解码公式为 LaTeX，解析变慢 10-40s)。公式分类器已支持 `$`/`\begin{}` 识别。默认保持表格质量。
 - **上传提速（2026-08-30）**：docling 84s→37s（46页，do_ocr=False + GPU + converter 缓存）；bge 嵌入/重排 fp16（cuda 下）；onnxruntime-gpu 对本管线无效（docling 布局/表格模型均为 torch，已走 GPU）。
+- **具体表号/图号检索修复（2026-08-30）**：
+  - **① 语义缓存串台（根因）**："表3.1的内容是什么"与"表3.3的内容是什么"的 bge 向量相似度 >0.92，命中语义缓存返回**同一旧答案** → 表N 互相串。修法：`stream_answer` 对含精确编号引用（`_named_ref_intent`）的问题**跳过语义缓存**。
+  - **② 强制注入 + 过滤**：具体表号（表3.2/图3.1）查询时 `_load_named_chunks` 注入含该编号的 chunk（表格优先），再**过滤只保留含该编号的候选**，LLM 看不到其他表格 → 不会选错。
+  - **③ 枚举提示加强**：要求列出所有"表+数字"编号的表格（含表4.x），数量必须与列出的一一对应，不确定不报数。
+  - 会话重命名/删除接口：`PATCH/DELETE /chat/sessions/{id}`。
