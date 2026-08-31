@@ -36,3 +36,6 @@ Thumbs.db
 # 用户测试文件（论文 PDF）
 backend/paper.pdf
 backend/verify_paper.pdf
+
+# 本地运行脚本（含真实 API Key，复制自 run_real.ps1.example）
+scripts/run_real.ps1

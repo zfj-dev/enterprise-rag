@@ -16,7 +16,7 @@ services:
       - RERANKER_PROVIDER=fake
       - LLM_PROVIDER=openai
       - LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-      - LLM_API_KEY=sk-ws-H.ELRPLRR.ex4P.MEUCIEWZNJT0xbwtUrffniAIgnpxamUG62FjBpdfe0iYzJX4AiEA7ZrXL6bQ4jBwMWUpEcweB1vHF-l4Sf4VmdVOrtBiTic
+      - LLM_API_KEY=replace_with_your_key
       - LLM_MODEL=qwen-plus
       - VECTOR_STORE=inmemory
       - MAX_UPLOAD_MB=50
