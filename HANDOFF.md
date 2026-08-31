@@ -27,5 +27,5 @@
 - 已知遗留：docling 解析页码全为"第1页"（markdown 导出不保留分页），引用页码不准，后续优化
 
 ## 注意
-- **run_real.ps1 的 DashScope Key 已打码提交**，真机需重新粘贴自己的 Key 才能跑真实模式
+- **run_real.ps1 已 gitignore（含真实 Key）**：从 `scripts/run_real.ps1.example` 复制并粘贴自己的 Key；docker-compose 的 Key 也已改为占位符。⚠️ 历史提交 a919574 曾含真实 Key，已建议用户撤销旧 Key
 - `backend/paper.pdf` 与 `backend/data/golden_set.json` 均被 gitignore，未提交
