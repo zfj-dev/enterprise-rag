@@ -1,31 +1,31 @@
-# 会话交接 — 2026-08-29
+# 会话交接 — 2026-08-31
 
-## 刚完成
-- **Docling 论文表格检索全链路打通**：46页毕设论文《改进YOLOv8瓜果蔬菜识别》问"表3.1的内容是什么" → 返回 PyCharm/Windows11/Pytorch/CUDA12.3/RTX3060 带来源引用。
-- **GPU 生效**：torch 2.13.0+cu130（用户手动装），bge 嵌入/重排 + docling 版面模型走 GPU。
-- **真实模式自检 13/13、黄金集 4/4 全绿**（含 GPU 后复跑）。
+## 刚才在做什么
+升级黄金集评估（论文版）验证表格检索/页码/枚举修复，结果 100% 通过；刚提交 git，待推送。
 
-## 排雷记录（详见 CLAUDE.md）
-- docling_parse `additional.dat` 缺失 → `parser.py` 强制 PyPdfium 后端
-- `onnxruntime` 缺失 → requirements-real.txt 补 `onnxruntime>=1.17`
-- HF 缓存 Windows 符号链接 `WinError 1314` → `HF_HUB_DISABLE_SYMLINKS=1`
-- Xet 存储 401 → `HF_HUB_DISABLE_XET=1`
-- 表格标题与正文分离 → chunker 标题并入表格单元（单测 `test_table_caption_merged_with_blank_line`）
-- BM25 中文分词失效 → 去空白 + ASCII 整词 + 中文双字组
-- docling 慢 → `do_ocr=False` + `DOCLING_DEVICE=cuda` + 模块级 converter 缓存
-
-## 新增脚本/工具（真机排雷/调优全走"跑脚本→读报告"）
-- `scripts/`: verify_docling.ps1, diagnose_table.ps1, diagnose_retrieval.ps1, enable_gpu.ps1, fix_docling.ps1, selftest.ps1, evaluate.ps1
-- `backend/`: verify_docling.py, diagnose_table.py, diagnose_retrieval.py, selftest.py, evaluate.py
-- 报告落在 `backend/logs/*.log`
-- 测试 28/28 全绿
+## 已完成
+- ✓ 具体表号检索类修复：**根因=语义缓存串台**（表N查询 bge 相似>0.92 命中缓存返回旧答案）→ 精准编号引用跳过缓存；另加注入+过滤候选
+- ✓ docling 按页导出 markdown（export_to_markdown(page_no=)）→ 引用显示真实页码
+- ✓ 前端 UI 增强：标题重命名、删除确认弹窗、置顶分组、多选批量、模型选择器移入输入栏、'+'上弹菜单
+- ✓ 后端会话接口：`PATCH/DELETE /chat/sessions/{id}`
+- ✓ 黄金集评估升级（论文版 10 问）：答案含期望事实 100% / 忠实度 100% / 页码正确 100%
+- ✓ 测试 30/30 全绿；全部改动已提交 git（`10f12f2` **未推送**）
 
 ## 下一步
-- 重启 run_real → 重新上传论文体验 docling 提速（~90s → 15-25s 预期）
-- 路线图 P1 余项：pgvector 持久化 或 前端 Markdown 渲染升级
-- 泛化枚举（所有表格/图片/公式…）已支持（chat_service._enum_intent + _TYPE_RULES）
-- 已知遗留：docling 解析页码全为"第1页"（markdown 导出不保留分页），引用页码不准，后续优化
+1. → `git push origin main`（推送 `10f12f2`）
+2. → 公式增强（可选）：`DOCLING_FORMULA_ENRICHMENT=true`，解码公式为 LaTeX（需下 CodeFormulaV2 ~630MB，解析慢 10-40s）
+3. → pgvector 持久化（重启不丢向量，上生产，`PgVectorStore.search` 仍是适配层）
+4. → 多文档/跨库检索测试
 
-## 注意
-- **run_real.ps1 已 gitignore（含真实 Key）**：从 `scripts/run_real.ps1.example` 复制并粘贴自己的 Key；docker-compose 的 Key 也已改为占位符。⚠️ 历史提交 a919574 曾含真实 Key，已建议用户撤销旧 Key
-- `backend/paper.pdf` 与 `backend/data/golden_set.json` 均被 gitignore，未提交
+## 打开的问题
+- 公式仍显示 `<!-- formula-not-decoded -->`（未启用公式增强）
+- 语义缓存对普通问题仍开启（表N查询已跳过）
+- run_real.ps1 的 DashScope Key 已重新粘贴（gitignore，勿提交）
+
+## 活跃文件
+- `backend/app/services/chat_service.py` — 检索注入/过滤、语义缓存防串台、枚举提示
+- `backend/app/core/parser.py` — docling 按页导出、pdfium 后端、调优配置
+- `frontend/index.html` — 前端 UI（三栏/深色/会话历史/重命名/删除弹窗/置顶/多选）
+- `backend/app/api/v1/chat.py` — 会话接口（sessions/history/rename/delete）
+- `backend/evaluate.py` + `backend/data/golden_set_paper.json` — 论文黄金集评估
+- `CLAUDE.md` — 完整项目记忆（含 docling 排雷、表格修复、评估）
