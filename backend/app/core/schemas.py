@@ -39,6 +39,8 @@ class DocumentOut(BaseModel):
     chunk_count: int
     error: str = ""
     progress: int = 100  # 处理进度 0-100（仅处理中有效）
+    size: int = 0  # 文件大小(字节)
+    created_at: str = ""  # 上传时间 ISO
 
 
 # ---- Chat ----

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
@@ -43,6 +44,12 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
         sess = db.get(ChatSession, session_id)
         if sess:
             return sess
+        # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上
+        sess = ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title="")
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        return sess
     sess = ChatSession(user_id=user.id, kb_id=kb_id, title="")
     db.add(sess)
     db.commit()
@@ -93,7 +100,7 @@ def _looks_like_formula(content: str) -> bool:
     c = content or ""
     if "formula" in c.lower() and "<!--" in c:
         return True
-    return bool(re.search(r"\$|\\begin\{|\\(", c))
+    return bool(re.search(r"\$|\\begin\{|\\\(", c))
 
 
 def _looks_like_code(content: str) -> bool:
@@ -253,13 +260,27 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     if cat:
         typed = _load_typed_chunks(db, kb_id, user.id, _classifier_for(cat))
         if typed:
-            candidates = _merge_typed_candidates(candidates, typed)
+            # 枚举：typed 块按文档顺序(页码, 块内id)前置，其余检索候选缀后，引导 LLM 按"出现顺序"列
+            typed_sorted = sorted(typed, key=lambda c: (c["metadata"].get("page_num", 0), str(c.get("chunk_id", ""))))
+            in_typed = {t["chunk_id"] for t in typed}
+            candidates = typed_sorted + [c for c in candidates if c.get("chunk_id") not in in_typed]
         cat_names = {"table": "表格", "figure": "图片/图", "formula": "公式", "code": "代码"}
-        enum_hint = (f"当前问题要求枚举/列出所有【{cat_names.get(cat, cat)}】。"
-                     f"请严格依据【参考资料】中对应类型的块，逐一列出其编号（如 表3.1、表3.2、表4.1 等）、标题和完整内容，"
-                     f"凡是以'表'+数字编号的都要包含，不要因任何理由遗漏；"
-                     f"若提到数量，数量必须与列出的条目一一对应，不确定时不要输出数量；"
-                     f"历史对话中的列表仅作上下文参考，不要重复其中的其他类型内容。")
+        if cat == "formula":
+            enum_hint = ("当前问题要求枚举/列出所有【公式】。"
+                         "请严格按照【参考资料】中公式出现的先后顺序（第X页从小到大、同页按块顺序）从前往后逐一列出，每条标注所在【第X页】；"
+                         "凡资料中出现的公式都要列出，不要遗漏，也不要因为某条公式看起来被截断/不完整就跳过——把它当作公式候选并标注页码；"
+                         "每条公式请输出为**规范、紧凑的标准 LaTeX**：去掉多余空格、把字母间距合并（如 `S m o o t h`→`Smooth`、`\\frac { 1 } { N }`→`\\frac{1}{N}`）、"
+                         "修正明显可辨的 OCR 误读（如通道注意力应写 `M_c` 而非 `L_c`、空间注意力应写 `M_s` 而非 `O_s`、`\\textcircled{=}0.5`→`@0.5`、`\\frac{1}{c}`→`\\frac{1}{C}`）；公式内不要用 Markdown 链接/mailto 语法，直接写符号（如写 `mAP@0.5`，不要 `[mAP@0.5](mailto:...)`）；"
+                         "但**不得改变数学含义、不得臆造公式**：对确被截断的公式只保留能读到的部分、绝不补全下半截；不过若识别结果与上下文/标准定义明显不符（如漏了 `L_{IoU}`、`L_{CE}` 这类左侧标识符，或中间环节如 `= 1 - IoU =` 缺失），可依据上下文与标准数学定义把**残缺处修正为标准写法**；"
+                         "若个别字符前后文不足以确定，宁可保留原样也不要编造；"
+                         "数量与列出条目一一对应，不确定不要输出数量；历史对话中的公式列表仅作上下文参考，不要重复其中的非公式内容。"
+                         "每条公式后用 [来源: 文档名, 第X页] 标注来源（文档名用【参考资料】里的文件名，如 [来源: 毕设论文.pdf, 第18页]），不要只写 [第X页]。")
+        else:
+            enum_hint = (f"当前问题要求枚举/列出所有【{cat_names.get(cat, cat)}】。"
+                         f"请严格依据【参考资料】中对应类型的块，按出现顺序（第X页从小到大）逐一列出其编号（如 表3.1、表3.2、表4.1 等）、标题和完整内容，"
+                         f"凡是以'表'+数字编号的都要包含，不要因任何理由遗漏；"
+                         f"若提到数量，数量必须与列出的条目一一对应，不确定时不要输出数量；"
+                         f"历史对话中的列表仅作上下文参考，不要重复其中的其他类型内容。")
     # 具体编号引用（表3.2/图3.1）：强制注入含该编号的 chunk 并前置，避免"如表3.3所示"等句子抢位
     if refs:
         for prefix, n1, n2 in refs:
@@ -301,20 +322,25 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     precise = bool(_named_ref_intent(prep.question))
     use_cache = get_settings().semantic_cache and not precise
     cache_hit = False
+    hit = None
     if use_cache:
         hit = rt.semantic_cache.get(prep.question, prep.kb_id)
         if hit:
             cache_hit = True
-            yield {"type": "delta", "text": hit["answer"]}
-    if not cache_hit:
+    if cache_hit:
+        # 缓存命中：仍走"流式外观"——把答案切成小块逐条下发，前端逐段追加；禁止整块一次性插入
+        answer = apply_no_source_no_claim(hit["answer"], prep._ccit)
+        for i in range(0, len(answer), 12):
+            yield {"type": "delta", "text": answer[i:i + 12]}
+            time.sleep(0.01)
+    else:
         chunks: list[str] = []
         for piece in rt.llm.stream([{"role": "user", "content": prep.prompt}]):
             chunks.append(piece)
             yield {"type": "delta", "text": piece}
         if use_cache:
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
-    answer = "".join(chunks) if not cache_hit else hit["answer"]
-    answer = apply_no_source_no_claim(answer, prep._ccit)
+        answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
 
     if get_settings().llm_provider != "fake":  # 真实模式：逐句校验引用覆盖率
         try:

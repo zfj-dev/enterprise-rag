@@ -4,6 +4,8 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Iterator
 
+import time
+
 from app.config import get_settings
 
 FAKE_ANSWER = (
@@ -20,7 +22,10 @@ class LLM(ABC):
 
 class FakeLLM(LLM):
     def stream(self, messages: list[dict]) -> Iterator[str]:
+        delay = get_settings().fake_llm_delay
         for piece in _chunk_text(FAKE_ANSWER, 20):
+            if delay:
+                time.sleep(delay)
             yield piece
 
 

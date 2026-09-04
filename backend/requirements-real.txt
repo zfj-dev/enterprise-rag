@@ -6,6 +6,7 @@ transformers>=4.44
 torch>=2.1    # 已装 GPU 版(2.13.0+cu130)则满足；如需 GPU 用 scripts\enable_gpu.ps1
 # 复杂文档解析（表格/扫描件）
 docling>=2.0
+optimum[onnxruntime]   # 公式图片→LaTeX：TrOCR 模型 breezedeus/pix2text-mfr 的 optimum-onnx 版，走 HF/hf-mirror，GPU/CPU 可跑
 paddleocr>=2.7
 paddlepaddle>=2.6
 # pgvector / postgres 驱动

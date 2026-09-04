@@ -19,6 +19,11 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 @router.post("/stream")
 def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
                 db: Session = Depends(get_db), rt: Runtime = Depends(get_runtime)):
+    if body.session_id:
+        s = db.get(ChatSession, body.session_id)
+        if s and s.user_id != user.id:
+            from fastapi import HTTPException
+            raise HTTPException(404, "会话不存在")
     prep = prepare(db, rt, user, body.kb_id, body.question, body.session_id)
 
     def gen():

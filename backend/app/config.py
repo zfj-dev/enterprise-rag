@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.1
     llm_max_tokens: int = 2048  # 枚举/长回答不截断
+    fake_llm_delay: float = 0.0  # FakeLLM 每块延时(秒)，默认0不延时；设>0 便于演示/测试肉眼观察流式与"停止"
 
     chunk_parent_size: int = 512
     chunk_child_size: int = 128
@@ -58,7 +59,8 @@ class Settings(BaseSettings):
     parser_use_docling: bool = True  # 装了 docling 且 PDF 走它(表格/版面更好)，否则回退 PyMuPDF
     docling_images_scale: float = 1.0  # docling 版面分析图像倍率；0.5=更快但小表格/图可能漏
     docling_table_mode: str = "accurate"  # accurate=更准/fast=更快
-    docling_formula_enrichment: bool = False  # 公式增强(解码公式为LaTeX)，需下 CodeFormulaV2 ~630MB，解析变慢
+    docling_formula_enrichment: bool = False  # 锁定=关：Docling 能从文本层抽原始公式文本($$..$$)，企业文档公式少，不上 CodeFormulaV2 VLM
+    docling_formula_ocr: bool = True  # 公式图片→LaTeX：用 pix2tex 裁图识别(轻量,CPU可跑)；未装 pix2tex 或识别失败自动跳过
     semantic_cache: bool = True
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None

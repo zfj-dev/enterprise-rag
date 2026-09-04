@@ -17,9 +17,16 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 def _to_out(d: Document) -> DocumentOut:
+    size = 0
+    try:
+        if d.file_path and os.path.exists(d.file_path):
+            size = os.path.getsize(d.file_path)
+    except Exception:
+        size = 0
     return DocumentOut(id=d.id, filename=d.filename, status=d.status,
                        page_count=d.page_count, chunk_count=d.chunk_count, error=d.error,
-                       progress=document_service.get_progress(d.id))
+                       progress=document_service.get_progress(d.id), size=size,
+                       created_at=d.created_at.isoformat() if d.created_at else "")
 
 
 @router.post("", response_model=DocumentOut)
@@ -70,6 +77,46 @@ def doc_status(doc_id: str, user: User = Depends(get_current_user), db: Session 
     doc = db.get(Document, doc_id)
     if not doc or doc.owner_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
+    return _to_out(doc)
+
+
+@router.get("/{doc_id}/content")
+def doc_content(doc_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """按页返回文档文本（由 parent chunk 重建），供前端"点击来源-定位"用。"""
+    doc = db.get(Document, doc_id)
+    if not doc or doc.owner_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
+    rows = (db.query(Chunk).filter(Chunk.doc_id == doc_id, Chunk.chunk_type == "parent")
+            .order_by(Chunk.page_num.asc(), Chunk.id.asc()).all())
+    pages: dict[int, list[str]] = {}
+    for c in rows:
+        pages.setdefault(c.page_num, []).append(c.content or "")
+    return {"filename": doc.filename,
+            "pages": [{"page": p, "text": "\n".join(v)} for p, v in sorted(pages.items())]}
+
+
+@router.get("/{doc_id}/file")
+def doc_file(doc_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from fastapi.responses import FileResponse
+    doc = db.get(Document, doc_id)
+    if not doc or doc.owner_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
+    if not doc.file_path or not os.path.exists(doc.file_path):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文件不存在")
+    media = "application/pdf" if doc.filename.lower().endswith(".pdf") else "application/octet-stream"
+    return FileResponse(doc.file_path, media_type=media, filename=doc.filename)
+
+
+@router.patch("/{doc_id}", response_model=DocumentOut)
+def rename_doc(doc_id: str, body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    doc = db.get(Document, doc_id)
+    if not doc or doc.owner_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
+    name = (body.get("filename") or "").strip()
+    if name:
+        doc.filename = name
+        db.commit()
+        db.refresh(doc)
     return _to_out(doc)
 
 
