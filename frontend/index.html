@@ -223,7 +223,9 @@
 
   /* 右侧面板 */
   .right-panel{width:280px;flex-shrink:0;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;transition:width .3s cubic-bezier(.4,0,.2,1);position:relative}
-  .rp-resize{position:absolute;left:-3px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:12}
+  .rp-resize{position:absolute;left:-6px;top:0;bottom:0;width:12px;cursor:col-resize;z-index:13}
+  .rp-fab{position:fixed;right:0;top:40%;z-index:59;width:22px;height:60px;border-radius:8px 0 0 8px;background:var(--surface);border:1px solid var(--border);border-right:none;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:var(--shadow-menu);font-size:14px;color:var(--text-tertiary)}
+  .rp-fab:hover{color:var(--accent);background:var(--surface-muted)}
   .rp-resize:hover{background:var(--accent-weak)}
   .src-docbar{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-secondary)}
   .src-docbar .dn{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
@@ -385,6 +387,7 @@
     </div>
   </main>
 
+  <button class="rp-fab" id="rpFab" onclick="togglePanel(true)" title="展开文档面板" style="display:none">📄</button>
   <aside class="right-panel" id="rightPanel">
     <div class="rp-resize" id="rpResize"></div>
     <div class="panel-head"><h3>文档管理</h3><button class="icon-btn" onclick="togglePanel(false)">›</button></div>
@@ -507,7 +510,8 @@ function initTheme(){const t=localStorage.getItem('_rag_theme')||'light';documen
 
 /* 布局 */
 function toggleSidebar(open){const sb=document.getElementById('sidebar'),mask=document.getElementById('mask');const narrow=window.innerWidth<=1279;let want;if(typeof open==='boolean')want=open;else want=!(narrow?sb.classList.contains('open'):!sb.classList.contains('closed'));if(narrow){sb.classList.toggle('open',want);mask.classList.toggle('show',want)}else{sb.classList.toggle('closed',!want)}}
-function togglePanel(open){const rp=document.getElementById('rightPanel');rp.classList.toggle('open',open);rp.classList.toggle('closed',!open)}
+function updateRpFab(){const f=document.getElementById('rpFab');if(f)f.style.display=document.getElementById('rightPanel').classList.contains('closed')?'flex':'none'}
+function togglePanel(open){const rp=document.getElementById('rightPanel');rp.classList.toggle('open',open);rp.classList.toggle('closed',!open);updateRpFab()}
 function toggleDeep(){DEEP=!DEEP;document.getElementById('deepBtn').style.background=DEEP?'var(--accent-weak)':'';document.getElementById('deepBtn').style.color=DEEP?'var(--accent)':''}
 function toggleSearch(){SEARCH=!SEARCH;document.getElementById('searchBtn').style.background=SEARCH?'var(--accent-weak)':'';document.getElementById('searchBtn').style.color=SEARCH?'var(--accent)':''}
 function toggleMode(){const l=document.getElementById('modeLabel');l.textContent=l.textContent==='/ 进阶'?'/ 快速':'/ 进阶'}
@@ -661,7 +665,7 @@ async function loadHistory(){
   const kbs=[...conversations.values()].filter(c=>c.kbId===KB.id);
   if(!kbs.length){const id=newConv();activeConversationId=id;}
   else{const act=localStorage.getItem('_rag_active_conv');activeConversationId=(act&&conversations.has(act)&&conversations.get(act).kbId===KB.id)?act:kbs[0].id;}
-  SESSION=activeConversationId;const conv=conversations.get(activeConversationId);document.getElementById('chatTitle').textContent=conv&&conv.title?conv.title:'新对话';
+  SESSION=activeConversationId;localStorage.setItem('_rag_active_conv',activeConversationId||'');const conv=conversations.get(activeConversationId);document.getElementById('chatTitle').textContent=conv&&conv.title?conv.title:'新对话';
   renderChat();renderSessions();
 }
 function clearChat(){if(!confirm('清空当前对话？'))return;newChat()}
@@ -703,15 +707,16 @@ async function ask(){
   document.getElementById('question').value='';autoGrow(document.getElementById('question'));
   const aiIdx=conv.messages.length;
   conv.messages.push({role:'assistant',content:'',sources:[]});
+  saveConv(conv);
   renderChat();renderSessions();
   const ctrl=new AbortController();conv.ctrl=ctrl;conv.isStreaming=true;conv.currentStreamText='';conv.lastSources=[];
   updateStopBtn();
-  const cid=conv.id;
+  const cid=conv.id;localStorage.setItem('_rag_active_conv',cid);
   try{
     const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:KB.id,question:q,session_id:cid,stream:true}),signal:ctrl.signal});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText)}else if(ev.type==='done'){lastMsgId=ev.message_id}}catch(e){}}}
+    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id}}catch(e){}}}
   }catch(e){ conv._failed=true; }
   finally{
     conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
