@@ -170,7 +170,8 @@ def _load_typed_chunks(db: Session, kb_id: str, owner_id: str, classifier: Calla
             "content": r.content,
             "parent_content": r.parent_content,
             "metadata": {
-                "kb_id": kb_id, "owner_id": owner_id, "doc_name": doc_name or "未知文档",
+                "kb_id": kb_id, "owner_id": owner_id, "doc_id": r.doc_id,
+                "doc_name": doc_name or "未知文档",
                 "page_num": r.page_num, "content": r.content,
             },
             "rank_score": 1.0,
@@ -214,7 +215,8 @@ def _load_named_chunks(db: Session, kb_id: str, owner_id: str, prefix: str, n1: 
             continue
         entry = {
             "chunk_id": r.id, "content": r.content, "parent_content": r.parent_content,
-            "metadata": {"kb_id": kb_id, "owner_id": owner_id, "doc_name": doc_name or "未知文档",
+            "metadata": {"kb_id": kb_id, "owner_id": owner_id, "doc_id": r.doc_id,
+                         "doc_name": doc_name or "未知文档",
                          "page_num": r.page_num, "content": r.content},
             "rank_score": 2.0,
         }
@@ -233,15 +235,26 @@ def _prepend_named(base: list[dict], named: list[dict], max_total: int = 20) -> 
     return merged[:max_total]
 
 
+def _strip_ctx(text: str) -> str:
+    """去掉 chunk 内容前冗余的『[文档概要]…』上下文前缀，便于前端按原文子串定位引用。"""
+    s = text or ""
+    if s.startswith("[文档概要]"):
+        nl = s.find(chr(10))
+        if nl >= 0:
+            return s[nl + 1:]
+    return s
+
+
 def _to_sources(candidates: list[dict]) -> list[dict]:
     out = []
     for c in candidates:
         md = c.get("metadata", {}) or {}
         out.append({
             "chunk_id": c["chunk_id"],
+            "doc_id": md.get("doc_id"),
             "doc_name": md.get("doc_name", "未知文档"),
             "page": md.get("page_num", 0),
-            "text": c.get("content", ""),
+            "text": _strip_ctx(c.get("content", "")),
             "score": float(c.get("rank_score", c.get("rrf_score", 0.0))),
         })
     return out

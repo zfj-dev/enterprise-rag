@@ -438,8 +438,10 @@ function addSrcCard(body,sources){
   sources.forEach((sp,i)=>{const el=document.createElement('span');el.className='ref-tag';el.dataset.idx=i;el.title='点击查看原文并定位';el.textContent=(i+1)+'. '+(sp.doc_name||sp.doc)+' · 第'+sp.page+'页';wrap.appendChild(el)});
   sc.appendChild(t);sc.appendChild(wrap);sc.onclick=(e)=>{const tag=(e.target&&e.target.closest)?e.target.closest('.ref-tag'):null;if(tag)showSource(sources[+tag.dataset.idx])};body.appendChild(sc);
 }
+let _srcReq=0;
 async function showSource(sp){
   if(!sp){toast('来源不存在');return}
+  const req=++_srcReq;
   const fn=sp.doc_name||sp.doc||'';
   const rp=document.getElementById('rightPanel');rp.classList.add('open');rp.classList.remove('closed');
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='none');
@@ -447,16 +449,24 @@ async function showSource(sp){
   const retBtn=ph.querySelector('button');retBtn.textContent='‹ 返回';retBtn.title='返回文档列表';retBtn.onclick=exitSourcePreview;
   const prev=document.getElementById('srcPrev');prev.classList.remove('hide');prev.innerHTML='<div class="preview-empty">加载中…</div>';
   const docId=sp.doc_id||(()=>{const d=DOCS.find(x=>x.filename===fn);return d?d.id:null})();
-  const frag=(sp.text||'').trim();
+  const stripPref=function(s){s=s||'';if(s.indexOf('[文档概要]')!==0)return s;var k=s.indexOf(String.fromCharCode(10));return k<0?'':s.slice(k+1);};
+  const frag=stripPref((sp.text||'').trim());
   let pages=[];
   if(docId){try{const r=await api('/documents/'+docId+'/content');if(r.ok&&r.data&&r.data.pages)pages=r.data.pages}catch(e){}}
+  if(req!==_srcReq)return;
   if(!pages.length&&(frag||sp.text))pages=[{page:sp.page||0,text:sp.text||''}];
-  prev.innerHTML=pages.map(p=>`<div class="src-page" id="srcpg-${p.page}"><div class="src-pg-num">第 ${p.page} 页</div><div class="src-text">${esc(p.text||'')}</div></div>`).join('')||'<div class="preview-empty">暂无原文</div>';
+  prev.innerHTML=pages.map(p=>`<div class="src-page" id="srcpg-${p.page}"><div class="src-pg-num">第 ${p.page} 页</div><div class="src-text">${esc(stripPref(p.text||''))}</div></div>`).join('')||'<div class="preview-empty">暂无原文</div>';
   let targetPage=null;
   if(frag){
-    for(const p of pages){const t=p.text||'';const idx=t.indexOf(frag);if(idx>=0){targetPage=p.page;const el=document.getElementById('srcpg-'+p.page);const txt=el?el.querySelector('.src-text'):null;if(txt){txt.innerHTML=esc(t.slice(0,idx))+'<mark class="src-flash">'+esc(frag)+'</mark>'+esc(t.slice(idx+frag.length));}break}}
+    const nf=frag.replace(/\s+/g,'');
+    for(const p of pages){
+      const t=stripPref(p.text||'');let idx=t.indexOf(frag);
+      if(idx<0){const nt=t.replace(/\s+/g,'');const pos=nt.indexOf(nf);if(pos>=0){let i=0,c=0;while(c<pos&&i<t.length){if(!/\s/.test(t[i]))c++;i++;}idx=i;}}
+      if(idx>=0){targetPage=p.page;const el=document.getElementById('srcpg-'+p.page);const txt=el?el.querySelector('.src-text'):null;if(txt){txt.innerHTML=esc(t.slice(0,idx))+'<mark class="src-flash">'+esc(t.slice(idx,idx+frag.length))+'</mark>'+esc(t.slice(idx+frag.length));}break}
+    }
   } else if(pages.some(p=>String(p.page)===String(sp.page))){targetPage=sp.page}
-  if(targetPage!=null){const el=document.getElementById('srcpg-'+targetPage);if(el){const pt=prev.getBoundingClientRect().top;prev.scrollTop+=(el.getBoundingClientRect().top-pt-8);}}
+  if(targetPage==null&&pages.some(p=>String(p.page)===String(sp.page))){targetPage=sp.page}
+  if(targetPage!=null&&req===_srcReq){const el=document.getElementById('srcpg-'+targetPage);if(el){const pt=prev.getBoundingClientRect().top;prev.scrollTop+=(el.getBoundingClientRect().top-pt-8);}}
 }
 function exitSourcePreview(){
   const rp=document.getElementById('rightPanel');
@@ -653,9 +663,9 @@ async function ask(){
   if(!conv.title){conv.title=q.slice(0,20);document.getElementById('chatTitle').textContent=conv.title}
   conv.messages.push({role:'user',content:q});
   document.getElementById('question').value='';autoGrow(document.getElementById('question'));
-  renderChat();renderSessions();
   const aiIdx=conv.messages.length;
   conv.messages.push({role:'assistant',content:'',sources:[]});
+  renderChat();renderSessions();
   const ctrl=new AbortController();conv.ctrl=ctrl;conv.isStreaming=true;conv.currentStreamText='';conv.lastSources=[];
   updateStopBtn();
   const cid=conv.id;
