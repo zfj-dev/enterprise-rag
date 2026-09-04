@@ -387,6 +387,12 @@
 <input type="file" id="fileIn" onchange="doUpload(this)">
 <script>
 const API='/api/v1';
+window.onerror=function(msg,src,line,col,err){
+  try{
+    fetch(API+'/client-error',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({msg:String(msg),src:String(src),line:line,col:col})});
+  }catch(e){}
+  return false;
+};
 let TOKEN=localStorage.getItem('_rag_tok')||'';
 let KBS=[],DOCS=[],SESSIONS=[],KB=null,SESSION=null,STREAMING=false,DEEP=false,SEARCH=false,ACTIVE_STREAMS=new Map(),STREAM_KEY=0,conversations=new Map(),activeConversationId=null;
 let ATTACHED=null,PLUS_MENU=null,MENU=null,lastMsgId=null,MULTI=false,MULTI_SEL={},SEL_DOC=null;
@@ -655,11 +661,13 @@ async function ask(){
   const cid=conv.id;
   try{
     const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:KB.id,question:q,session_id:cid,stream:true}),signal:ctrl.signal});
+    if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
     while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText)}else if(ev.type==='done'){lastMsgId=ev.message_id}}catch(e){}}}
-  }catch(e){}
+  }catch(e){ conv._failed=true; }
   finally{
-    conv.messages[aiIdx].content=conv.currentStreamText;
+    conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
+    conv._failed=false;
     conv.messages[aiIdx].sources=conv.lastSources||[];
     conv.ctrl=null;conv.isStreaming=false;
     saveConv(conv);

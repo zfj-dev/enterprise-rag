@@ -8,6 +8,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -68,6 +69,13 @@ class Settings(BaseSettings):
     max_upload_mb: int = 50
     upload_dir: str = "./uploaded_files"
     data_dir: str = "./data"
+
+    @model_validator(mode="after")
+    def _enforce_secret_in_real(self):
+        """真实模式必须用强 SECRET_KEY，避免用默认 dev 值伪造 JWT。"""
+        if self.use_real and self.secret_key == "dev-secret-change-me-0123456789abcdef":
+            raise ValueError("真实模式(USE_REAL=true)必须设置强 SECRET_KEY 环境变量，不能使用默认值")
+        return self
 
     def all_llm_url(self) -> str:
         if self.llm_provider == "deepseek":

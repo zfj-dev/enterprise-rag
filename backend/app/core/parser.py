@@ -31,6 +31,8 @@ def detect_kind(filename: str) -> str:
         return "md"
     if ext == "txt":
         return "txt"
+    if ext in ("pptx", "ppt"):
+        return "pptx"
     if ext in ("png", "jpg", "jpeg", "gif", "bmp"):
         return "image"
     return "unknown"
@@ -310,6 +312,29 @@ def _parse_xlsx(path: str):
     return "\n".join(parts), len(wb.sheetnames)
 
 
+def _parse_pptx(path: str):
+    """PPT 提取文本（python-pptx）：逐页取文本框/表格内容。"""
+    from pptx import Presentation
+    prs = Presentation(path)
+    page_texts = []
+    for slide in prs.slides:
+        parts = []
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    t = "".join(r.text for r in para.runs).strip()
+                    if t:
+                        parts.append(t)
+            if getattr(shape, "has_table", False) and shape.has_table:
+                for row in shape.table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+        page_texts.append(chr(10).join(parts))
+    text = (chr(10) + chr(10)).join(page_texts)
+    return text, len(page_texts), page_texts
+
+
 def _parse_text(path: str):
     raw = open(path, encoding="utf-8", errors="ignore").read()
     return raw, raw.count("\n")
@@ -340,6 +365,9 @@ class ParserRouter:
             if kind == "xlsx":
                 text, count = _parse_xlsx(path)
                 return ParsedDocument(text=text, page_count=count, pages=[text], metadata={"kind": "xlsx"})
+            if kind == "pptx":
+                text, count, pages = _parse_pptx(path)
+                return ParsedDocument(text=text, page_count=count, pages=pages, metadata={"kind": "pptx"})
             if kind in ("md", "txt"):
                 text, count = _parse_text(path)
                 return ParsedDocument(text=text, page_count=count, pages=[text], metadata={"kind": kind})

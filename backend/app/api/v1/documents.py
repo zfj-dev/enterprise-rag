@@ -8,7 +8,9 @@ from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_runtime
+from app.config import get_settings
 from app.core.container import Runtime
+from app.core.parser import detect_kind
 from app.core.schemas import DocumentOut
 from app.models.entities import Chunk, Document, KnowledgeBase, User
 from app.services import document_service
@@ -37,14 +39,30 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
     if not kb or kb.owner_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, "无权访问该知识库")
 
+    # 文件名净化（防路径穿越）+ 类型白名单 + 大小限制
+    raw_name = (file.filename or "").strip().replace("\\", "/")
+    name = os.path.basename(raw_name)
+    if (not name or name.startswith(".") or ".." in raw_name
+            or "/" in raw_name or "\\" in raw_name):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "非法文件名")
+    kind = detect_kind(name)
+    if kind == "unknown":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "不支持的文件类型（仅支持 PDF/Word/Excel/Markdown/TXT/图片）")
+    max_bytes = get_settings().max_upload_mb * 1024 * 1024
+    content = file.file.read()
+    if max_bytes and len(content) > max_bytes:
+        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
+                            f"文件超过 {get_settings().max_upload_mb}MB 上限")
+
     os.makedirs("uploaded_files", exist_ok=True)
-    dest = os.path.join("uploaded_files", file.filename)
+    dest = os.path.join("uploaded_files", name)
     with open(dest, "wb") as f:
-        f.write(file.file.read())
+        f.write(content)
 
     existing = (db.query(Document)
                 .filter(Document.kb_id == kb_id, Document.owner_id == user.id,
-                        Document.filename == file.filename).first())
+                        Document.filename == name).first())
     if existing and not overwrite:
         return _to_out(existing)
 
@@ -55,7 +73,7 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
         db.delete(existing)
         db.commit()
 
-    doc = Document(kb_id=kb_id, owner_id=user.id, filename=file.filename,
+    doc = Document(kb_id=kb_id, owner_id=user.id, filename=name,
                    file_path=dest, status="processing")
     db.add(doc)
     db.commit()

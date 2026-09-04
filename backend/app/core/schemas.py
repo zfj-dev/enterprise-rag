@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 # ---- Auth ----
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=64, description="用户名(1-64字符)")
+    password: str = Field(min_length=6, max_length=128, description="密码(6-128字符)")
 
 
 class TokenResponse(BaseModel):

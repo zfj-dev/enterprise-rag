@@ -19,7 +19,7 @@ def test_auth_flow(client):
     assert tok
     ok = client.post("/api/v1/auth/login", json={"username": "alice", "password": "pw123456"})
     assert ok.status_code == 200
-    bad = client.post("/api/v1/auth/login", json={"username": "alice", "password": "bad"})
+    bad = client.post("/api/v1/auth/login", json={"username": "alice", "password": "wrong091"})
     assert bad.status_code == 401
 
 
