@@ -222,7 +222,12 @@
   .menu-item.danger{color:var(--danger)}
 
   /* 右侧面板 */
-  .right-panel{width:280px;flex-shrink:0;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;transition:width .3s cubic-bezier(.4,0,.2,1)}
+  .right-panel{width:280px;flex-shrink:0;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;transition:width .3s cubic-bezier(.4,0,.2,1);position:relative}
+  .rp-resize{position:absolute;left:-3px;top:0;bottom:0;width:8px;cursor:col-resize;z-index:12}
+  .rp-resize:hover{background:var(--accent-weak)}
+  .src-docbar{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--border);font-size:12px;color:var(--text-secondary)}
+  .src-docbar .dn{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+  .src-docbar a,.src-docbar button{color:var(--accent);text-decoration:none;background:none;border:none;padding:0;font-size:12px;cursor:pointer}
   @media (min-width:1440px){ .right-panel.closed{width:0;padding:0;overflow:hidden;border-left:none} }
   .panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;position:sticky;top:0;z-index:6;background:var(--surface);border-bottom:1px solid var(--border)}
   .panel-head h3{font-size:14px;font-weight:500}
@@ -381,6 +386,7 @@
   </main>
 
   <aside class="right-panel" id="rightPanel">
+    <div class="rp-resize" id="rpResize"></div>
     <div class="panel-head"><h3>文档管理</h3><button class="icon-btn" onclick="togglePanel(false)">›</button></div>
     <div class="panel-section"><div id="docsBox"></div>
       <button class="upload-btn" onclick="pickFile()">⬆ 上传新文档</button>
@@ -417,6 +423,7 @@ async function api(path,opts={}){
   try{return{ok:r.ok,data:JSON.parse(t)}}catch(e){return{ok:r.ok,data:t}}
 }
 function fmtErr(d){if(d==null)return'操作失败';if(typeof d==='string')return d;if(Array.isArray(d))return d.map(x=>x&&x.msg||'').filter(Boolean).join('；')||'参数不合法';return'操作失败'}
+function cleanTex(s){s=s||'';s=s.replace(/\\(?:qquad|quad|hspace\*?\{[^}]*\}|textcircled\s*\{\s*=\s*\})[ \t]*/g,' ');s=s.replace(/\\&/g,' ');s=s.replace(/[ \t]{2,}/g,' ');return s;}
 function esc(s){return(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function convKey(id){return'chat_history_'+id}
 function uuid(){return'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)})}
@@ -463,17 +470,17 @@ async function showSource(sp){
   const prev=document.getElementById('srcPrev');prev.classList.remove('hide');prev.innerHTML='<div class="preview-empty">加载中…</div>';
   const docId=sp.doc_id||(()=>{const d=DOCS.find(x=>x.filename===fn);return d?d.id:null})();
   const stripPref=function(s){s=s||'';if(s.indexOf('[文档概要]')!==0)return s;var k=s.indexOf(String.fromCharCode(10));return k<0?'':s.slice(k+1);};
-  const frag=stripPref((sp.text||'').trim());
+  const frag=cleanTex(stripPref((sp.text||'').trim()));
   let pages=[];
   if(docId){try{const r=await api('/documents/'+docId+'/content');if(r.ok&&r.data&&r.data.pages)pages=r.data.pages}catch(e){}}
   if(req!==_srcReq)return;
   if(!pages.length&&(frag||sp.text))pages=[{page:sp.page||0,text:sp.text||''}];
-  prev.innerHTML=pages.map(p=>`<div class="src-page" id="srcpg-${p.page}"><div class="src-pg-num">第 ${p.page} 页</div><div class="src-text">${esc(stripPref(p.text||''))}</div></div>`).join('')||'<div class="preview-empty">暂无原文</div>';
+  prev.innerHTML=(docId?`<div class="src-docbar"><span class="dn">${esc(fn)}</span><button onclick="downloadSrc('${docId}')">下载</button><button onclick="viewInLib('${docId}')">文档库查看</button></div>`:'')+pages.map(p=>`<div class="src-page" id="srcpg-${p.page}"><div class="src-pg-num">第 ${p.page} 页</div><div class="src-text">${esc(cleanTex(stripPref(p.text||'')))}</div></div>`).join('')||'<div class="preview-empty">暂无原文</div>';
   let targetPage=null, mkEl=null;
   if(frag){
     const nf=frag.replace(/\s+/g,'');
     for(const p of pages){
-      const t=stripPref(p.text||'');let idx=t.indexOf(frag);
+      const t=cleanTex(stripPref(p.text||''));let idx=t.indexOf(frag);
       if(idx<0){const nt=t.replace(/\s+/g,'');const pos=nt.indexOf(nf);if(pos>=0){let i=0,c=0;while(c<pos&&i<t.length){if(!/\s/.test(t[i]))c++;i++;}idx=i;}}
       if(idx>=0){targetPage=p.page;const el=document.getElementById('srcpg-'+p.page);const txt=el?el.querySelector('.src-text'):null;if(txt){txt.innerHTML=esc(t.slice(0,idx))+'<mark class="src-flash">'+esc(t.slice(idx,idx+frag.length))+'</mark>'+esc(t.slice(idx+frag.length));mkEl=txt.querySelector('.src-flash');}break}
     }
@@ -481,6 +488,8 @@ async function showSource(sp){
   if(targetPage==null&&pages.some(p=>String(p.page)===String(sp.page))){targetPage=sp.page}
   if(req===_srcReq){const rp=document.getElementById('rightPanel');if(mkEl){rp.scrollTop+=(mkEl.getBoundingClientRect().top-rp.getBoundingClientRect().top-8);}else if(targetPage!=null){const el=document.getElementById('srcpg-'+targetPage);if(el){rp.scrollTop+=(el.getBoundingClientRect().top-rp.getBoundingClientRect().top-8);}}}
 }
+async function downloadSrc(id){if(!id){toast('无文档');return}try{const r=await fetch(`${API}/documents/${id}/file`,{headers:{'Authorization':'Bearer '+TOKEN}});if(!r.ok){toast('下载失败');return}const b=await r.blob();const url=URL.createObjectURL(b);const a=document.createElement('a');a.href=url;a.download='';a.click();URL.revokeObjectURL(url);}catch(e){toast('下载失败')}}
+function viewInLib(id){if(!id)return;const rp=document.getElementById('rightPanel');rp.classList.remove('open');rp.classList.add('closed');openDocLib();if(id)previewDoc(id);}
 function exitSourcePreview(){
   const rp=document.getElementById('rightPanel');
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='');
@@ -536,6 +545,7 @@ function toggleUserMenu(){
 }
 function logout(){clearAuth();location.reload();}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
+(function(){var h=document.getElementById('rpResize');if(!h)return;h.addEventListener('mousedown',function(e){e.preventDefault();var rp=document.getElementById('rightPanel');var sx=e.clientX,sw=rp.offsetWidth;rp.style.transition='none';function mv(ev){var w=sw+(sx-ev.clientX);var maxw=Math.min(window.innerWidth*0.62,820);w=Math.max(260,Math.min(w,maxw));rp.style.width=w+'px';}function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);rp.style.transition='';}document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});})();
 async function checkMode(){try{const r=await fetch('/health');const d=await r.json();const b=document.getElementById('modeBadge');if(b)b.style.display=d.use_real?'none':'inline-block';}catch(e){}}
 function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);document.getElementById('userRole').textContent=localStorage.getItem('_rag_user')||'用户';loadKbs();checkMode()}
 async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=(r.data.username||document.getElementById('u').value||'用户');showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}
