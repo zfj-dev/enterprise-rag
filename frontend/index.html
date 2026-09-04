@@ -96,6 +96,7 @@
   .avatar{width:26px;height:26px;border-radius:50%;background:var(--text-primary);color:var(--surface);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
   .user-name{font-size:13px;font-weight:500;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .ver-tag{font-size:11px;color:var(--text-quaternary)}
+  .mode-badge{font-size:11px;color:var(--accent);border:1px solid var(--accent);border-radius:10px;padding:1px 6px;margin-left:6px;flex-shrink:0}
   .user-btn{display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer;border-radius:8px;padding:4px 6px}
   .user-btn:hover{background:var(--surface-muted)}
   .um-c{max-width:380px;text-align:center}
@@ -310,7 +311,7 @@
 <div id="appCard" class="app hide">
   <div class="mask" id="mask" onclick="toggleSidebar(false)"></div>
   <aside class="sidebar" id="sidebar">
-    <div class="side-brand"><div class="logo">📄</div><span class="brand-name">文档问答</span><button class="icon-btn" onclick="toggleSidebar()" title="收起侧栏" style="margin-left:auto">«</button></div>
+    <div class="side-brand"><div class="logo">📄</div><span class="brand-name">文档问答</span><span id="modeBadge" class="mode-badge" style="display:none">演示</span><button class="icon-btn" onclick="toggleSidebar()" title="收起侧栏" style="margin-left:auto">«</button></div>
     <div class="side-new"><button onclick="newChat()">＋ 新建对话</button></div>
     <div style="padding:0 16px 6px;display:flex;gap:6px;align-items:center"><select id="kbSel" onchange="selectKb()" style="flex:1;font-size:12px;padding:6px 8px" title="知识库"></select><button class="icon-btn" onclick="createKb()" title="新建知识库" style="flex:none">➕</button><button class="icon-btn" onclick="renameKb()" title="重命名当前知识库" style="flex:none">✏️</button><button class="icon-btn" onclick="deleteKb()" title="删除当前知识库" style="flex:none">🗑</button></div>
     <div class="side-nav">
@@ -535,7 +536,8 @@ function toggleUserMenu(){
 }
 function logout(){clearAuth();location.reload();}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
-function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);document.getElementById('userRole').textContent=localStorage.getItem('_rag_user')||'用户';loadKbs()}
+async function checkMode(){try{const r=await fetch('/health');const d=await r.json();const b=document.getElementById('modeBadge');if(b)b.style.display=d.use_real?'none':'inline-block';}catch(e){}}
+function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);document.getElementById('userRole').textContent=localStorage.getItem('_rag_user')||'用户';loadKbs();checkMode()}
 async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=(r.data.username||document.getElementById('u').value||'用户');showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}
 async function register(){const r=await api('/auth/register',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});document.getElementById('loginMsg').textContent=r.ok?'注册成功，请登录':(fmtErr(r.data.detail)||'注册失败')}
 
