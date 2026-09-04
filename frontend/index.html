@@ -223,7 +223,7 @@
 
   /* 右侧面板 */
   .right-panel{width:280px;flex-shrink:0;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;transition:width .3s cubic-bezier(.4,0,.2,1);position:relative}
-  .rp-resize{position:absolute;left:-6px;top:0;bottom:0;width:12px;cursor:col-resize;z-index:13}
+  .rp-resize{position:fixed;top:0;bottom:0;width:12px;cursor:col-resize;z-index:60;background:transparent}
   .rp-fab{position:fixed;right:0;top:40%;z-index:59;width:22px;height:60px;border-radius:8px 0 0 8px;background:var(--surface);border:1px solid var(--border);border-right:none;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:var(--shadow-menu);font-size:14px;color:var(--text-tertiary)}
   .rp-fab:hover{color:var(--accent);background:var(--surface-muted)}
   .rp-resize:hover{background:var(--accent-weak)}
@@ -426,7 +426,7 @@ async function api(path,opts={}){
   try{return{ok:r.ok,data:JSON.parse(t)}}catch(e){return{ok:r.ok,data:t}}
 }
 function fmtErr(d){if(d==null)return'操作失败';if(typeof d==='string')return d;if(Array.isArray(d))return d.map(x=>x&&x.msg||'').filter(Boolean).join('；')||'参数不合法';return'操作失败'}
-function cleanTex(s){s=s||'';s=s.replace(/\\(?:qquad|quad|hspace\*?\{[^}]*\}|textcircled\s*\{\s*=\s*\})[ \t]*/g,' ');s=s.replace(/\\&/g,' ');s=s.replace(/[ \t]{2,}/g,' ');return s;}
+function cleanTex(s){s=s||'';s=s.replace(/\\(?:qquad|quad|hspace\*?\{[^}]*\}|textcircled\s*\{\s*=\s*\})[ \t]*/g,' ');s=s.replace(/\\&/g,' ');s=s.replace(/[ \t]*~+[ \t]*/g,' ');s=s.replace(/\\[ ,;!:]/g,'');s=s.replace(/[ \t]{2,}/g,' ');return s;}
 function esc(s){return(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function convKey(id){return'chat_history_'+id}
 function uuid(){return'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)})}
@@ -466,7 +466,7 @@ async function showSource(sp){
   if(!sp){toast('来源不存在');return}
   const req=++_srcReq;
   const fn=sp.doc_name||sp.doc||'';
-  const rp=document.getElementById('rightPanel');rp.classList.add('open');rp.classList.remove('closed');
+  const rp=document.getElementById('rightPanel');rp.classList.add('open');rp.classList.remove('closed');positionRpResize();
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='none');
   const ph=rp.querySelector('.panel-head');ph.querySelector('h3').textContent='原文预览';
   const retBtn=ph.querySelector('button');retBtn.textContent='‹ 返回';retBtn.title='返回文档列表';retBtn.style.whiteSpace='nowrap';retBtn.style.width='auto';retBtn.style.padding='0 8px';retBtn.style.fontSize='13px';retBtn.onclick=exitSourcePreview;
@@ -511,7 +511,7 @@ function initTheme(){const t=localStorage.getItem('_rag_theme')||'light';documen
 /* 布局 */
 function toggleSidebar(open){const sb=document.getElementById('sidebar'),mask=document.getElementById('mask');const narrow=window.innerWidth<=1279;let want;if(typeof open==='boolean')want=open;else want=!(narrow?sb.classList.contains('open'):!sb.classList.contains('closed'));if(narrow){sb.classList.toggle('open',want);mask.classList.toggle('show',want)}else{sb.classList.toggle('closed',!want)}}
 function updateRpFab(){const f=document.getElementById('rpFab');if(f)f.style.display=document.getElementById('rightPanel').classList.contains('closed')?'flex':'none'}
-function togglePanel(open){const rp=document.getElementById('rightPanel');rp.classList.toggle('open',open);rp.classList.toggle('closed',!open);updateRpFab()}
+function togglePanel(open){const rp=document.getElementById('rightPanel');rp.classList.toggle('open',open);rp.classList.toggle('closed',!open);updateRpFab();positionRpResize()}
 function toggleDeep(){DEEP=!DEEP;document.getElementById('deepBtn').style.background=DEEP?'var(--accent-weak)':'';document.getElementById('deepBtn').style.color=DEEP?'var(--accent)':''}
 function toggleSearch(){SEARCH=!SEARCH;document.getElementById('searchBtn').style.background=SEARCH?'var(--accent-weak)':'';document.getElementById('searchBtn').style.color=SEARCH?'var(--accent)':''}
 function toggleMode(){const l=document.getElementById('modeLabel');l.textContent=l.textContent==='/ 进阶'?'/ 快速':'/ 进阶'}
@@ -549,7 +549,8 @@ function toggleUserMenu(){
 }
 function logout(){clearAuth();location.reload();}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
-(function(){var h=document.getElementById('rpResize');if(!h)return;h.addEventListener('mousedown',function(e){e.preventDefault();var rp=document.getElementById('rightPanel');var sx=e.clientX,sw=rp.offsetWidth;rp.style.transition='none';function mv(ev){var w=sw+(sx-ev.clientX);var maxw=Math.min(window.innerWidth*0.62,820);w=Math.max(260,Math.min(w,maxw));rp.style.width=w+'px';}function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);rp.style.transition='';}document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});})();
+function positionRpResize(){var rp=document.getElementById('rightPanel');var h=document.getElementById('rpResize');if(!rp||!h)return;h.style.right=(rp.offsetWidth-6)+'px';h.style.top='0px';h.style.height=window.innerHeight+'px';}
+(function(){var h=document.getElementById('rpResize');if(!h)return;h.addEventListener('mousedown',function(e){e.preventDefault();var rp=document.getElementById('rightPanel');var sx=e.clientX,sw=rp.offsetWidth;rp.style.transition='none';function mv(ev){var w=sw+(sx-ev.clientX);var maxw=Math.min(window.innerWidth*0.62,820);w=Math.max(260,Math.min(w,maxw));rp.style.width=w+'px';positionRpResize();}function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);rp.style.transition='';}document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});window.addEventListener('resize',positionRpResize);positionRpResize();})();
 async function checkMode(){try{const r=await fetch('/health');const d=await r.json();const b=document.getElementById('modeBadge');if(b)b.style.display=d.use_real?'none':'inline-block';}catch(e){}}
 function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);document.getElementById('userRole').textContent=localStorage.getItem('_rag_user')||'用户';loadKbs();checkMode()}
 async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=(r.data.username||document.getElementById('u').value||'用户');showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}
@@ -666,6 +667,7 @@ async function loadHistory(){
   if(!kbs.length){const id=newConv();activeConversationId=id;}
   else{const act=localStorage.getItem('_rag_active_conv');activeConversationId=(act&&conversations.has(act)&&conversations.get(act).kbId===KB.id)?act:kbs[0].id;}
   SESSION=activeConversationId;localStorage.setItem('_rag_active_conv',activeConversationId||'');const conv=conversations.get(activeConversationId);document.getElementById('chatTitle').textContent=conv&&conv.title?conv.title:'新对话';
+  if(conv){const _l=conv.messages[conv.messages.length-1];if(_l&&_l.role==='assistant'&&_l._partial){setTimeout(function(){regenerate()},400);}}
   renderChat();renderSessions();
 }
 function clearChat(){if(!confirm('清空当前对话？'))return;newChat()}
@@ -696,8 +698,8 @@ function useSugg(t){const q=document.getElementById('question');q.value=t;autoGr
 function autoGrow(t){t.style.height='auto';t.style.height=Math.min(t.scrollHeight,144)+'px';document.getElementById('sendBtn').disabled=!t.value.trim()}
 function onKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();ask()}}
 
-async function ask(){
-  const q=document.getElementById('question').value.trim();
+async function ask(forceQ){
+  const q=(forceQ!==undefined&&forceQ!==null&&String(forceQ).trim())?String(forceQ).trim():document.getElementById('question').value.trim();
   if(!q||!KB)return;
   let conv=conversations.get(activeConversationId);
   if(!conv||conv.kbId!==KB.id){const id=newConv();conv=conversations.get(id);activeConversationId=id;SESSION=id;localStorage.setItem('_rag_active_conv',id)}
@@ -707,6 +709,7 @@ async function ask(){
   document.getElementById('question').value='';autoGrow(document.getElementById('question'));
   const aiIdx=conv.messages.length;
   conv.messages.push({role:'assistant',content:'',sources:[]});
+  conv.messages[aiIdx]._partial=true;
   saveConv(conv);
   renderChat();renderSessions();
   const ctrl=new AbortController();conv.ctrl=ctrl;conv.isStreaming=true;conv.currentStreamText='';conv.lastSources=[];
@@ -716,10 +719,11 @@ async function ask(){
     const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:KB.id,question:q,session_id:cid,stream:true}),signal:ctrl.signal});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id}}catch(e){}}}
+    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id}}catch(e){}}}
   }catch(e){ conv._failed=true; }
   finally{
     conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
+    conv.messages[aiIdx]._partial=false;
     conv._failed=false;
     conv.messages[aiIdx].sources=conv.lastSources||[];
     conv.ctrl=null;conv.isStreaming=false;
@@ -750,7 +754,7 @@ function finalize(div,answer,sources){
   }
   loadSessions();
 }
-async function regenerate(){const inner=document.getElementById('chatInner');const msgs=inner.querySelectorAll('.msg');const last=msgs[msgs.length-1];if(last&&last.classList.contains('ai'))last.remove();ask()}
+async function regenerate(){const conv=conversations.get(activeConversationId);if(!conv)return;var users=conv.messages.filter(function(m){return m.role==='user'});var q=users.length?users[users.length-1].content:'';if(!q){toast('没有可重新生成的问题');return}var last=conv.messages[conv.messages.length-1];if(last&&last.role==='assistant')conv.messages.pop();conv.isStreaming=false;saveConv(conv);renderChat();ask(q)}
 
 /* 文档上传 */
 function fmtSize(b){b=+b||0;if(b<1024)return b+'B';if(b<1048576)return (b/1024).toFixed(1)+'KB';if(b<1073741824)return (b/1048576).toFixed(1)+'MB';return (b/1073741824).toFixed(1)+'GB'}
