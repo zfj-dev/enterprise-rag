@@ -456,17 +456,17 @@ async function showSource(sp){
   if(req!==_srcReq)return;
   if(!pages.length&&(frag||sp.text))pages=[{page:sp.page||0,text:sp.text||''}];
   prev.innerHTML=pages.map(p=>`<div class="src-page" id="srcpg-${p.page}"><div class="src-pg-num">第 ${p.page} 页</div><div class="src-text">${esc(stripPref(p.text||''))}</div></div>`).join('')||'<div class="preview-empty">暂无原文</div>';
-  let targetPage=null;
+  let targetPage=null, mkEl=null;
   if(frag){
     const nf=frag.replace(/\s+/g,'');
     for(const p of pages){
       const t=stripPref(p.text||'');let idx=t.indexOf(frag);
       if(idx<0){const nt=t.replace(/\s+/g,'');const pos=nt.indexOf(nf);if(pos>=0){let i=0,c=0;while(c<pos&&i<t.length){if(!/\s/.test(t[i]))c++;i++;}idx=i;}}
-      if(idx>=0){targetPage=p.page;const el=document.getElementById('srcpg-'+p.page);const txt=el?el.querySelector('.src-text'):null;if(txt){txt.innerHTML=esc(t.slice(0,idx))+'<mark class="src-flash">'+esc(t.slice(idx,idx+frag.length))+'</mark>'+esc(t.slice(idx+frag.length));}break}
+      if(idx>=0){targetPage=p.page;const el=document.getElementById('srcpg-'+p.page);const txt=el?el.querySelector('.src-text'):null;if(txt){txt.innerHTML=esc(t.slice(0,idx))+'<mark class="src-flash">'+esc(t.slice(idx,idx+frag.length))+'</mark>'+esc(t.slice(idx+frag.length));mkEl=txt.querySelector('.src-flash');}break}
     }
   } else if(pages.some(p=>String(p.page)===String(sp.page))){targetPage=sp.page}
   if(targetPage==null&&pages.some(p=>String(p.page)===String(sp.page))){targetPage=sp.page}
-  if(targetPage!=null&&req===_srcReq){const el=document.getElementById('srcpg-'+targetPage);if(el){const pt=prev.getBoundingClientRect().top;prev.scrollTop+=(el.getBoundingClientRect().top-pt-8);}}
+  if(req===_srcReq){const rp=document.getElementById('rightPanel');if(mkEl){rp.scrollTop+=(mkEl.getBoundingClientRect().top-rp.getBoundingClientRect().top-8);}else if(targetPage!=null){const el=document.getElementById('srcpg-'+targetPage);if(el){rp.scrollTop+=(el.getBoundingClientRect().top-rp.getBoundingClientRect().top-8);}}}
 }
 function exitSourcePreview(){
   const rp=document.getElementById('rightPanel');
