@@ -223,7 +223,7 @@
 
   /* 右侧面板 */
   .right-panel{width:280px;flex-shrink:0;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;transition:width .3s cubic-bezier(.4,0,.2,1);position:relative}
-  .rp-resize{position:fixed;top:0;bottom:0;width:12px;cursor:col-resize;z-index:60;background:transparent}
+  .rp-resize{position:fixed;top:0;bottom:0;width:12px;cursor:col-resize;z-index:60;background:transparent;display:none}
   .rp-fab{position:fixed;right:0;top:40%;z-index:59;width:22px;height:60px;border-radius:8px 0 0 8px;background:var(--surface);border:1px solid var(--border);border-right:none;display:flex;align-items:center;justify-content:center;cursor:pointer;box-shadow:var(--shadow-menu);font-size:14px;color:var(--text-tertiary)}
   .rp-fab:hover{color:var(--accent);background:var(--surface-muted)}
   .rp-resize:hover{background:var(--accent-weak)}
@@ -466,7 +466,7 @@ async function showSource(sp){
   if(!sp){toast('来源不存在');return}
   const req=++_srcReq;
   const fn=sp.doc_name||sp.doc||'';
-  const rp=document.getElementById('rightPanel');rp.classList.add('open');rp.classList.remove('closed');positionRpResize();
+  const rp=document.getElementById('rightPanel');rp.classList.add('open');rp.classList.remove('closed');positionRpResize();var _rh=document.getElementById('rpResize');if(_rh)_rh.style.display='block';
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='none');
   const ph=rp.querySelector('.panel-head');ph.querySelector('h3').textContent='原文预览';
   const retBtn=ph.querySelector('button');retBtn.textContent='‹ 返回';retBtn.title='返回文档列表';retBtn.style.whiteSpace='nowrap';retBtn.style.width='auto';retBtn.style.padding='0 8px';retBtn.style.fontSize='13px';retBtn.onclick=exitSourcePreview;
@@ -495,6 +495,8 @@ async function downloadSrc(id){if(!id){toast('无文档');return}try{const r=awa
 function viewInLib(id){if(!id)return;const rp=document.getElementById('rightPanel');rp.classList.remove('open');rp.classList.add('closed');openDocLib();if(id)previewDoc(id);}
 function exitSourcePreview(){
   const rp=document.getElementById('rightPanel');
+  rp.style.width='';
+  var _rh=document.getElementById('rpResize');if(_rh)_rh.style.display='none';
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='');
   const ph=rp.querySelector('.panel-head');ph.querySelector('h3').textContent='文档管理';
   const retBtn=ph.querySelector('button');retBtn.textContent='›';retBtn.title='收起';retBtn.style.whiteSpace='';retBtn.style.width='';retBtn.style.padding='';retBtn.style.fontSize='';retBtn.onclick=()=>togglePanel(false);
@@ -571,7 +573,7 @@ function isPinned(id){return localStorage.getItem(pinKey(id))==='1'}
 function togglePin(id){const k=pinKey(id);localStorage.setItem(k,isPinned(id)?'0':'1');renderSessions();toast(isPinned(id)?'已置顶':'已取消置顶')}
 function closeMenus(){if(MENU){MENU.remove();MENU=null}if(PLUS_MENU){PLUS_MENU.remove();PLUS_MENU=null}}
 
-async function loadSessions(){if(!KB)return;const r=await api('/chat/sessions?kb_id='+KB.id);const arr=r.ok&&r.data?r.data:[];for(const x of arr){if(!conversations.has(x.id)){conversations.set(x.id,{id:x.id,kbId:KB.id,title:x.title||'',messages:[],ctrl:null,isStreaming:false,currentStreamText:'',sources:[]})}}SESSIONS=arr;renderSessions()}
+async function loadSessions(){if(!KB)return;const r=await api('/chat/sessions?kb_id='+KB.id);const arr=r.ok&&r.data?r.data:[];for(const x of arr){if(!x||!x.id)continue;var _dup=Array.from(conversations.values()).some(function(c){return c.id===x.id;});if(!_dup){conversations.set(x.id,{id:x.id,kbId:KB.id,title:x.title||'',messages:[],ctrl:null,isStreaming:false,currentStreamText:'',sources:[]})}}SESSIONS=arr;renderSessions()}
 function renderSessions(){
   const box=document.getElementById('sessionList');const kw=(document.getElementById('sessionSearch').value||'').trim();
   let list=[...conversations.values()].filter(c=>!c.kbId||c.kbId===KB.id);
