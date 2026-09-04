@@ -96,6 +96,15 @@
   .avatar{width:26px;height:26px;border-radius:50%;background:var(--text-primary);color:var(--surface);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
   .user-name{font-size:13px;font-weight:500;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .ver-tag{font-size:11px;color:var(--text-quaternary)}
+  .user-btn{display:flex;align-items:center;gap:10px;flex:1;min-width:0;cursor:pointer;border-radius:8px;padding:4px 6px}
+  .user-btn:hover{background:var(--surface-muted)}
+  .um-c{max-width:380px;text-align:center}
+  .um-avatar{width:56px;height:56px;border-radius:50%;background:var(--text-primary);color:var(--surface);display:flex;align-items:center;justify-content:center;font-size:24px;margin:0 auto 12px}
+  .um-row{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid var(--border);font-size:13px;text-align:left}
+  .um-row .k{color:var(--text-secondary)}
+  .um-btns{display:flex;gap:8px;margin-top:16px}
+  .um-btns button{flex:1;padding:9px;border-radius:8px}
+  .um-btns .btn-danger{background:var(--danger);color:#fff}
 
   /* 中央 */
   .main{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
@@ -214,7 +223,7 @@
   /* 右侧面板 */
   .right-panel{width:280px;flex-shrink:0;background:var(--surface);border-left:1px solid var(--border);overflow-y:auto;transition:width .3s cubic-bezier(.4,0,.2,1)}
   @media (min-width:1440px){ .right-panel.closed{width:0;padding:0;overflow:hidden;border-left:none} }
-  .panel-head{display:flex;align-items:center;justify-content:space-between;padding:16px 16px 10px}
+  .panel-head{display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;position:sticky;top:0;z-index:6;background:var(--surface);border-bottom:1px solid var(--border)}
   .panel-head h3{font-size:14px;font-weight:500}
   .panel-section{padding:0 16px 16px}
   .doc-card{border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:8px;display:flex;align-items:center;gap:10px;position:relative}
@@ -315,8 +324,10 @@
     <div class="session-list" id="sessionList"></div>
     <div class="batch-bar" id="batchBar"><button class="b b-pin" id="batchPinBtn" onclick="batchPin()" disabled>📌 置顶</button><button class="b b-del" id="batchDelBtn" onclick="batchDelete()" disabled>🗑 删除</button></div>
     <div class="side-bottom">
-      <div class="avatar" id="userAvatar">用</div>
-      <span class="user-name" id="userRole">用户</span>
+      <div class="user-btn" id="userBtn" onclick="toggleUserMenu()" title="个人信息">
+        <div class="avatar" id="userAvatar">用</div>
+        <span class="user-name" id="userRole">用户</span>
+      </div>
       <span class="ver-tag">v1.2</span>
       <button class="icon-btn" onclick="toggleTheme()" id="themeBtn" title="切换主题">🌙</button>
     </div>
@@ -447,7 +458,7 @@ async function showSource(sp){
   const rp=document.getElementById('rightPanel');rp.classList.add('open');rp.classList.remove('closed');
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='none');
   const ph=rp.querySelector('.panel-head');ph.querySelector('h3').textContent='原文预览';
-  const retBtn=ph.querySelector('button');retBtn.textContent='‹ 返回';retBtn.title='返回文档列表';retBtn.onclick=exitSourcePreview;
+  const retBtn=ph.querySelector('button');retBtn.textContent='‹ 返回';retBtn.title='返回文档列表';retBtn.style.whiteSpace='nowrap';retBtn.style.width='auto';retBtn.style.padding='0 8px';retBtn.style.fontSize='13px';retBtn.onclick=exitSourcePreview;
   const prev=document.getElementById('srcPrev');prev.classList.remove('hide');prev.innerHTML='<div class="preview-empty">加载中…</div>';
   const docId=sp.doc_id||(()=>{const d=DOCS.find(x=>x.filename===fn);return d?d.id:null})();
   const stripPref=function(s){s=s||'';if(s.indexOf('[文档概要]')!==0)return s;var k=s.indexOf(String.fromCharCode(10));return k<0?'':s.slice(k+1);};
@@ -473,7 +484,7 @@ function exitSourcePreview(){
   const rp=document.getElementById('rightPanel');
   document.querySelectorAll('#rightPanel .panel-section').forEach(el=>el.style.display='');
   const ph=rp.querySelector('.panel-head');ph.querySelector('h3').textContent='文档管理';
-  const retBtn=ph.querySelector('button');retBtn.textContent='›';retBtn.title='收起';retBtn.onclick=()=>togglePanel(false);
+  const retBtn=ph.querySelector('button');retBtn.textContent='›';retBtn.title='收起';retBtn.style.whiteSpace='';retBtn.style.width='';retBtn.style.padding='';retBtn.style.fontSize='';retBtn.onclick=()=>togglePanel(false);
   document.getElementById('srcPrev').classList.add('hide');
 }
 function toast(m){const d=document.createElement('div');d.className='toast';d.textContent=m;document.body.appendChild(d);setTimeout(()=>d.remove(),2200)}
@@ -509,9 +520,23 @@ function initSliders(){
 
 /* 认证 */
 async function init(){initTheme();initSliders();if(!TOKEN)return;showApp()}
+function toggleUserMenu(){
+  if(document.getElementById('userMenu')){document.getElementById('userMenu').remove();return}
+  const name=localStorage.getItem('_rag_user')||'用户';
+  const dark=document.documentElement.getAttribute('data-theme')==='dark';
+  const m=document.createElement('div');m.id='userMenu';m.className='modal-mask';
+  m.innerHTML=`<div class="modal um-c"><h3>个人信息</h3><div class="um-avatar">${esc(name.slice(0,1))}</div>
+    <div class="um-row"><span class="k">用户名</span><span class="v">${esc(name)}</span></div>
+    <div class="um-row"><span class="k">语言</span><span class="v">跟随系统</span></div>
+    <div class="um-row"><span class="k">色彩主题</span><span class="v">${dark?'深色':'浅色'}</span></div>
+    <div class="um-btns"><button class="btn-cancel" onclick="toggleTheme();document.getElementById('userMenu').remove();toggleUserMenu()">切换主题</button><button class="btn-danger" onclick="logout()">退出登录</button></div></div>`;
+  m.onclick=e=>{if(e.target===m)m.remove()};
+  document.body.appendChild(m);
+}
+function logout(){clearAuth();location.reload();}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
-function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);loadKbs()}
-async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=r.data.role;showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}
+function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);document.getElementById('userRole').textContent=localStorage.getItem('_rag_user')||'用户';loadKbs()}
+async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=(r.data.username||document.getElementById('u').value||'用户');showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}
 async function register(){const r=await api('/auth/register',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});document.getElementById('loginMsg').textContent=r.ok?'注册成功，请登录':(fmtErr(r.data.detail)||'注册失败')}
 
 /* 知识库 */
