@@ -404,6 +404,7 @@ async function api(path,opts={}){
   const r=await fetch(API+path,o);const t=await r.text();
   try{return{ok:r.ok,data:JSON.parse(t)}}catch(e){return{ok:r.ok,data:t}}
 }
+function fmtErr(d){if(d==null)return'操作失败';if(typeof d==='string')return d;if(Array.isArray(d))return d.map(x=>x&&x.msg||'').filter(Boolean).join('；')||'参数不合法';return'操作失败'}
 function esc(s){return(s||'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function convKey(id){return'chat_history_'+id}
 function uuid(){return'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{const r=Math.random()*16|0,v=c==='x'?r:(r&0x3|0x8);return v.toString(16)})}
@@ -510,8 +511,8 @@ function initSliders(){
 async function init(){initTheme();initSliders();if(!TOKEN)return;showApp()}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
 function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);loadKbs()}
-async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=r.data.role;showApp()}else document.getElementById('loginMsg').textContent=r.data.detail||'登录失败'}
-async function register(){const r=await api('/auth/register',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});document.getElementById('loginMsg').textContent=r.ok?'注册成功，请登录':(r.data.detail||'注册失败')}
+async function login(){const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=r.data.role;showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}
+async function register(){const r=await api('/auth/register',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});document.getElementById('loginMsg').textContent=r.ok?'注册成功，请登录':(fmtErr(r.data.detail)||'注册失败')}
 
 /* 知识库 */
 async function loadKbs(){const r=await api('/knowledge');if(!r.ok){clearAuth();document.getElementById('loginMsg').textContent='登录已过期';return}let arr=r.data||[];if(!arr.length){const c=await api('/knowledge',{method:'POST',body:{name:'默认知识库',description:''}});if(c.ok)arr=[c.data];else toast('自动创建知识库失败，请点左栏➕手动创建')}KBS=arr;const sel=document.getElementById('kbSel');sel.innerHTML=KBS.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');const curId=KB?KB.id:(KBS[0]?KBS[0].id:null);if(curId){sel.value=curId;KB=KBS.find(k=>k.id===curId)||KBS[0]||null}if(KB){loadDocs();loadSessions();loadHistory()}else{document.getElementById('chatInner').innerHTML='';document.getElementById('docsBox').innerHTML=''}}

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
-from app.core.schemas import LoginRequest, TokenResponse
+from app.core.schemas import LoginRequest, RegisterRequest, TokenResponse
 from app.models.entities import User
 from app.utils.security import create_access_token, hash_password, verify_password
 
@@ -18,7 +18,7 @@ def health():
 
 
 @router.post("/register", response_model=TokenResponse)
-def register(body: LoginRequest, db: Session = Depends(get_db)):
+def register(body: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.username == body.username).first():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "用户名已存在")
     u = User(username=body.username, password_hash=hash_password(body.password), role="viewer")

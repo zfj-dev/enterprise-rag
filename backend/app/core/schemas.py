@@ -6,8 +6,15 @@ from pydantic import BaseModel, Field
 
 # ---- Auth ----
 class LoginRequest(BaseModel):
-    username: str = Field(min_length=1, max_length=64, description="用户名(1-64字符)")
-    password: str = Field(min_length=6, max_length=128, description="密码(6-128字符)")
+    # 登录：不做强度/长度校验（短密码=历史老账号，应返回401而非422；避免泄露校验信息）
+    username: str = Field(min_length=1)
+    password: str = Field(min_length=1)
+
+
+class RegisterRequest(BaseModel):
+    # 注册：校验强度（用户名1-64、密码6-128）
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=6, max_length=128)
 
 
 class TokenResponse(BaseModel):
