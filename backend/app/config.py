@@ -34,13 +34,19 @@ class Settings(BaseSettings):
 
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dim: int = 1024
-    embedding_provider: Literal["fake", "bge"] = "fake"
+    embedding_provider: Literal["fake", "bge", "api"] = "fake"
     embedding_device: str = "cuda"  # bge 用；无 GPU 会自动回落 cpu
+    # embed via 推理节点(私有云 GPU), 替代本地 bge
+    embedding_api_base: str | None = None
+    embedding_api_key: str | None = None
+    embedding_batch_size: int = 64
 
     reranker_model: str = "BAAI/bge-reranker-large"
     reranker_enabled: bool = True
-    reranker_provider: Literal["fake", "bge"] = "fake"
+    reranker_provider: Literal["fake", "bge", "api"] = "fake"
     reranker_device: str = "cuda"
+    rerank_api_base: str | None = None
+    rerank_api_key: str | None = None
 
     llm_provider: Literal["fake", "deepseek", "siliconflow", "openai", "dashscope"] = "fake"
     llm_base_url: str | None = None

@@ -71,8 +71,51 @@ class BgeReranker(Reranker):
         return sorted(out, key=lambda x: x["rank_score"], reverse=True)
 
 
+class ApiReranker(Reranker):
+    """通过私有推理节点(云 GPU)重排：POST {base}/rerank {query, documents} -> {results:[{index,relevance_score}]}。
+
+    失败时降级为 RRF 原顺序(不回退本地 bge、不阻断回答,仅日志)。
+    """
+
+    def __init__(self, base: str | None = None, api_key: str | None = None):
+        import httpx
+
+        s = get_settings()
+        self._httpx = httpx
+        self.base = (base or s.rerank_api_base or "").rstrip("/")
+        self.api_key = api_key or s.rerank_api_key or ""
+        if not self.base:
+            raise ValueError("RERANK_API_BASE 未设置(reranker_provider=api 时需指向推理节点)")
+
+    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
+        if not candidates:
+            return list(candidates)
+        docs = [str(c.get("content", "")) for c in candidates]
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-Inference-Token"] = self.api_key
+        try:
+            with self._httpx.Client(timeout=60) as client:
+                r = client.post(f"{self.base}/rerank", json={"query": query, "documents": docs, "top_n": len(docs)}, headers=headers)
+                r.raise_for_status()
+                results = r.json().get("results", [])
+        except Exception as e:
+            logger.warning("rerank 节点不可达,降级 RRF 顺序: %s", e)
+            return list(candidates)  # 已按 RRF 融合排序
+        score = {res["index"]: float(res["relevance_score"]) for res in results if "index" in res}
+        out = []
+        for i, c in enumerate(candidates):
+            cc = dict(c)
+            cc["rank_score"] = score.get(i, 0.0)
+            out.append(cc)
+        out.sort(key=lambda x: x["rank_score"], reverse=True)
+        return out
+
+
 def get_reranker(provider: str | None = None) -> Reranker:
     provider = provider or get_settings().reranker_provider
     if provider == "bge":
         return BgeReranker()
+    if provider == "api":
+        return ApiReranker()
     return FakeReranker()

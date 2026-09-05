@@ -73,8 +73,44 @@ class BgeEmbedding(EmbeddingModel):
         return self.model.encode(list(texts), normalize_embeddings=True, batch_size=32).tolist()
 
 
+class ApiEmbedding(EmbeddingModel):
+    """通过私有推理节点(云 GPU)嵌入：POST {base}/embed {texts:[...]} -> {vectors:[[...]]}。
+
+    批量(embedding_batch_size)+ 超时;节点不可达抛异常(已选纯云端,不回退本地 bge)。
+    """
+
+    def __init__(self, base: str | None = None, api_key: str | None = None, batch_size: int | None = None):
+        import httpx
+
+        s = get_settings()
+        self._httpx = httpx
+        self.base = (base or s.embedding_api_base or "").rstrip("/")
+        self.api_key = api_key or s.embedding_api_key or ""
+        self.batch_size = batch_size or s.embedding_batch_size
+        self.dim = s.embedding_dim
+        if not self.base:
+            raise ValueError("EMBEDDING_API_BASE 未设置(embedding_provider=api 时需指向推理节点)")
+
+    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["X-Inference-Token"] = self.api_key
+        out: list[list[float]] = []
+        with self._httpx.Client(timeout=120) as client:
+            for i in range(0, len(texts), self.batch_size):
+                batch = list(texts[i:i + self.batch_size])
+                r = client.post(f"{self.base}/embed", json={"texts": batch}, headers=headers)
+                r.raise_for_status()
+                out.extend(r.json().get("vectors", []))
+        return out
+
+
 def get_embedding(provider: str | None = None) -> EmbeddingModel:
     provider = provider or get_settings().embedding_provider
     if provider == "bge":
         return BgeEmbedding()
+    if provider == "api":
+        return ApiEmbedding()
     return FakeEmbedding()

@@ -27,6 +27,11 @@ node_modules/
 dist/
 build/
 
+# Playwright E2E 产物
+test-results/
+playwright-report/
+frontend/e2e/.auth/
+
 # OS / editor
 .DS_Store
 Thumbs.db
