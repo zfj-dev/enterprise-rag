@@ -4,8 +4,11 @@
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Sequence
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,15 +67,16 @@ def _extract_json_object(text: str):
                 depth -= 1
                 if depth == 0:
                     return json.loads(text[start:i + 1])
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("提取 JSON 对象失败: %s", e)
     return None
 
 
 def _parse_verification(raw: str, claims: list[str]) -> dict:
     try:
         obj = json.loads(raw)
-    except Exception:
+    except Exception as e:
+        logger.warning("解析验证 JSON 失败,回退提取: %s", e)
         obj = _extract_json_object(raw)
     if not isinstance(obj, dict):
         obj = {}
@@ -105,6 +109,7 @@ def verify_claims(answer: str, sources: Sequence[dict], llm, max_claims: int = 8
     try:
         raw = "".join(llm.stream([{"role": "user", "content": prompt}]))
         return _parse_verification(raw, claims)
-    except Exception:
+    except Exception as e:
+        logger.warning("引用校验 LLM 调用失败,降级启发式: %s", e)
         return {"coverage": 1.0 if sources else 0.0,
                 "total": len(claims), "supported": len(claims) if sources else 0}

@@ -1,0 +1,36 @@
+# Orchestrator: NO local GPU dependency.
+# Embed/rerank go to a private GPU inference node; generation goes to DashScope (cloud LLM).
+# Run:  powershell -ExecutionPolicy Bypass -File scripts\run_cloud.ps1
+$ErrorActionPreference = "Stop"
+$backend = Join-Path $PSScriptRoot "..\backend"
+Set-Location $backend
+$py = Join-Path $backend ".venv\Scripts\python.exe"
+
+if (-not (Test-Path $py)) {
+    Write-Host "venv not found. First run scripts\setup_real.ps1"
+    exit 1
+}
+
+# ===== EDIT: your private GPU inference node + DashScope key =====
+$env:USE_REAL = "true"
+$env:SECRET_KEY = "change-me-strong-0123456789abcdef0123456789"
+
+# --- embedding / rerank via private GPU node (NOT the local RTX 4050) ---
+$env:EMBEDDING_PROVIDER = "api"
+$env:EMBEDDING_API_BASE = "http://<gpu-node-ip>:9000"
+$env:EMBEDDING_API_KEY  = "replace_with_inference_token"
+$env:RERANKER_PROVIDER  = "api"
+$env:RERANK_API_BASE    = "http://<gpu-node-ip>:9000"
+$env:RERANK_API_KEY     = "replace_with_inference_token"
+
+# --- cloud LLM (generation only; query snippets go out to the provider) ---
+$env:LLM_PROVIDER  = "dashscope"
+$env:LLM_BASE_URL  = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+$env:LLM_API_KEY   = "replace_with_dashscope_key"
+$env:LLM_MODEL     = "qwen-plus"
+
+# no GPU on the orchestrator: CPU parsing is faster / simpler
+$env:PARSER_USE_DOCLING = "false"
+
+Write-Host "Starting orchestrator (embed/rerank -> private GPU node, LLM -> DashScope)"
+& $py -m uvicorn app.main:app --host 0.0.0.0 --port 8000

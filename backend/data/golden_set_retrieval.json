@@ -1,0 +1,17 @@
+[
+  {"question": "表3.1的内容是什么", "expect": "PyCharm", "page": 29},
+  {"question": "表3.1的实验环境GPU是什么", "expect": "RTX 3060", "page": 29},
+  {"question": "表3.2的内容是什么", "expect": "Focal Loss", "page": 30},
+  {"question": "表3.3的内容是什么", "expect": "apple", "page": 33},
+  {"question": "表3.4的内容是什么", "expect": "Baseline", "page": 35},
+  {"question": "给出所有表格内容", "expect": "表4.1"},
+  {"question": "有哪些图片", "expect": "CBAM"},
+  {"question": "论文的研究对象是什么", "expect": "YOLOv8"},
+  {"question": "数据集包含多少种果蔬", "expect": "21", "page": 29},
+  {"question": "实验环境操作系统是什么", "expect": "Windows11", "page": 29},
+  {"question": "公式中的IoU损失函数是什么", "expect": "IoU"},
+  {"question": "论文提出的改进模块叫什么", "expect": "CBAM"},
+  {"question": "这篇论文的作者联系方式是什么", "negative": true},
+  {"question": "论文研究了哪家公司的手机产品", "negative": true},
+  {"question": "论文的国家自然科学基金项目编号是多少", "negative": true}
+]

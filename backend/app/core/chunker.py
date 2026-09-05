@@ -13,6 +13,18 @@ from app.config import get_settings
 
 _SENT_END = re.compile(r"(?<=[。！？!?\n])")
 
+_FORMULA_SPAN_RE = re.compile(r"\$\$[\s\S]+?\$\$|(?<!\$)\$(?!\$)[^$\n]+?\$(?!\$)")
+
+
+def _formula_spans(text: str) -> list[tuple[int, int]]:
+    """返回 LaTeX 公式块（$$..$$ 或 $..$）在文本中的 [start,end) 区间（含定界符）。
+
+    用于分块时把公式当作原子块：不让 `_split_window` 从公式中间拦腰截断（长公式 > child_size 之前会被切坏）。
+    """
+    if not text:
+        return []
+    return [(m.start(), m.end()) for m in _FORMULA_SPAN_RE.finditer(text)]
+
 
 def _sentences(text: str) -> list[str]:
     parts = _SENT_END.split(text)
@@ -50,11 +62,31 @@ class ParentChildChunker:
     def _split_window(self, text: str, window: int, overlap: int) -> list[str]:
         out, start = [], 0
         step = max(window - overlap, 1)
-        while start < len(text):
-            out.append(text[start:start + window])
-            if start + window >= len(text):
+        n = len(text)
+        spans = _formula_spans(text)
+        while start < n:
+            # start 若落在公式内部 -> 跳到公式末尾（该公式已被前一窗口完整捕获，避免重复）
+            for s, e in spans:
+                if s < start < e:
+                    start = e
+                    break
+            if start >= n:
                 break
-            start += step
+            end = min(start + window, n)
+            # end 若切断公式 -> 扩到公式结束，保证公式完整不残缺
+            for s, e in spans:
+                if s < end < e:
+                    end = e
+                    break
+            if end <= start:  # 兜底防死循环
+                end = min(start + window, n)
+            out.append(text[start:end])
+            if end >= n:
+                break
+            nxt = max(end - overlap, start + step)
+            if nxt <= start:  # 兜底防死循环
+                nxt = start + step
+            start = nxt
         return out
 
     def _semantic_parents(self, text: str) -> list[str]:
