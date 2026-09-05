@@ -1,6 +1,7 @@
 """问答管线：问题优化 → 混合检索 → 引用校验 → Prompt → LLM 生成 → 持久化会话/消息/反馈。"""
 from __future__ import annotations
 
+import logging
 import re
 import time
 
@@ -14,6 +15,8 @@ from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
 from app.core.prompt import build_prompt, build_rewrite_prompt, format_context
 from app.models.entities import ChatMessage, ChatSession, User
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -360,8 +363,8 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
             from app.core.citation import verify_claims
             cov = verify_claims(answer, prep.sources, rt.llm)
             prep.trace["citation_coverage"] = cov.get("coverage")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("引用覆盖率校验失败: %s", e)
 
     asst = ChatMessage(session_id=prep.session_id, role="assistant", content=answer)
     db.add(asst)

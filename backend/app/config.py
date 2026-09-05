@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
 
+    cors_origins: str = "*"  # 允许跨域来源,逗号分隔; 默认* = 局域网 demo,生产用 CORS_ORIGINS=http://a,http://b
+    max_concurrent_streams_per_user: int = 2  # 每用户同时流式对话上限,防单客户端打爆后台 LLM/GPU
+
     vector_store: Literal["inmemory", "pgvector"] = "inmemory"
 
     embedding_model: str = "BAAI/bge-large-zh-v1.5"

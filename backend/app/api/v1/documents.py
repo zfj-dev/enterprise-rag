@@ -1,6 +1,7 @@
 """文档上传 / 列表 / 状态 / 删除。上传异步处理：秒回 processing，后台解析+嵌入。"""
 from __future__ import annotations
 
+import logging
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
@@ -15,6 +16,8 @@ from app.core.schemas import DocumentOut
 from app.models.entities import Chunk, Document, KnowledgeBase, User
 from app.services import document_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
@@ -23,7 +26,8 @@ def _to_out(d: Document) -> DocumentOut:
     try:
         if d.file_path and os.path.exists(d.file_path):
             size = os.path.getsize(d.file_path)
-    except Exception:
+    except Exception as e:
+        logger.warning("读取文档文件大小失败(%s): %s", d.id, e)
         size = 0
     return DocumentOut(id=d.id, filename=d.filename, status=d.status,
                        page_count=d.page_count, chunk_count=d.chunk_count, error=d.error,

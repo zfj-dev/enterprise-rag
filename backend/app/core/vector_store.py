@@ -82,40 +82,79 @@ class InMemoryVectorStore(VectorStore):
 class PgVectorStore(VectorStore):
     """pgvector 实现（真实）。惰性 import；需要 database_url 指向 postgres + 启用 vector 扩展。
 
-    add/search 直接操作 document_chunks 表上的 embedding 向量列（简化：同表存向量+元数据）。
+    embedding 与文本共用 document_chunks 表：本类在 __init__ 用幂等 DDL 补 embedding 列
+    （共享 ORM Chunk 模型不含该列,sqlite 模式不受影响）。add 只在分块行已由 process_document
+    落库后 upsert,因此不会触发其他 NOT NULL 列缺失。
     """
 
     def __init__(self, conn_url: str, dim: int = 1024):
-        import pgvector.sqlalchemy  # 惰性
         from sqlalchemy import create_engine, text
 
         self.dim = dim
         self.engine = create_engine(conn_url, future=True)
-        self._pg = pgvector
+        with self.engine.begin() as conn:
+            conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            conn.execute(text(f"ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS embedding vector({dim})"))
+
+    @staticmethod
+    def _vec_literal(vec: Sequence[float]) -> str:
+        return "[" + ",".join(f"{x:.6f}" for x in vec) + "]"
 
     def add(self, items: Sequence[VectorItem]) -> None:
         from sqlalchemy import text
-        from sqlalchemy.dialects.postgresql import insert
 
-        rows = []
-        for it in items:
-            rows.append({"id": it.id, "doc_id": it.metadata.get("doc_id"),
-                         "kb_id": it.metadata.get("kb_id"), "owner_id": it.metadata.get("owner_id"),
-                         "embedding": "[" + ",".join(f"{x:.6f}" for x in it.vector) + "]"})
+        rows = [
+            {"id": it.id, "doc_id": it.metadata.get("doc_id"), "kb_id": it.metadata.get("kb_id"),
+             "owner_id": it.metadata.get("owner_id"), "embedding": self._vec_literal(it.vector)}
+            for it in items
+        ]
         with self.engine.begin() as conn:
-            stmt = insert(document_chunks_table()).values(rows)
-            stmt = stmt.on_conflict_do_update(index_elements=["id"], set_={"embedding": stmt.excluded.embedding})
-            conn.execute(stmt)
+            conn.execute(text(
+                "INSERT INTO document_chunks (id, doc_id, kb_id, owner_id, embedding) "
+                "VALUES (:id, :doc_id, :kb_id, :owner_id, :embedding) "
+                "ON CONFLICT (id) DO UPDATE SET embedding = EXCLUDED.embedding"
+            ), rows)
 
-    # noqa
     def search(self, vector, top_k=10, filter_meta=None):
-        raise NotImplementedError("PgVectorStore.search 需按 pgvector 距离算子实现；demo/测试用 InMemoryVectorStore")
+        from sqlalchemy import text
 
+        filter_meta = filter_meta or {}
+        qv = self._vec_literal(vector)
+        sql = text(
+            "SELECT c.id, c.content, c.page_num, c.doc_id, c.kb_id, c.owner_id, d.filename AS doc_name, "
+            "1 - (c.embedding <=> :qv) AS score "
+            "FROM document_chunks c JOIN documents d ON d.id = c.doc_id "
+            "WHERE c.chunk_type = 'child' AND c.embedding IS NOT NULL "
+            "AND (:kb_id IS NULL OR c.kb_id = :kb_id) "
+            "AND (:owner_id IS NULL OR c.owner_id = :owner_id) "
+            "ORDER BY c.embedding <=> :qv "
+            "LIMIT :top_k"
+        )
+        with self.engine.connect() as conn:
+            rows = conn.execute(sql, {"qv": qv, "kb_id": filter_meta.get("kb_id"),
+                                      "owner_id": filter_meta.get("owner_id"), "top_k": top_k}).fetchall()
+        return [
+            SearchHit(id=r.id, score=float(r.score), metadata={
+                "kb_id": r.kb_id, "owner_id": r.owner_id, "doc_id": r.doc_id,
+                "doc_name": r.doc_name, "page_num": r.page_num, "content": r.content,
+            })
+            for r in rows
+        ]
 
-def document_chunks_table():
-    from sqlalchemy import MetaData, Table
+    def delete_by(self, doc_id: str | None = None, kb_id: str | None = None) -> None:
+        from sqlalchemy import text
 
-    return Table("document_chunks", MetaData(), autoload_with=None)  # 占位，真实实现用 ORM
+        conds, params = [], {}
+        if doc_id is not None:
+            conds.append("doc_id = :doc_id")
+            params["doc_id"] = doc_id
+        if kb_id is not None:
+            conds.append("kb_id = :kb_id")
+            params["kb_id"] = kb_id
+        if not conds:
+            return
+        with self.engine.begin() as conn:
+            conn.execute(text("DELETE FROM document_chunks WHERE " + " AND ".join(conds)), params)
 
 
 def get_vector_store(

@@ -30,6 +30,12 @@ _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message
 _error_logger.addHandler(_h)
 _error_logger.propagate = False
 
+# ---------- 根 logger：让各模块 logging.getLogger(__name__).warning 落到 stderr（回退/吞异常可见），格式统一 ----------
+_root = logging.getLogger()
+if not any(isinstance(h, logging.StreamHandler) for h in _root.handlers):
+    _root.addHandler(logging.StreamHandler())
+_root.setLevel(logging.WARNING)
+
 
 
 @asynccontextmanager
@@ -45,7 +51,7 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # 局域网 demo；生产应收紧
+        allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

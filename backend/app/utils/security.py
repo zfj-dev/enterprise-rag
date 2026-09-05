@@ -4,12 +4,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 
 import jwt
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _ALGO_ITERATIONS = 200_000
 
@@ -27,7 +30,8 @@ def verify_password(password: str, stored: str) -> bool:
         expected = base64.b64decode(dk_b64)
         dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, int(iters))
         return hmac.compare_digest(dk, expected)
-    except Exception:
+    except Exception as e:
+        logger.warning("verify_password 校验异常: %s", e)
         return False
 
 
@@ -42,5 +46,6 @@ def decode_token(token: str) -> dict | None:
     s = get_settings()
     try:
         return jwt.decode(token, s.secret_key, algorithms=[s.algorithm])
-    except Exception:
+    except Exception as e:
+        logger.warning("decode_token 解析异常: %s", e)
         return None

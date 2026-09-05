@@ -4,10 +4,13 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Sequence
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
@@ -31,7 +34,8 @@ class SemanticCache:
             import redis
 
             self._redis = redis.from_url(get_settings().redis_url or "redis://localhost:6379/0")
-        except Exception:
+        except Exception as e:
+            logger.warning("Redis 初始化失败,回退内存缓存: %s", e)
             self._redis = None
 
     def get(self, question: str, kb_id: str) -> dict | None:

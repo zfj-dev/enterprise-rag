@@ -6,12 +6,15 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import math
 import re
 from abc import ABC, abstractmethod
 from typing import Sequence
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _ASCII = re.compile(r"[a-z0-9]+")
 _CJK = re.compile(r"[一-鿿]")
@@ -59,8 +62,8 @@ class BgeEmbedding(EmbeddingModel):
         if dev == "cuda":
             try:
                 self.model = self.model.half()  # fp16 加速嵌入
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("bge 嵌入转 fp16 失败: %s", e)
         try:
             self.dim = self.model.get_embedding_dimension()   # 新版 API
         except AttributeError:

@@ -5,10 +5,13 @@
 """
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from typing import Sequence
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 _RELEVANCE_OFFSET = 0.15
 
@@ -51,8 +54,8 @@ class BgeReranker(Reranker):
         if self.device == "cuda":
             try:
                 self.model = self.model.half()  # fp16 加速重排
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("bge 重排转 fp16 失败: %s", e)
 
     def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
         pairs = [(query, c.get("content", "")) for c in candidates]

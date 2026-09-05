@@ -1,6 +1,7 @@
 """文档解析路由：按文件类型分派，统一输出文本 + 分页文本（用于按页分块/标注页码）。"""
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -9,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -100,8 +103,8 @@ def _crop_formula_image(res, item, pdf, padding: int = 4, pad_left: int = 30):
         img = item.get_image(res.document)  # docling 内部已处理坐标系；需 page.image 非空
         if img is not None:
             return img
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("docling 取公式图片失败,回退裁剪: %s", e)
 
     provs = getattr(item, "prov", None) or []
     if not provs:
@@ -114,7 +117,8 @@ def _crop_formula_image(res, item, pdf, padding: int = 4, pad_left: int = 30):
     box = prov.bbox.to_top_left_origin(page_height=page.size.height)
     try:
         pdf_page = pdf[pgno - 1]  # docling page_no 为 1-based
-    except Exception:
+    except Exception as e:
+        logger.warning("docling 页码越界/取页失败: %s", e)
         return None
     # docling 页尺寸与 pymupdf 若有细微差异，按比例缩放
     sx = pdf_page.rect.width / page.size.width if page.size.width else 1.0
