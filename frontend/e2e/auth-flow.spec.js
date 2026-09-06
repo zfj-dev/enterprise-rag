@@ -79,3 +79,18 @@ test('用例29 权限验证：viewer 也能看到"新建知识库"按钮（当�
   // 规范预期 viewer 看不到建库按钮；现实实现左栏 ➕ 始终可见
   await expect(page.getByTitle('新建知识库')).toBeVisible();
 });
+
+test('用例30 文档库打开时上传自动刷新列表（修复回归）', async ({ page }) => {
+  const routes = await statefulBackend(page);
+  routes['POST /auth/login'] = (r) => json(r, { access_token: 'tok', role: 'viewer', username: 'test_user_001' });
+  await page.goto('/');
+  await page.fill(U, 'test_user_001');
+  await page.fill(P, 'TestPass123!');
+  await page.getByRole('button', { name: '登录' }).click();
+  await expect(page.locator('#appCard')).toBeVisible();
+  // 先打开文档库(此时 #docList 为空),再上传 -> 列表应自动刷新出现该文档
+  await page.locator('.nav-item', { hasText: '文档库' }).click();
+  await expect(page.locator('#docList')).toBeVisible();
+  await page.setInputFiles('#fileIn', { name: 'e2e.txt', mimeType: 'text/plain', buffer: Buffer.from('企业知识库文档内容') });
+  await expect(page.locator('.doc-item', { hasText: 'e2e.txt' })).toBeVisible();   // 修复:上传后 #docList 已刷新
+});

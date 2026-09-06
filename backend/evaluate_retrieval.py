@@ -87,68 +87,82 @@ def _metrics(ranked: list[dict], gold: set[str], k: int):
 
 def main() -> None:
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
-    # 离线检索评估只用页码文本即可,走 PyMuPDF,避开 docling 模型下载(生产/端到端仍用 docling)
     os.environ.setdefault("PARSER_USE_DOCLING", "false")
+    docs = [d for d in os.environ.get("EVAL_DOCS", "").split(",") if d.strip()] or [DOC]
     lines: list[str] = ["=== RAG 检索质量评估(离线) ==="]
-    lines.append(f"文档: {DOC} | 嵌入: {os.environ.get('EMBEDDING_PROVIDER','fake')} | 检索/重排配置见 config")
+    lines.append(f"嵌入: {os.environ.get('EMBEDDING_PROVIDER','fake')} | 文档数: {len(docs)}")
     with open(GOLDEN, encoding="utf-8") as f:
         golden = json.load(f)
 
     from app.core.container import build_runtime
     rt = build_runtime()
 
+    chunks_by_doc: dict[str, list[dict]] = {}
     t0 = time.time()
-    chunks = _index_doc(rt, DOC)
-    lines.append(f"解析→分块→索引 {len(chunks)} 个 child chunk,耗时 {time.time()-t0:.1f}s")
+    for path in docs:
+        c = _index_doc(rt, path)
+        name = os.path.basename(path)
+        chunks_by_doc[name] = c
+        lines.append(f"索引 {name}: {len(c)} child")
+    lines.append(f"索引耗时 {time.time()-t0:.1f}s")
 
-    fact_questions = [g for g in golden if not g.get("negative")]
-    neg_questions = [g for g in golden if g.get("negative")]
+    def _doc_of(g: dict) -> str:
+        gd = g.get("doc")
+        if gd:
+            return gd
+        return os.path.basename(docs[0]) if docs else ""
 
-    # 每种方法的指标累加器
-    acc = {label: {"hit": {k: [0.0] * len(fact_questions) for k in K_LIST},
-                   "recall": {k: [0.0] * len(fact_questions) for k in K_LIST},
-                   "mrr": [0.0] * len(fact_questions)} for label in ("hybrid+rerank", "hybrid", "vector", "bm25")}
+    acc = {label: {"hit": {k: [] for k in K_LIST}, "recall": {k: [] for k in K_LIST}, "mrr": []}
+           for label in ("hybrid+rerank", "hybrid", "vector", "bm25")}
+    neg_all = [g for g in golden if g.get("negative")]
 
-    for gi, g in enumerate(fact_questions):
-        q, exp = g["question"], g["expect"]
-        gold = {c["id"] for c in chunks if _norm(exp) in _norm(c["content"])
-                and (g.get("page") is None or c["page_num"] == g["page"])}
-        if not gold:
-            lines.append(f"[GOLD缺失] Q:{q} 期望:{exp} —— 未在任一 child chunk 命中,请检查分块/期望值")
+    for docname, chunks in chunks_by_doc.items():
+        fq = [g for g in golden if not g.get("negative") and _doc_of(g) == docname]
+        if not fq:
             continue
-        reranked, merged, v_list, b_list = _rank_lists(rt, q)
-        for label, ranked in (("hybrid+rerank", reranked), ("hybrid", merged), ("vector", v_list), ("bm25", b_list)):
-            for k in K_LIST:
-                h, r, m = _metrics(ranked, gold, k)
-                acc[label]["hit"][k][gi] = h
-                acc[label]["recall"][k][gi] = r
-                acc[label]["mrr"][gi] = m
-        hit3 = sum(acc[x]["hit"][3][gi] for x in acc) / len(acc)
-        lines.append(f"[{'OK' if hit3 >= 0.5 else '..'}] Q:{q} | 期望:{exp} | gold={len(gold)} |"
-                     f" MRR(hybrid+rerank)={acc['hybrid+rerank']['mrr'][gi]:.2f}")
+        lines.append(f"\n--- 文档: {docname} ({len(fq)} 事实问) ---")
+        for g in fq:
+            q, exp = g["question"], g["expect"]
+            gold = {c["id"] for c in chunks if _norm(exp) in _norm(c["content"])
+                    and (g.get("page") is None or c["page_num"] == g["page"])}
+            if not gold:
+                lines.append(f"[GOLD缺失] Q:{q} 期望:{exp}")
+                continue
+            reranked, merged, v_list, b_list = _rank_lists(rt, q)
+            for label, ranked in (("hybrid+rerank", reranked), ("hybrid", merged), ("vector", v_list), ("bm25", b_list)):
+                for k in K_LIST:
+                    h, r, _m = _metrics(ranked, gold, k)
+                    acc[label]["hit"][k].append(h)
+                    acc[label]["recall"][k].append(r)
+                _h, _r, m = _metrics(ranked, gold, len(ranked))   # mrr 每个问题只记一次(用全排名)
+                acc[label]["mrr"].append(m)
+            last = acc["hybrid+rerank"]["mrr"][-1]
+            hit3 = sum(acc[x]["hit"][3][-1] for x in acc) / len(acc)
+            lines.append(f"[{'OK' if hit3 >= 0.5 else '..'}] Q:{q} | 期望:{exp} | gold={len(gold)} | MRR(hybrid+rerank)={last:.3f}")
 
     lines.append("\n=== 汇总(各问题平均) ===")
+    n = len(acc["hybrid"]["mrr"])
     for label in acc:
         a = acc[label]
-        sweep = [f"@k{k}: hit={sum(a['hit'][k])/len(fact_questions):.2f} rec={sum(a['recall'][k])/len(fact_questions):.2f}" for k in K_LIST]
-        lines.append(f"{label:>12}  MRR={sum(a['mrr'])/len(fact_questions):.3f}  " + "  ".join(sweep))
+        sweep = [f"@{k}: hit={sum(a['hit'][k])/max(1,n):.2f} rec={sum(a['recall'][k])/max(1,n):.2f}" for k in K_LIST]
+        lines.append(f"{label:>12}  MRR={sum(a['mrr'])/max(1,n):.3f}  " + "  ".join(sweep))
 
-    lines.append("\n=== 负样本(向量top-1相似度应低于 min_relevance → 该被拒答) ===")
+    lines.append("\n=== 负样本(向量top-1相似度应低于 min_relevance -> 该被拒答) ===")
     from app.config import get_settings
     min_rel = get_settings().min_relevance
-    for g in neg_questions:
+    for g in neg_all:
         qvec = rt.embedding.encode([g["question"]])[0]
         top = rt.vector_store.search(qvec, top_k=1, filter_meta={"kb_id": KB_ID, "owner_id": OWNER_ID})
         top_score = round(top[0].score, 3) if top else None
         top_cid = top[0].id if top else None
-        flag = "低(可拒)" if (top_score or 0) < min_rel else "⚠高(需端到端验证)"
-        lines.append(f"[{flag}] Q:{g['question']} | 向量top-1相似度={top_score} chunk={top_cid} (min_relevance={min_rel})")
+        flag = "低(可拒)" if (top_score or 0) < min_rel else "高(需端到端验证)"
+        lines.append(f"[{flag}] Q:{g['question']} | 向量top-1={top_score} chunk={top_cid} (min_relevance={min_rel})")
 
     with open(REPORT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print(REPORT)
     try:
-        print("\n".join(lines))          # 控制台可能是 GBK,遇'⚠'等会失败;报告文件已写入,异常仅影响打印
+        print("\n".join(lines))
     except UnicodeEncodeError:
         pass
 

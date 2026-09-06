@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     semantic_cache: bool = True
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
+    login_rate_limit_per_min: int = 10  # 登录限流:每用户名每分钟最多尝试次数,超限 429
 
     max_upload_mb: int = 50
     upload_dir: str = "./uploaded_files"

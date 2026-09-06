@@ -32,6 +32,9 @@ def fresh_state():
     import app.api.deps as deps
 
     deps._runtime = None
+    import app.api.v1.auth as _auth_mod
+
+    _auth_mod._login_attempts.clear()   # 登录限流计数按测试清空,避免跨用例累积
     yield
 
 

@@ -38,7 +38,7 @@ def build_runtime() -> Runtime:
     chunker = ParentChildChunker()
     parser = ParserRouter()
     retriever = HybridRetriever(vector_store=vector_store, bm25=bm25, embedding=embedding, reranker=reranker)
-    semantic_cache = SemanticCache(embedding=embedding)
+    semantic_cache = SemanticCache(embedding=embedding, backend="redis" if s.redis_url else "memory")
     return Runtime(embedding=embedding, vector_store=vector_store, bm25=bm25,
                    reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever,
                    semantic_cache=semantic_cache)

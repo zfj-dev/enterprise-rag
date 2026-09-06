@@ -124,7 +124,15 @@ def test_login_response_time(client):
 
 # 用例 13
 def test_login_rate_limit(client):
-    """快速连续登录 10 次：当前实现未做速率限制，应全部返回 401 而非 429（记录缺口）。"""
-    _reg(client, "alice")
-    codes = [_login(client, "alice", "wrong091").status_code for _ in range(10)]
-    assert all(c == 401 for c in codes), f"当前不应触发 429，实际: {codes}"
+    """同一用户名快速连续登录超过限流阈值 -> 429（新增登录限流，防暴力破解）。"""
+    import uuid
+
+    from app.api.v1.auth import _login_attempts
+    from app.config import get_settings
+
+    uname = "rl_" + uuid.uuid4().hex
+    _login_attempts.pop(uname, None)   # 清计数,避免跨测试干扰
+    limit = get_settings().login_rate_limit_per_min
+    codes = [_login(client, uname, "wrong091").status_code for _ in range(limit)]
+    assert all(c == 401 for c in codes)
+    assert _login(client, uname, "wrong091").status_code == 429

@@ -1,0 +1,95 @@
+# 生产编排:PostgreSQL(持久化) + Redis(语义缓存/限流) + API(单 worker, 内存索引启动重嵌) + Caddy(HTTPS/反代)
+# 运行:  cd deploy && docker compose -f docker-compose.prod.yml up -d --build  (或用 ../scripts/deploy.sh)
+# 密钥放同目录 .env(勿提交);模板见 .env.example
+name: rag
+services:
+  api:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    container_name: rag-api-prod
+    env_file: .env                    # SECRET_KEY / LLM_API_KEY / EMBEDDING_API_KEY / RERANK_API_KEY / POSTGRES_PASSWORD / CADDY_DOMAIN
+    environment:
+      DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD}@postgres:5432/rag
+      REDIS_URL: redis://redis:6379/0
+      USE_REAL: "true"
+      SECRET_KEY: ${SECRET_KEY}
+      # 推理走云 GPU 节点(经 SSH 隧道落到编排机 host.docker.internal:9000)
+      EMBEDDING_PROVIDER: api
+      EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-http://host.docker.internal:9000}
+      RERANKER_PROVIDER: api
+      RERANK_API_BASE: ${EMBEDDING_API_BASE:-http://host.docker.internal:9000}
+      LLM_PROVIDER: dashscope
+      LLM_BASE_URL: ${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
+      LLM_MODEL: qwen-plus
+      PARSER_USE_DOCLING: "false"
+      VECTOR_STORE: inmemory          # 单 worker, 启动 reindex_all 重建;pgvector 待验证后再切
+      MAX_UPLOAD_MB: "50"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - rag_upload:/app/uploaded_files
+      - rag_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [ragnet]
+
+  postgres:
+    image: pgvector/pgvector:pg16      # 预装 vector 扩展(后续切 pgvector 存储直接用)
+    container_name: rag-postgres
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: rag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [ragnet]
+
+  redis:
+    image: redis:7-alpine
+    container_name: rag-redis
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    networks: [ragnet]
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: rag-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+    networks: [ragnet]
+
+volumes:
+  pgdata: {}
+  redisdata: {}
+  rag_upload: {}
+  rag_logs: {}
+  caddy_data: {}
+  caddy_config: {}
+
+networks:
+  ragnet: {}

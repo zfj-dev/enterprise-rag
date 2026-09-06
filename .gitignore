@@ -44,3 +44,7 @@ backend/verify_paper.pdf
 
 # 本地运行脚本（含真实 API Key，复制自 run_real.ps1.example）
 scripts/run_real.ps1
+scripts/run_cloud.ps1
+
+# 生产环境密钥（复制自 deploy/.env.example 后填真值）
+deploy/.env

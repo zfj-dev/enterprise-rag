@@ -29,17 +29,20 @@ test('用例2 正常登录：正确凭据登录成功，切到应用视图并写
   expect(tok).toBe('tok');
 });
 
-test('用例3 登录加载/防重复：点击一次仅发一次请求（前端无内置 loading 禁用态，记录该缺口）', async ({ page }) => {
+test('用例3 登录防重复+loading：点击后按钮禁用并显示"登录中…"，仅一次请求', async ({ page }) => {
   const routes = await installApiMock(page);
   let calls = 0;
-  routes['POST /auth/login'] = (r) => { calls += 1; return json(r, { access_token: 'tok', role: 'viewer', username: 'test_user_001' }); };
+  routes['POST /auth/login'] = async (r) => { calls += 1; await new Promise(res => setTimeout(res, 600)); return json(r, { access_token: 'tok', role: 'viewer', username: 'test_user_001' }); };
   fillAppBoot(routes);
   await page.goto('/');
   await page.fill(U, 'test_user_001');
   await page.fill(P, 'TestPass123!');
-  await page.getByRole('button', { name: '登录' }).click();
-  await expect(page.locator('#appCard')).toBeVisible();
-  expect(calls).toBe(1);   // 单次点击只发一次请求
+  const btn = page.locator('#loginCard .btn-primary');
+  await btn.click();
+  await expect(btn).toBeDisabled();            // 防重复提交:按钮禁用
+  await expect(btn).toHaveText('登录中…');
+  await expect(page.locator('#appCard')).toBeVisible();   // 请求完成后进入应用
+  expect(calls).toBe(1);   // 仅一次请求
 });
 
 test('用例4 错误密码：提示统一文案"用户名或密码错误"，不暴露具体原因', async ({ page }) => {
