@@ -34,8 +34,8 @@ _cache: dict[str, list[float]] = {}
 _cache_lock = threading.Lock()
 
 
-def _enter_authed(x_token: str | None) -> None:
-    if TOKEN and x_token != TOKEN:
+def _enter_authed(x_inference_token: str | None) -> None:
+    if TOKEN and x_inference_token != TOKEN:
         raise HTTPException(401, "invalid inference token")
 
 
@@ -89,8 +89,8 @@ def health():
 
 
 @app.post("/embed")
-def embed(req: EmbedReq, x_token: str | None = Header(default=None)):
-    _enter_authed(x_token)
+def embed(req: EmbedReq, x_inference_token: str | None = Header(default=None)):
+    _enter_authed(x_inference_token)
     model = _get_embed()
     texts = req.texts or []
     vectors: list[list[float]] = []
@@ -121,8 +121,8 @@ def embed(req: EmbedReq, x_token: str | None = Header(default=None)):
 
 
 @app.post("/rerank")
-def rerank(req: RerankReq, x_token: str | None = Header(default=None)):
-    _enter_authed(x_token)
+def rerank(req: RerankReq, x_inference_token: str | None = Header(default=None)):
+    _enter_authed(x_inference_token)
     docs = req.documents or []
     if not docs:
         return {"results": []}
