@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
 
 from dataclasses import dataclass, field
@@ -15,6 +16,7 @@ from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
 from app.core.context import ContextPlan, assemble_context
 from app.core.llm import LLM
+from app.core.memory import FactExtractor
 from app.core.prompt import build_prompt, build_rewrite_prompt, format_context
 from app.models.entities import ChatMessage, ChatSession, User
 
@@ -387,10 +389,32 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     db.refresh(asst)
 
     prep.trace["message_id"] = asst.id
+    _launch_fact_extraction(rt, prep, answer=answer, message_id=asst.id)
     prep.trace["cache_hit"] = cache_hit
     yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
            "answer": answer, "cache_hit": cache_hit,
            "citation_coverage": prep.trace.get("citation_coverage")}
+
+
+def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id: str) -> None:
+    """问答完成后**异步**抽取"用户告知的事实"并按用户落库。
+
+    抽取失败/变慢一律旁路：调用点此刻已回答完毕，抽取既不阻塞回答、也不阻塞下一问。
+    演示/测试用的假模型不抽（其输出不是真实用户陈述，抽了只会污染记忆）。
+    """
+    if not get_settings().memory_enabled or prep.llm.is_fake:
+        return
+    user_id, session_id, llm = prep.user.id, prep.session_id, prep.llm
+
+    def _run() -> None:
+        try:
+            facts = rt.fact_extractor_factory(llm).extract(prep.question, answer)
+            if facts:
+                rt.memory_store.add(user_id, facts, session_id=session_id, message_id=message_id)
+        except Exception as e:   # noqa: BLE001 —— 旁路：任何失败都不该冒泡到问答
+            logger.warning("事实抽取失败（已旁路）：%s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,

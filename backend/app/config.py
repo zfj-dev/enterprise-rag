@@ -77,6 +77,8 @@ class Settings(BaseSettings):
     docling_formula_enrichment: bool = False  # 锁定=关：Docling 能从文本层抽原始公式文本($$..$$)，企业文档公式少，不上 CodeFormulaV2 VLM
     docling_formula_ocr: bool = True  # 公式图片→LaTeX：用 pix2tex 裁图识别(轻量,CPU可跑)；未装 pix2tex 或识别失败自动跳过
     semantic_cache: bool = True
+    memory_enabled: bool = True   # 跨会话记忆：问答后异步抽取"用户告知的事实"并按用户落库
+    memory_extract_max_facts: int = 5  # 单轮最多抽取几条事实
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
     login_rate_limit_per_min: int = 10  # 登录限流:每用户名每分钟最多尝试次数,超限 429

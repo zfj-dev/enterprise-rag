@@ -14,6 +14,8 @@ from app.core.context import (ApproxTokenCounter, LlmSummarizer, Summarizer,
 from app.core.chunker import ParentChildChunker
 from app.core.embedding import EmbeddingModel, get_embedding
 from app.core.llm import LLM, get_llm
+from app.core.memory import (DbMemoryStore, FactExtractor, LlmFactExtractor,
+                             MemoryStore)
 from app.core.parser import ParserRouter
 from app.core.reranker import Reranker, get_reranker
 from app.core.retriever import HybridRetriever
@@ -35,6 +37,8 @@ class Runtime:
     user_llm_config_store: UserLLMConfigStore = field(default_factory=InMemoryUserLLMConfigStore)
     token_counter: TokenCounter = field(default_factory=ApproxTokenCounter)
     context_summarizer_factory: Callable[[LLM], Summarizer] = LlmSummarizer
+    fact_extractor_factory: Callable[[LLM], FactExtractor] = LlmFactExtractor
+    memory_store: MemoryStore = field(default_factory=DbMemoryStore)
 
     def llm_for(self, user_id: str) -> LLM:
         """按发起用户解析 LLM：配了自带模型就用它，否则回落服务端全局（行为与今天一致）。"""

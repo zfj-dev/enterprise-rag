@@ -100,6 +100,19 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class MemoryFact(Base):
+    """跨会话记忆：一条"用户告知过的事实"。按 user 隔离；不作为引用来源。"""
+
+    __tablename__ = "memory_facts"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    content: Mapped[str] = mapped_column(Text)
+    source_session_id: Mapped[str] = mapped_column(String(32), default="")
+    source_message_id: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Feedback(Base):
     __tablename__ = "feedback"
 
