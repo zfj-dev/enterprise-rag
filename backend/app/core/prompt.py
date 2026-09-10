@@ -14,6 +14,11 @@ SYSTEM_PROMPT = (
 )
 
 
+def format_turn(turn: dict) -> str:
+    """把一轮对话渲染成「用户：…／助手：…」。装配、摘要、提示词共用同一形状。"""
+    return f"用户：{turn.get('user', '')}\n助手：{turn.get('assistant', '')}"
+
+
 def build_prompt(
     query: str,
     context: str,
@@ -21,16 +26,17 @@ def build_prompt(
     graph_context: str | None = None,
     system: str = SYSTEM_PROMPT,
     enum_hint: str | None = None,
+    summary: str | None = None,
 ) -> str:
     parts = [system]
     if context:
         parts.append(f"【参考资料】\n{context}")
     if graph_context:
         parts.append(f"【知识图谱关联】\n{graph_context}")
+    if summary:
+        parts.append(f"【更早对话摘要】\n{summary}")
     if history:
-        lines = []
-        for h in history[-3:]:
-            lines.append(f"用户：{h.get('user', '')}\n助手：{h.get('assistant', '')}")
+        lines = [format_turn(h) for h in history]
         parts.append("【历史对话】\n" + "\n".join(lines))
     if enum_hint:
         parts.append(f"【注意】{enum_hint}")

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
+from app.core.context import ContextPlan, assemble_context
 from app.core.llm import LLM
 from app.core.prompt import build_prompt, build_rewrite_prompt, format_context
 from app.models.entities import ChatMessage, ChatSession, User
@@ -268,11 +269,19 @@ def _to_sources(candidates: list[dict]) -> list[dict]:
 def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
             session_id: str | None = None) -> Prep:
     sess = _get_or_create_session(db, user, kb_id, session_id)
-    history = _load_history(db, sess.id, limit=6)
+    s = get_settings()
+    history = _load_history(db, sess.id, limit=s.context_history_messages)
     cat = _enum_intent(question)
     refs = [r for r in _named_ref_intent(question) if r[0] in ("表", "表格", "图", "公式")]
     # 枚举/具体编号类问题本身完整清晰：跳过 LLM 改写，避免历史污染查询
     llm = rt.llm_for(user.id)   # 按发起用户解析：自带模型 / 回落服务端全局
+    if s.context_compress:
+        plan = assemble_context(history, budget=s.context_token_budget,
+                                keep_recent=s.context_keep_recent,
+                                count_tokens=rt.token_counter.count,
+                                summarize=rt.context_summarizer_factory(llm).summarize)
+    else:   # 关闭压缩：直接透传全部已加载历史
+        plan = ContextPlan(summary=None, kept=history)
     q2 = question if (cat or refs) else _maybe_rewrite(llm, question, history)
     candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
     enum_hint = None
@@ -315,7 +324,7 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                      f"请严格依据【参考资料】中该编号对应的块回答，不要引用历史对话中的其他表格/图片/内容。")
     ccit = validate_sources(candidates)
     context = format_context(candidates)
-    prompt = build_prompt(question, context, history=history, enum_hint=enum_hint)
+    prompt = build_prompt(question, context, history=plan.kept, enum_hint=enum_hint, summary=plan.summary)
 
     user_msg = ChatMessage(session_id=sess.id, role="user", content=question)
     db.add(user_msg)
@@ -328,7 +337,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     return Prep(
         session_id=sess.id, user=user, kb_id=kb_id, question=question, rewrite=q2,
         candidates=candidates, sources=_to_sources(candidates), prompt=prompt, llm=llm, _ccit=ccit,
-        trace={"query": question, "rewrite": q2, "history_turns": len(history),
+        trace={"query": question, "rewrite": q2, "history_turns": len(plan.kept),
+               "context_dropped": plan.dropped,
                "enum_cat": cat, "candidates": len(candidates),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )

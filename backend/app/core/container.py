@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Callable
 
 from app.config import get_settings
 from app.core.bm25 import InMemoryBm25
 from app.core.byok import (InMemoryUserLLMConfigStore, LLMFactory,
                            OpenAICompatLLMFactory, UserLLMConfigStore)
 from app.core.cache import SemanticCache
+from app.core.context import (ApproxTokenCounter, LlmSummarizer, Summarizer,
+                               TokenCounter)
 from app.core.chunker import ParentChildChunker
 from app.core.embedding import EmbeddingModel, get_embedding
 from app.core.llm import LLM, get_llm
@@ -30,6 +33,8 @@ class Runtime:
     semantic_cache: SemanticCache
     llm_factory: LLMFactory = field(default_factory=OpenAICompatLLMFactory)
     user_llm_config_store: UserLLMConfigStore = field(default_factory=InMemoryUserLLMConfigStore)
+    token_counter: TokenCounter = field(default_factory=ApproxTokenCounter)
+    context_summarizer_factory: Callable[[LLM], Summarizer] = LlmSummarizer
 
     def llm_for(self, user_id: str) -> LLM:
         """按发起用户解析 LLM：配了自带模型就用它，否则回落服务端全局（行为与今天一致）。"""

@@ -54,6 +54,11 @@ class Settings(BaseSettings):
     llm_model: str = "deepseek-chat"
     llm_temperature: float = 0.1
     llm_max_tokens: int = 2048  # 枚举/长回答不截断
+    # 上下文预算（读取侧）：历史超过此 token 数才压缩。**与 llm_max_tokens（输出上限）无关**。
+    context_token_budget: int = 3000
+    context_compress: bool = True    # 关闭则不做压缩，退回只带最近若干轮原文
+    context_keep_recent: int = 3        # 压缩时保留的最近轮数（原文）
+    context_history_messages: int = 20  # 每次问答从库里加载的历史**消息**条数上限（一轮=2 条）
     fake_llm_delay: float = 0.0  # FakeLLM 每块延时(秒)，默认0不延时；设>0 便于演示/测试肉眼观察流式与"停止"
 
     chunk_parent_size: int = 512
