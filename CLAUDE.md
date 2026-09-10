@@ -101,6 +101,10 @@ AI 求职 + 真给身边人用的**自托管 RAG 文档问答**，单人独立�
 
 Issues for this repo live as GitHub issues (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
 
+### Triage labels
+
+Five canonical triage states, label strings equal to their names. See `docs/agents/triage-labels.md`.
+
 ### Domain docs
 
 Single-context layout (one `CONTEXT.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.
