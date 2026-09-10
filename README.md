@@ -211,7 +211,7 @@ enterprise-rag/
 │   │   ├── models/        # SQLAlchemy ORM 实体
 │   │   ├── services/      # document_service / chat_service
 │   │   └── db/  utils/  config.py  main.py
-│   ├── data/              # 黄金集 + 样本文档
+│   ├── data/              # 黄金集（样本文档由 scripts/gen_sample_docs.py 生成）
 │   ├── tests/             # pytest（单元 + API 集成 + 回归契约）
 │   ├── evaluate.py  evaluate_retrieval.py  selftest.py  verify_*.py  diagnose_*.py
 │   └── requirements.txt  requirements-real.txt  requirements-prod.txt  Dockerfile
