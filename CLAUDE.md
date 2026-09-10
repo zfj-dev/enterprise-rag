@@ -94,3 +94,13 @@ AI 求职 + 真给身边人用的**私有化 RAG 文档问答**，单人独立�
 - **前端体验（2026-09-02）**：① KaTeX 去掉 `defer`（页面脚本前加载好），消除刷新后公式延迟渲染；② `ask()` 去掉全局 `STREAMING` 锁，支持**多对话同时流式输出**，每条 AI 消息自带「⏹停止」按钮；③ 点引用来源改为**右侧「文档管理」面板切到「原文预览」模式**（`showSource`→`#srcPrev`），加载全文+自动滚动到对应页+黄色 pulse 高亮闪烁后渐隐，`‹返回` 恢复文档列表（`exitSourcePreview`）。
 - **多对话并发隔离 + 原文预览精确高亮（2026-09-02）**：① `ask()` 每流独立 `AbortController`/`reqSession`/`st.session`，`ACTIVE_STREAMS` 改 Map 按流注册；`sources` 事件只在当前视图仍是该会话时才回写 `SESSION`/localStorage（防串台），并刷新会话列表；`stopCurrent()` 优先停当前激活会话(SESSION)的流、否则最后启动的，只停一个。② `showSource` 按页渲染(`src-page`)到右栏 `#srcPrev`，只高亮来源片段(`mark.src-flash`)，`prev.scrollTop+=` 手动定位到该页（仅右栏内部滚动，不滚页面）；`@keyframes srcFlash` 黄色闪烁 3 次(0/30/60%)+渐隐(2.2s ease 1)。
 - **多对话 Map 架构重构（2026-09-02）**：前端会话管理层改为 `conversations: Map<uuid, Conversation>`（id/kbId/title/messages/ctrl/isStreaming/currentStreamText/sources）+ `activeConversationId`；每条消息/流式/`abortController`/`currentStreamText` 都按对话隔离；localStorage 用 `chat_history_${conversationId}` 分 key（刷新按 key 恢复、禁止合并）；新建对话即时插 UUID 标题；切换对话只改 `activeConversationId` 不关其他 SSE；停止只停当前激活对话；后端 `_get_or_create_session` 支持客户端 UUID 直接作为会话 id。左列表 pin/多选暂简化（保留重命名/删除），来源点击卡片保留。⚠️ 大重构，需真机全面回归。
+
+## Agent skills
+
+### Issue tracker
+
+Issues for this repo live as GitHub issues (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context layout (one `CONTEXT.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.
