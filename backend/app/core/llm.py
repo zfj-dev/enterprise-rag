@@ -15,12 +15,16 @@ FAKE_ANSWER = (
 
 
 class LLM(ABC):
+    is_fake: bool = False   # 演示/测试用的假模型；真实模型为 False
+
     @abstractmethod
     def stream(self, messages: list[dict]) -> Iterator[str]:
         ...
 
 
 class FakeLLM(LLM):
+    is_fake = True
+
     def stream(self, messages: list[dict]) -> Iterator[str]:
         delay = get_settings().fake_llm_delay
         for piece in _chunk_text(FAKE_ANSWER, 20):

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
+from app.core.llm import LLM
 from app.core.prompt import build_prompt, build_rewrite_prompt, format_context
 from app.models.entities import ChatMessage, ChatSession, User
 
@@ -29,16 +30,17 @@ class Prep:
     candidates: list[dict]
     sources: list[dict]
     prompt: str
+    llm: LLM
     _ccit: object = None
 
     trace: dict = field(default_factory=dict)
 
 
-def _maybe_rewrite(rt: Runtime, question: str, history: list[dict]) -> str:
-    if get_settings().llm_provider == "fake":
-        return question  # 演示/测试不真调 LLM，保持确定性；真实模式才做"问题优化"
+def _maybe_rewrite(llm: LLM, question: str, history: list[dict]) -> str:
+    if llm.is_fake:
+        return question  # 演示/测试不真调 LLM，保持确定性；真实模型才做"问题优化"
     messages = [{"role": "user", "content": build_rewrite_prompt(question, history)}]
-    rewritten = "".join(rt.llm.stream(messages)).strip()
+    rewritten = "".join(llm.stream(messages)).strip()
     return rewritten or question
 
 
@@ -270,7 +272,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     cat = _enum_intent(question)
     refs = [r for r in _named_ref_intent(question) if r[0] in ("表", "表格", "图", "公式")]
     # 枚举/具体编号类问题本身完整清晰：跳过 LLM 改写，避免历史污染查询
-    q2 = question if (cat or refs) else _maybe_rewrite(rt, question, history)
+    llm = rt.llm_for(user.id)   # 按发起用户解析：自带模型 / 回落服务端全局
+    q2 = question if (cat or refs) else _maybe_rewrite(llm, question, history)
     candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
     enum_hint = None
     if cat:
@@ -324,7 +327,7 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
 
     return Prep(
         session_id=sess.id, user=user, kb_id=kb_id, question=question, rewrite=q2,
-        candidates=candidates, sources=_to_sources(candidates), prompt=prompt, _ccit=ccit,
+        candidates=candidates, sources=_to_sources(candidates), prompt=prompt, llm=llm, _ccit=ccit,
         trace={"query": question, "rewrite": q2, "history_turns": len(history),
                "enum_cat": cat, "candidates": len(candidates),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
@@ -336,7 +339,9 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
     # 精确编号引用（表3.1 vs 表3.3 只差数字）跳过语义缓存，避免返回相似问题的旧答案
     precise = bool(_named_ref_intent(prep.question))
-    use_cache = get_settings().semantic_cache and not precise
+    # 语义缓存按 (问题, 知识库) 共享。自带模型的用户必须绕开它，
+    # 否则可能命中由服务端全局模型生成的旧答案。
+    use_cache = get_settings().semantic_cache and not precise and prep.llm is rt.llm
     cache_hit = False
     hit = None
     if use_cache:
@@ -351,17 +356,17 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
             time.sleep(0.01)
     else:
         chunks: list[str] = []
-        for piece in rt.llm.stream([{"role": "user", "content": prep.prompt}]):
+        for piece in prep.llm.stream([{"role": "user", "content": prep.prompt}]):
             chunks.append(piece)
             yield {"type": "delta", "text": piece}
         if use_cache:
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
         answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
 
-    if get_settings().llm_provider != "fake":  # 真实模式：逐句校验引用覆盖率
+    if not prep.llm.is_fake:  # 真实模型才逐句校验引用覆盖率
         try:
             from app.core.citation import verify_claims
-            cov = verify_claims(answer, prep.sources, rt.llm)
+            cov = verify_claims(answer, prep.sources, prep.llm)
             prep.trace["citation_coverage"] = cov.get("coverage")
         except Exception as e:
             logger.warning("引用覆盖率校验失败: %s", e)
