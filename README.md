@@ -195,7 +195,7 @@ cd deploy && docker compose up -d
 - 模型惰性加载 + fp16 + 结果缓存 + 并发信号量；只监听私网。
 - 启动：`scripts\run_inference_node.ps1`；编排侧用形态 ③ 的 `EMBEDDING_PROVIDER=api` 指向它。
 
-这是「**数据不出内网**」私有化卖点的落点：向量化只在私有节点内完成。
+它的实际用途是把嵌入/重排从本机迁到另一台 GPU 机器（或云 GPU），编排机本身不必带 GPU。**注意：生成仍走云端 LLM API**，所以这**不构成「数据不出内网」的保证**。
 
 ---
 
@@ -239,7 +239,7 @@ enterprise-rag/
 ## 已知边界与路线图
 
 - ✅ **已完成**：全链路（上传→检索→引用→反馈）、混合检索 + RRF + 重排、逐句引用校验、评测闭环、私有推理节点、生产编排、94 项自动化测试。
-- 🚧 **计划中**（详见 [docs/ROADMAP.md](docs/ROADMAP.md)）：RAGAS 四项 + RGB 中文基准（→ 业界可比数字）；Agentic（ReAct + 3 工具）；MCP server；会话摘要压缩上下文；成本面板；一键私有化部署包。
+- 🚧 **计划中**（详见 [docs/ROADMAP.md](docs/ROADMAP.md)）：RAGAS 四项 + RGB 中文基准（→ 业界可比数字）；Agentic（ReAct + 3 工具）；MCP server；会话摘要压缩上下文；成本面板；自带 Key（BYOK）。
 - ⚠️ **边界**：
   - **在线 Demo 地址与演示视频尚未上线**（本仓库目前是源码 + 一键本地/局域网部署）。
   - 真实模式依赖 `requirements-real.txt`（`bge` / `docling` / 公式 OCR 模型）；Windows 上 Docling 下载 HuggingFace 模型需要 `run_real.ps1` 里预设的几个环境变量（关闭符号链接、关闭 Xet、走镜像）。
