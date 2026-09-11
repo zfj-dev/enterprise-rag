@@ -231,6 +231,17 @@ class Report:
                 return x.ctx_note
         return ""
 
+    @property
+    def reduction_missing_reason(self) -> str:
+        """没有降幅数字时的**原因**（只此一处）——「有分词器但没可压的历史」与「没分词器」是两回事。
+
+        三处渲染（本模块的 `_token_lines`、`evaluate_all`、`eval_compare`）都从这里取原因：
+        各写各的必然会漂移，把「不适用」说成「没有真实分词器」就成了假话。
+        """
+        if self.tokenizer_label:
+            return "不适用（本次没有可压的多轮历史；口径 %s）" % self.tokenizer_label
+        return "不可用（%s）" % (self.tokenizer_note or "没有真实分词器（不拿字数估算顶替）")
+
     def _token_lines(self) -> list:
         """压缩降幅那一段 —— 三种情形分得清清楚楚，绝不把「没数据」说成「没分词器」。
 
@@ -247,12 +258,8 @@ class Report:
             return ["上下文压缩降幅(token) %d%%  (压缩前 %d -> 压缩后 %d；%d 条计入；%s)"
                     % (round(red * 100), sum(b for b, _ in pairs),
                        sum(a for _, a in pairs), len(pairs), scope)]
-        if self.tokenizer_label:
-            # 分词器好好的，只是这次没有可压的多轮历史 —— 别把原因写错
-            return ["上下文压缩降幅(token) 不适用  (本次没有可压的多轮历史；%s)" % scope]
-        # 原因如实写：可能是没接分词器，也可能是本问豁免压缩 —— 别一律说成分词器的事
-        reason = self.tokenizer_note or "没有真实分词器（不拿字数估算顶替）"
-        return ["上下文压缩降幅(token) 不可用  (%s)" % reason]
+        return ["上下文压缩降幅(token) %s  (%s)"
+                % (self.reduction_missing_reason, scope)]
 
     @property
     def page_rate(self) -> float | None:

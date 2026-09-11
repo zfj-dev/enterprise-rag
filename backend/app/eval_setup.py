@@ -9,11 +9,17 @@ import os
 
 
 def ensure_schema() -> None:
-    """库表没建过就先建（幂等）—— 评测脚本要能在一台干净机器上独立跑起来。"""
+    """库表没建过就先建（幂等），**并给升级过列的老库补列** —— 评测脚本要能独立跑起来。
+
+    `create_all` 只建表、不会给已有的表加列：少了补列这一步，老库上跑评测会当场撞
+    `no such column`（与 app 启动的 lifespan 走同一处，见 app/db/migrate.py）。
+    """
+    from app.db.migrate import ensure_sqlite_columns
     from app.db.session import engine
     from app.models.entities import Base
 
     Base.metadata.create_all(bind=engine)
+    ensure_sqlite_columns(engine)
 
 
 def eval_user(db, username: str):

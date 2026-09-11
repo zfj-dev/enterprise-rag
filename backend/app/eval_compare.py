@@ -1,8 +1,11 @@
-"""同一黄金集跑多条链路，把数字并排对比（票 15）。
+"""同一黄金集跑多条链路，把数字并排对比（票 15）；外加压缩的**质量护栏**结论（票 22）。
 
 只做**计时 + 排版**：每条链路都以 AnswerFn 注入，指标一律取自评测核心（票 01）——
 对比表里另算一套公式，就等于有了两份口径。
 率型指标写成百分点差（pp），三行延迟都写毫秒差；没分母的写 -，绝不写 0。
+
+`run_links` 跑、`render_compare` 排、`compare_links` 是两者的合成；质量护栏（`guardrail_lines`）
+拿前两者的报告判「压缩后事实命中有没有下降」，因此不必把黄金集再跑一遍。
 """
 from __future__ import annotations
 
@@ -58,21 +61,37 @@ def _timed(ask: AnswerFn) -> tuple[AnswerFn, list]:
     return wrapped, times
 
 
-def compare_links(goldenset: Sequence[dict], links: dict[str, AnswerFn],
-                  note: str | None = None) -> list[str]:
-    """`{链路名: answer_fn}` -> 对比报告正文。字典顺序即报告里的列顺序。
+def _require_two(names: Sequence) -> None:
+    """一条链路谈不上对比 —— 跑之前就拦下，别白跑一遍黄金集再报错。"""
+    if len(names) < 2:
+        raise ValueError("对比至少要两条链路，当前只有 %d 条" % len(names))
+
+
+def run_links(goldenset: Sequence[dict], links: dict[str, AnswerFn]
+              ) -> tuple[dict[str, Report], dict[str, list]]:
+    """跑每条链路，返回 (报告, 每次提问的挂钟)。
+
+    指标一律来自评测核心；报告与挂钟分开交回 —— 对比正文之外还要拿报告做判据的场景
+    （质量护栏看的是事实命中）不必把黄金集跑第二遍。
+    """
+    _require_two(links)
+    reports: dict[str, Report] = {}
+    spans: dict[str, list] = {}
+    for name, ask in links.items():
+        timed, seen = _timed(ask)
+        reports[name] = run_eval(goldenset, timed)
+        spans[name] = seen
+    return reports, spans
+
+
+def render_compare(reports: dict[str, Report], spans: dict[str, list],
+                   note: str | None = None) -> list[str]:
+    """把**已经跑出来的**报告排成对比正文。字典顺序即报告里的列顺序。
 
     `note` 由调用方补一行口径（例如「这一列只含代理循环本身」）—— 口径跟数字写在一起才可信。
     """
-    names = list(links)
-    if len(names) < 2:
-        raise ValueError("对比至少要两条链路，当前只有 %d 条" % len(names))
-    reports: dict[str, Report] = {}
-    spans: dict[str, list] = {}
-    for name in names:
-        ask, seen = _timed(links[name])
-        reports[name] = run_eval(goldenset, ask)
-        spans[name] = seen
+    _require_two(reports)
+    names = list(reports)
 
     head = reports[names[0]]
     lines = [
@@ -104,4 +123,81 @@ def compare_links(goldenset: Sequence[dict], links: dict[str, AnswerFn],
     for name in names:
         lines += ["", "=== %s · 明细 ===" % name]
         lines.extend(reports[name].to_lines())
+    return lines
+
+
+def compare_links(goldenset: Sequence[dict], links: dict[str, AnswerFn],
+                  note: str | None = None) -> list[str]:
+    """`{链路名: answer_fn}` -> 对比报告正文（跑一遍 + 排版）。"""
+    reports, spans = run_links(goldenset, links)
+    return render_compare(reports, spans, note=note)
+
+
+# ---------- 质量护栏（票 22）----------
+
+def _reduction_phrase(report: Report) -> str:
+    """降幅那一句：有数字就带上口径，没有就照评测核心给的原因如实写。"""
+    rate = report.token_reduction_rate
+    if rate is None:
+        return report.reduction_missing_reason
+    return "%.0f%%  (口径 %s；%d 条计入)" % (round(rate * 100), report.tokenizer_label,
+                                          report.token_reduction_count)
+
+
+def _fact_moves(before: Report, after: Report) -> tuple[list[str], list[str]]:
+    """逐条看事实命中怎么动的（两份报告按黄金集顺序对齐）。
+
+    整体持平也可能是「一条升、一条降」—— 只看合计会把这种置换当成没变。
+    """
+    lost, gained = [], []
+    for b, a in zip(before.positives, after.positives):
+        if b.fact_hit and not a.fact_hit:
+            lost.append(a.question)
+        elif a.fact_hit and not b.fact_hit:
+            gained.append(a.question)
+    return lost, gained
+
+
+def guardrail_lines(before: Report, after: Report) -> list[str]:
+    """质量护栏结论（票 22）：**事实命中不下降**才算通过，降幅与它**并列**呈现。
+
+    「压缩」这类优化最容易把降 token 当成成果，所以这里的判据是**质量**：事实命中掉了
+    就明确写「未通过」，并说明降幅不算数 —— 只报降幅不报质量，等于奖励「把上下文砍掉」。
+    没有分母（黄金集里没有正样本）时写「不可判定」，绝不写「通过」；这轮压根没压到东西
+    时（降幅不适用）也要说清 —— 那样的「通过」证明不了压缩安全。
+    """
+    first = _ratio(before.fact_rate, before.positives)
+    second = _ratio(after.fact_rate, after.positives)
+    lines = ["", "=== 质量护栏（压缩前 -> 压缩后）==="]
+    if first is None or second is None:
+        lines.append("  不可判定 —— 黄金集里没有正样本，事实命中率没有分母；降幅不构成结论")
+        lines.append("  压缩降幅 %s" % _reduction_phrase(after))
+        return lines
+
+    delta = second - first
+    if first == 0 and second == 0:
+        verdict = "通过 —— 但两边都是 0%，这条通过没有信息量，先确认黄金集与模型可用"
+    elif delta < -1e-9:
+        verdict = "**未通过** —— 事实命中下降 %dpp；压缩降幅不算数" % round(-delta * 100)
+    elif delta > 1e-9:
+        verdict = "通过 —— 事实命中还上升了 %dpp" % round(delta * 100)
+    else:
+        verdict = "通过 —— 事实命中未下降"
+    lines.append("  事实命中 压缩前 %.0f%% -> 压缩后 %.0f%%   %s"
+                 % (first * 100, second * 100, verdict))
+    lines.append("  压缩降幅 %s" % _reduction_phrase(after))
+
+    lost, gained = _fact_moves(before, after)
+    if lost and gained:
+        lines.append("  逐条变化： %d 条由未命中变命中、%d 条由命中变未命中 —— 整体持平不等于没变，"
+                     "看下面的明细" % (len(gained), len(lost)))
+    elif lost:
+        lines.append("  逐条变化： %d 条由命中变未命中" % len(lost))
+    elif gained:
+        lines.append("  逐条变化： %d 条由未命中变命中" % len(gained))
+
+    if after.tokenizer_label and after.token_reduction_rate is None:
+        lines.append("  注意：这一轮**没有真的压到东西**（降幅不适用）——"
+                     "这条通过只能证明链路跑得通，证明不了压缩安全")
+    lines.append("  判据：两侧都只用评测核心的数字；降幅与事实命中**一起看** —— 单看降幅不算成果")
     return lines

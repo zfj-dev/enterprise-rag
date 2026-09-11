@@ -199,3 +199,15 @@ def test_the_reduction_row_says_unavailable_without_a_real_tokenizer():
                if "上下文压缩降幅" in ln)
 
     assert "不可用" in row and "%" not in row
+
+
+def test_a_working_tokenizer_with_nothing_to_compress_is_not_called_missing():
+    """有分词器、只是这轮没压到东西 —— 不许写成「没有真实分词器」（原因取自评测核心那一处）。"""
+    item = _item(True)
+    item.ctx_before, item.ctx_after, item.ctx_tokenizer = 0, 0, "Qwen/x"
+
+    row = next(ln for ln in evaluate_all._target_lines(Report(items=[item]))
+               if "上下文压缩降幅" in ln)
+
+    assert "不适用" in row and "Qwen/x" in row
+    assert "没有真实分词器" not in row

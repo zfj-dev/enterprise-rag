@@ -67,8 +67,8 @@ def _reduction_line(report) -> str:
         return "  %-18s    （本次没跑生成层）" % "上下文压缩降幅(token)"
     rate = report.token_reduction_rate
     if rate is None:
-        return ("  %-18s    不可用（%s）"
-                % ("上下文压缩降幅(token)", report.tokenizer_note or "没有真实分词器"))
+        # 原因从评测核心取（唯一的渲染处）—— 「有分词器但没历史」不许说成「没有分词器」
+        return "  %-18s    %s" % ("上下文压缩降幅(token)", report.reduction_missing_reason)
     return ("  %-18s    实际 %.0f%%  (口径 %s；%d 条计入)"
             % ("上下文压缩降幅(token)", rate * 100, report.tokenizer_label,
                report.token_reduction_count))
