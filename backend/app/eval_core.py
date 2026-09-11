@@ -61,6 +61,7 @@ class ItemResult:
     expect_page: int | None
     pages: list                 # 来源里的页码
     page_hit: bool | None       # 期望页码是否在来源页码里；本条没声明页码时为 None
+    group: str = ""             # 分组名（如 RGB 的四能力）；空则不参与「分能力」汇总
     negative: bool = False      # 负样本：答案不在文档里，期望拒答（黄金集写 "negative": true）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
@@ -110,6 +111,19 @@ class Report:
     @property
     def total(self) -> int:
         return len(self.items)
+
+    @property
+    def group_names(self) -> list[str]:
+        """出现过哪些分组，按首次出现排序。"""
+        names: list[str] = []
+        for x in self.items:
+            if x.group and x.group not in names:
+                names.append(x.group)
+        return names
+
+    def sub(self, group: str) -> "Report":
+        """某个分组的子报告 —— 事实命中 / 拒答率等口径完全复用，不另写一套公式。"""
+        return Report(items=[x for x in self.items if x.group == group])
 
     @property
     def positives(self) -> list[ItemResult]:
@@ -224,6 +238,17 @@ class Report:
                             sum(1 for x in scored if x.page_hit), len(scored), extra))
         else:
             lines.append("引用页码正确 不适用  (%d 条黄金集条目，无一声明页码，分母为 0)" % self.total)
+        if self.group_names:
+            lines.append("")
+            lines.append("=== 分能力 ===")
+            lines.append("按黄金集条目的 group 分组；每组的口径与总表一致 —— "
+                         "正样本出事实命中率，负样本出拒答率（没这类条目的格子里是 -）")
+            lines.append("%-16s %5s %8s %8s" % ("组", "条数", "事实命中", "拒答率"))
+            for name in self.group_names:
+                grp = self.sub(name)
+                fact = "%.0f%%" % (grp.fact_rate * 100) if grp.positives else "-"
+                ref = "%.0f%%" % (grp.refuse_rate * 100) if grp.negatives else "-"
+                lines.append("%-16s %5d %8s %8s" % (name, len(grp.items), fact, ref))
         lines.append("")
         lines.append("=== RAGAS 四项 ===")
         if self.ragas is None:
@@ -277,6 +302,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             grounded=bool(want) and want in normalize(src_text),
             expect_page=expect_page, pages=pages,
             page_hit=(expect_page in pages) if expect_page else None,
+            group=g.get("group", ""),
             negative=bool(g.get("negative")), refused=is_refusal(answer),
         ))
         # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低

@@ -15,6 +15,7 @@ import os
 import time
 
 from app.eval_core import normalize, run_retrieval_eval
+from app.eval_index import index_chunks
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 
@@ -39,17 +40,12 @@ def _index_doc(rt, path: str) -> list[dict]:
             if c["chunk_type"] == "child":
                 child_chunks.append({**c, "page_num": pidx})
 
-    texts = [c["content"] for c in child_chunks]
-    vectors = rt.embedding.encode(texts)
-    items, bm25_entries = [], []
-    for c, vec in zip(child_chunks, vectors):
-        meta = {"kb_id": KB_ID, "owner_id": OWNER_ID, "doc_id": "evaldoc",
-                "doc_name": os.path.basename(path), "page_num": c["page_num"], "content": c["content"]}
-        items.append({"id": c["id"], "vector": vec, "metadata": meta})  # 借 VectorItem-like dict
-        bm25_entries.append({"id": c["id"], "content": c["content"], "metadata": dict(meta)})
-    from app.core.vector_store import VectorItem
-    rt.vector_store.add([VectorItem(**i) for i in items])
-    rt.bm25.add(bm25_entries)
+    index_chunks(rt, [
+        {"id": c["id"], "content": c["content"],
+         "metadata": {"kb_id": KB_ID, "owner_id": OWNER_ID, "doc_id": "evaldoc",
+                      "doc_name": os.path.basename(path), "page_num": c["page_num"],
+                      "content": c["content"]}}
+        for c in child_chunks])
     return child_chunks
 
 
