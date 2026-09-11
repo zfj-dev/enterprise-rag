@@ -230,6 +230,17 @@ def _named_ref_intent(question: str) -> list[tuple[str, str, str | None]]:
     return out
 
 
+def compress_exempt(question: str) -> bool:
+    """本问是否豁免压缩（票 20/21）：枚举某类内容、或点名具体编号。
+
+    这类问题系统会**刻意注入大批块**以便列全，压了就会漏项 —— 所以确定性链路的上下文装配
+    与代理链路的工具结果清理**共用这一个判据**，两条链路的口径才不会分叉。
+    """
+    if _enum_intent(question):
+        return True
+    return any(r[0] in NAMED_REF_PREFIXES for r in _named_ref_intent(question))
+
+
 def _load_named_chunks(db: Session, kb_id: str, owner_id: str, prefix: str, n1: str, n2: str | None, limit: int = 3) -> list[dict]:
     """按具体编号引用（如表3.2）取 chunk：优先表格（含 | 行），其次含引用的句子。"""
     from app.models.entities import Chunk, Document
@@ -346,7 +357,7 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
               if memory_text else s.context_token_budget)
     # 枚举 / 具体编号：系统为「列全」刻意注入了大批块，压了就会漏项 —— 本问**整段豁免压缩**
     # （票 20）。判据复用既有的意图检测（cat / refs），不另起一套。
-    exempt = bool(cat or refs)
+    exempt = compress_exempt(question)
     if s.context_compress and not exempt:
         plan = assemble_context(history, budget=max(0, budget),
                                 keep_recent=s.context_keep_recent,
@@ -524,8 +535,12 @@ def _run_agent_for(db: Session, rt: Runtime, prep: Prep) -> dict | None:
 
         # 工具集按**本次请求**的上下文造：kb / owner 服务端注入，不来自模型参数
         transport = InProcessTransport(build_registry(db, rt, prep.user, prep.kb_id))
+        # 工具结果清理（票 21）：与确定性链路同一个压缩开关；枚举/编号查询走同一条豁免
+        # （spec 0003 红线：这类查询刻意注入的大批块不参与压缩，否则列全会漏项）
+        trim = get_settings().context_compress and not prep.trace.get("compress_exempt")
         return run_agent(prep.question, llm=prep.llm, transport=transport,
-                         max_steps=get_settings().agent_max_steps)
+                         max_steps=get_settings().agent_max_steps,
+                         trim_tool_results=bool(trim))
     except Exception as e:      # noqa: BLE001 —— 旁路失败绝不能影响问答本身
         logger.warning("代理链路跑不动，回退确定性链路：%s", e)
         return None
@@ -557,6 +572,8 @@ def _stream_agent(db: Session, rt: Runtime, prep: Prep, got: dict,
         "retrieval_ms": None, "rerank_ms": None,
         "self_check": checked.get("self_check"),
         "citation_coverage": checked.get("citation_coverage"),
+        # 代理循环里收掉了几条已经用过的工具结果（票 21）
+        "tool_results_trimmed": checked.get("tool_results_trimmed"),
         # 代理链路不用 prepare 装配的那份上下文 —— 别把它的 token 数字算到代理头上
         "context_tokens": None,
     })

@@ -137,3 +137,36 @@ def test_deterministic_answer_fn_ignores_the_global_switch(client, monkeypatch):
 
     assert called == []          # 开关开着，基准链路照样不走代理
     assert out["answer"]
+
+
+def test_the_eval_adapter_mirrors_the_production_compression_policy(client, monkeypatch):
+    """评测的代理列必须与线上同口径（票 21）：关压缩就不收；枚举/编号查询走同一条豁免。
+
+    否则代理这一列会无条件收缩，而确定性那一列会豁免 —— 两条链路的数字不可比。
+    """
+    import app.eval_agent as eval_mod
+    from app.config import get_settings
+    from app.eval_agent import agent_answer_fn
+
+    user, kb, db, rt = _seeded(client, "adapter_trim")
+    seen: dict = {}
+    # eval_agent 在模块顶层就把 run_agent 绑好了 —— 要打它那个名字，不是 agent 模块里的
+    monkeypatch.setattr(eval_mod, "run_agent",
+                        lambda q, **kw: seen.update(kw) or {
+                            "answer": "x", "sources": [], "steps": [], "latency": {},
+                            "stopped": "answered",
+                            "trace": {"self_check": "skipped", "citation_coverage": None}})
+    try:
+        ask = agent_answer_fn(db, rt, user, kb, llm=ScriptedLLM("x"))
+
+        ask("这个文档讲了什么")
+        assert seen["trim_tool_results"] is True          # 普通问题：与线上一致地收
+
+        ask("列出所有表格")
+        assert seen["trim_tool_results"] is False         # 枚举：同一条豁免
+
+        monkeypatch.setattr(get_settings(), "context_compress", False)
+        ask("再问一次")
+        assert seen["trim_tool_results"] is False         # 关压缩：也不收
+    finally:
+        db.close()

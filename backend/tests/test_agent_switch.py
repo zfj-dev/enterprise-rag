@@ -128,3 +128,32 @@ def test_the_agent_path_does_not_re_verify_the_coverage(client, monkeypatch):
 
     assert calls == []                                   # 没有重复校验
     assert out["trace"]["citation_coverage"] == 1.0      # 沿用代理自检的结论
+
+
+def test_tool_result_trimming_follows_the_compress_switch_and_the_exemption(client, monkeypatch):
+    """工具结果清理（票 21）的开关：普通问题收、枚举/编号查询豁免（spec 0003 红线）、关压缩则全不收。"""
+    import app.core.agent as agent_mod
+
+    H, kb, user, db, rt = _seeded(client, "switch_trim")
+    seen: dict = {}
+    try:
+        monkeypatch.setattr(chat_service.get_settings(), "agent_enabled", True)
+        monkeypatch.setattr(agent_mod, "run_agent",
+                            lambda q, **kw: seen.update(kw) or dict(_AGENT_RESULT))
+
+        prep = chat_service.prepare(db, rt, user, kb, "这个文档讲了什么")
+        assert prep.trace["compress_exempt"] is False
+        chat_service._run_agent_for(db, rt, prep)
+        assert seen["trim_tool_results"] is True                  # 普通问题：收
+
+        prep = chat_service.prepare(db, rt, user, kb, "列出所有表格")
+        assert prep.trace["compress_exempt"] is True
+        chat_service._run_agent_for(db, rt, prep)
+        assert seen["trim_tool_results"] is False                 # 枚举：豁免（列全不许漏项）
+
+        monkeypatch.setattr(chat_service.get_settings(), "context_compress", False)
+        prep = chat_service.prepare(db, rt, user, kb, "再问一次")
+        chat_service._run_agent_for(db, rt, prep)
+        assert seen["trim_tool_results"] is False                 # 关压缩：也不收
+    finally:
+        db.close()

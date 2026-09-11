@@ -17,6 +17,7 @@ import time
 from typing import Any
 
 from app.core.citation import apply_no_source_no_claim, validate_sources, verify_claims
+from app.core.context import cited_chunk_ids, trim_tool_result
 from app.core.llm import encode_tool_calls
 from app.utils.text import truncate
 
@@ -31,10 +32,15 @@ _DEFAULT_SYSTEM = (
 )
 
 
+def _tool_payload(tool_call_id: str, payload: dict) -> dict:
+    """一条 OpenAI 兼容的 tool 消息 —— 回灌工具结果（含错误原因）与轮末收缩共用这一个形状。"""
+    return {"role": "tool", "tool_call_id": tool_call_id,
+            "content": json.dumps(payload, ensure_ascii=False)}
+
+
 def _tool_message(call, result: dict) -> dict:
-    """把工具结果按 OpenAI 兼容的 tool 消息回灌 —— 模型据此才知道工具给了什么（含错误原因）。"""
-    return {"role": "tool", "tool_call_id": call.id,
-            "content": json.dumps(result, ensure_ascii=False)}
+    """把工具结果回灌 —— 模型据此才知道工具给了什么（含错误原因）。"""
+    return _tool_payload(call.id, result)
 
 
 def _assistant_message(content: str, calls: list) -> dict:
@@ -61,6 +67,32 @@ def _collect_sources(result: dict, seen_ids: set) -> list[dict]:
             seen_ids.add(cid)
         out.append(s)
     return out
+
+
+def _all_chunk_ids(result: dict) -> set:
+    """结果里所有来源的 chunk —— 轮末收缩用（此时不再区分有没有被引用过）。"""
+    return {s.get("chunk_id") for s in (result.get("sources") or [])
+            if isinstance(s, dict) and s.get("chunk_id")}
+
+
+def _shrink(messages: list, entries: list, take_ids) -> int:
+    """把 `entries` 里按 `take_ids` 挑出的来源收缩掉，返回这次收掉了几条结果（票 21）。
+
+    **换掉**那条消息而不是原地改：模型前几次调用看到的快照必须留在原样
+    （脚本化 stub 记的就是同一批 dict，原地改会回头篡改已发生的调用）。
+    收得动的条目从 `entries` 移出、收不动的留下：循环内传 `pending`（被引用一批就出一批），
+    轮末传 `tool_msgs`（那一下按 `_all_chunk_ids` 全收干净）。
+    """
+    kept, n = [], 0
+    for entry in entries:
+        trimmed = trim_tool_result(entry["result"], take_ids(entry["result"]))
+        if trimmed is None:
+            kept.append(entry)
+            continue
+        messages[entry["index"]] = _tool_payload(entry["tool_call_id"], trimmed)
+        n += 1
+    entries[:] = kept
+    return n
 
 
 def _self_check(answer: str, *, sources: list, retrieval_ran: bool,
@@ -97,13 +129,19 @@ def _self_check(answer: str, *, sources: list, retrieval_ran: bool,
 
 
 def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STEPS,
-              system: str | None = None) -> dict:
+              system: str | None = None, trim_tool_results: bool = True) -> dict:
     """跑有上限的 ReAct 循环。返回 {answer, sources, steps, latency, stopped, trace}。
 
     steps 每步记 {tool, arguments, summary, ms, ok} —— 坏了能定位是选错工具还是工具本身错。
     latency 记 {total_ms, steps_ms} —— 多步的代价看得见（票 07 的分段口径）。
-    trace 记 {self_check, citation_coverage} —— 这次到底有没有依据（票 14）：
+    trace 记 {self_check, citation_coverage, tool_results_trimmed} —— 这次到底有没有依据（票 14）、
+    因**已被引用**而收掉、且后面确实还有调用会读到的那几条工具结果（票 21）。
+    终答轮才被引用的结果不算：那时收掉已经没有读者，谈不上省预算。
     self_check ∈ skipped（Fake）/ refused（无依据，已拒答）/ passed_with_citation / passed_with_tool。
+
+    工具结果清理（票 21）：模型引用过的结果在**下一次调用前**收缩为元信息（只丢全文，
+    chunk_id / 文档名 / 页码 / 首部片段都在）；没人引用的**一直保留**到本轮结束才收尾。
+    `trim_tool_results=False` 一键关掉，行为与没有这个功能时完全一致。
     """
     started = time.perf_counter()
     tools = transport.list_tools()
@@ -114,11 +152,15 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
     steps: list[dict[str, Any]] = []
     sources: list[dict] = []
     seen_ids: set = set()
+    # 本轮所有工具结果消息，以及其中**还没被任何一次回复引用过**的子集（票 21）
+    tool_msgs: list[dict[str, Any]] = []
+    pending: list[dict[str, Any]] = []
     # 检索类工具跑过 / 有没有**成功**的非检索依据（Calculator、SqlQuery）—— 拒答判定要用
     retrieval_ran = False
     tool_grounded = False
     answer = ""
     stopped = "max_steps"
+    trimmed = 0
 
     for _ in range(max(1, max_steps)):
         try:
@@ -134,6 +176,14 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
         if not calls:                      # 没有工具调用了 —— 这就是终答
             stopped = "answered"
             break
+
+        # 票 21：模型这条回复里引用过的工具结果，在**下一次调用之前**就收缩为元信息。
+        # 放在终答判断**之后**：还有后续调用才谈得上省；终答轮收了也没人再读它
+        # （那一批由轮末收尾处理，也不计入计数）。
+        if trim_tool_results:
+            text = outcome.get("content") or ""
+            trimmed += _shrink(messages, pending,
+                               lambda res, t=text: cited_chunk_ids(t, res.get("sources") or []))
 
         messages.append(_assistant_message(outcome.get("content") or "", calls))
         for call in calls:
@@ -155,7 +205,10 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
             elif not failed:
                 tool_grounded = True
             sources.extend(_collect_sources(result, seen_ids))
+            entry = {"index": len(messages), "tool_call_id": call.id, "result": result}
             messages.append(_tool_message(call, result))
+            tool_msgs.append(entry)
+            pending.append(entry)
 
     if stopped != "answered":
         # 没拿到终答（跑满上限 / 模型出错）也要收敛：再问一次但**不给工具**，逼它用手里的信息作答
@@ -164,8 +217,16 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
         except Exception as e:             # noqa: BLE001 —— 收敛这一步也失败，就把已有的返回
             logger.warning("收敛作答失败：%s", e)
 
+    # 本轮结束（至此再没有模型调用会读到这批上下文）：还没被引用过的结果一并收尾，
+    # 只丢全文、锚点仍在。这一步**不再影响任何 token 预算**（没有读者了），只是把本轮
+    # 的消息状态收整齐 —— spec 的「保留到本轮结束，之后收缩」。因而也不计入 trimmed。
+    # 走 tool_msgs 而非 pending：只被收了一部分的结果已从 pending 移出，轮末得收干净。
+    if trim_tool_results and tool_msgs:
+        _shrink(messages, tool_msgs, _all_chunk_ids)
+
     answer, trace = _self_check(answer, sources=sources, retrieval_ran=retrieval_ran,
                                 tool_grounded=tool_grounded, llm=llm)
+    trace["tool_results_trimmed"] = trimmed
 
     return {
         "answer": answer,

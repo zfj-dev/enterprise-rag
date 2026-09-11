@@ -206,7 +206,7 @@ def test_every_run_reports_latency():
     assert set(got) == {"answer", "sources", "steps", "latency", "stopped", "trace"}
     assert got["latency"]["total_ms"] > 0
     assert got["latency"]["steps_ms"] == [got["steps"][0]["ms"]]
-    assert set(got["trace"]) == {"self_check", "citation_coverage"}
+    assert set(got["trace"]) == {"self_check", "citation_coverage", "tool_results_trimmed"}
 
 
 def test_tool_failure_reason_reaches_the_model():

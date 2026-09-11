@@ -1,4 +1,4 @@
-"""上下文预算装配：给定历史与预算，**未超预算原样透传**，超了才压缩。
+"""上下文压缩：会话摘要装配（票 17-20）+ 工具结果清理的纯函数（票 21）。
 
 token 计数与摘要都从外部注入 —— 测试因而无网络、无真实 LLM。
 
@@ -6,7 +6,11 @@ token 计数与摘要都从外部注入 —— 测试因而无网络、无真实
 尾部装得下就复用旧摘要（不调 LLM），尾部又超预算才并入摘要、游标前进。
 持久化（写回会话）在调用方（chat_service）；本模块只管装配与游标推进。
 
-以下**不在**本模块范围：真实分词器（票 19）、枚举意图 / 已引用来源的豁免（票 20-21）。
+票 21 的**工具结果清理**同样落在这里：`trim_tool_result` 把"已被引用"的来源收缩为
+元信息（纯函数，只丢全文、不丢可回溯）。**什么时候收**由代理循环（agent.py）决定，
+枚举/编号查询的豁免由调用方按既有判据（chat_service 的 `compress_exempt`）传给循环。
+
+以下**不在**本模块范围：真实分词器（票 19）、摘要的持久化与豁免判据（调用方）。
 """
 from __future__ import annotations
 
@@ -14,10 +18,11 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Collection, Sequence
 
 from app.core.llm import LLM
 from app.core.prompt import format_turn
+from app.utils.text import truncate
 
 logger = logging.getLogger(__name__)
 
@@ -174,3 +179,69 @@ def assemble_context(
         return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor)
     return ContextPlan(summary=summary, kept=recent, dropped=len(older),
                        cursor=_last_id(older[-1]) or cursor)
+
+
+# ---------- 工具结果清理（票 21）----------
+
+TOOL_HEAD_CHARS = 120      # 收缩后每条来源保留的首部片段长度
+
+_CITE_RE = re.compile(r"\[来源[:：]\s*([^\]\n]+)\]")
+_CITE_DOC_PAGE = re.compile(r"^(.*?)[,，]\s*第?\s*(\d+)\s*页\s*$")
+
+
+def cited_chunk_ids(text: str, sources: Sequence[dict] | None) -> set[str]:
+    """模型这次回复里点名引用过的来源（票 21）。
+
+    判据只用**可机读的锚点**：chunk_id 原样出现，或 `[来源: 文档名, 第X页]` 里文档名与页码同时命中。
+    不做模糊匹配 —— 宁可晚一轮再收缩，也不误收缩模型还要用的内容。
+    """
+    if not text:
+        return set()
+    marked: set[tuple[str, int]] = set()
+    for m in _CITE_RE.finditer(text):
+        doc_page = _CITE_DOC_PAGE.match(m.group(1).strip())
+        if doc_page:
+            marked.add((doc_page.group(1).strip(), int(doc_page.group(2))))
+
+    out: set[str] = set()
+    for s in sources or []:
+        if not isinstance(s, dict):
+            continue
+        cid = s.get("chunk_id")
+        if not cid:
+            continue
+        if cid in text:
+            out.add(cid)
+            continue
+        key = (str(s.get("doc_name") or "").strip(), int(s.get("page") or 0))
+        if key[0] and key in marked:
+            out.add(cid)
+    return out
+
+
+def trim_tool_result(result: dict, cited: Collection[str], *,
+                     keep_head: int = TOOL_HEAD_CHARS) -> dict | None:
+    """把**已被引用**的来源收缩为元信息；没有可收缩的就返回 None（调用方保持原样，不做无谓替换）。
+
+    只丢"全文"：chunk_id / doc_id / doc_name / page 一个不少，text 留首部片段 ——
+    引用仍能回溯到原文片段，代理也还知道这块讲过什么。
+    结果里没被引用的块**原样保留**：不提前收缩模型还要用的内容。
+    `trimmed` 是个布尔标记（不是散文）—— 让模型知道这段是首部而非全块，代价一个键。
+    """
+    sources = result.get("sources")
+    if not isinstance(sources, list) or not sources:
+        return None
+    shrunk = False
+    kept: list = []
+    for s in sources:
+        if isinstance(s, dict) and s.get("chunk_id") in cited and len(str(s.get("text") or "")) > keep_head:
+            s = dict(s)
+            s["text"] = truncate(s["text"], keep_head)
+            shrunk = True
+        kept.append(s)
+    if not shrunk:
+        return None
+    out = dict(result)
+    out["sources"] = kept
+    out["trimmed"] = True
+    return out

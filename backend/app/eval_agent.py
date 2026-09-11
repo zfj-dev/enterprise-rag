@@ -39,7 +39,13 @@ def agent_answer_fn(db, rt, user, kb_id: str, *, max_steps: int | None = None,
     transport = transport or InProcessTransport(build_registry(db, rt, user, kb_id))
 
     def ask(question: str) -> dict:
-        got = run_agent(question, llm=llm, transport=transport, max_steps=max_steps)
+        # 压缩策略与线上链路同口径（票 21）：关压缩就不收，枚举/编号查询走同一条豁免 ——
+        # 否则代理这一列会无条件收缩，与确定性那一列不可比（尤其是"列全"类问题）。
+        from app.services.chat_service import compress_exempt
+
+        got = run_agent(question, llm=llm, transport=transport, max_steps=max_steps,
+                        trim_tool_results=get_settings().context_compress
+                        and not compress_exempt(question))
         return _as_answer(got["answer"], got["sources"], got["trace"].get("citation_coverage"))
 
     return ask
