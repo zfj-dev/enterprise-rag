@@ -53,11 +53,13 @@ def test_parse_sse_collects_answer_and_sources():
         "",
         'data: {"type": "done"}',
     ])
-    assert evaluate._parse_sse(body) == {"answer": "答案", "sources": [{"text": "甲", "page": 1}]}
+    assert evaluate._parse_sse(body) == {"answer": "答案", "sources": [{"text": "甲", "page": 1}],
+                                        "citation_coverage": None}
 
 
 def test_parse_sse_ignores_malformed_and_non_data_lines():
-    assert evaluate._parse_sse("data: not-json\n\n: keep-alive\n") == {"answer": "", "sources": []}
+    assert evaluate._parse_sse("data: not-json\n\n: keep-alive\n") == {
+        "answer": "", "sources": [], "citation_coverage": None}
 
 
 def test_answer_fn_asks_the_running_service():

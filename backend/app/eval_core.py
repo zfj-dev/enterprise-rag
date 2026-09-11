@@ -65,6 +65,7 @@ class ItemResult:
     page_hit: bool | None       # 期望页码是否在来源页码里；本条没声明页码时为 None
     group: str = ""             # 分组名（如 RGB 的四能力）；空则不参与「分能力」汇总
     negative: bool = False      # 负样本：答案不在文档里，期望拒答（黄金集写 "negative": true）
+    citation_coverage: float | None = None  # 引用覆盖率（逐句核验）；问答实现没给就是 None
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
     judge_error: str | None = None  # 这条裁判挂了的原因（要明说，不能当没算过）
@@ -156,6 +157,19 @@ class Report:
         return sum(1 for x in self.negatives if x.refused)
 
     @property
+    def citation_coverage_rate(self) -> float | None:
+        """引用覆盖率均值（只算拿到这项数据的条目）；一条都没有则为 None。"""
+        vals = [float(x.citation_coverage) for x in self.positives
+                if isinstance(x.citation_coverage, (int, float))]
+        return sum(vals) / len(vals) if vals else None
+
+    @property
+    def citation_coverage_count(self) -> int:
+        """有多少条真的拿到了引用覆盖率。"""
+        return sum(1 for x in self.positives
+                   if isinstance(x.citation_coverage, (int, float)))
+
+    @property
     def refuse_rate(self) -> float | None:
         """负样本里「明确拒答」的占比；没有负样本条目则为 None。"""
         negs = self.negatives
@@ -191,6 +205,8 @@ class Report:
             "  grounded  期望事实出现在**随答案返回的来源文本**里（系统给出的来源集合；"
             "不逐条核对该论断是否被答案显式引用）",
             "  page_hit  期望页码出现在随答案返回的来源页码里（声明了页码却没来源页码 = 未命中）",
+            "  coverage  引用覆盖率：答案的论断里被来源支撑的占比（逐句核验；"
+            "免 LLM 的跑法拿不到就不出这一行）",
             "  黄金集条目缺期望事实 / 页码时：不跳过该条，而是按未命中计入或写明不计入",
             "  refuse    负样本（黄金集标 negative: true）期望拒答。判据：答案整段不超 %d 字"
             "且含「无法确定 / 未找到 / 不能提供」等拒答措辞 → 明确拒答；"
@@ -231,6 +247,9 @@ class Report:
         lines.append("引用忠实度(期望事实在随答案返回的来源里) %d%%  (%d/%d)"
                      % (round(self.grounded_rate * 100),
                         sum(1 for x in self.positives if x.grounded), len(self.positives)))
+        if self.citation_coverage_rate is not None:
+            lines.append("引用覆盖率(论断被来源支撑) %d%%  (计入 %d 条)"
+                         % (round(self.citation_coverage_rate * 100), self.citation_coverage_count))
         # 页码这一项无论有没有分母都要出一行 —— 三个数字不能有一个凭空消失
         scored = [x for x in self.positives if x.has_page]
         if scored:
@@ -311,6 +330,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             page_hit=(expect_page in pages) if expect_page else None,
             group=g.get("group", ""),
             negative=bool(g.get("negative")), refused=is_refusal(answer),
+            citation_coverage=out.get("citation_coverage"),
         ))
         # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低
         if judge_fn is not None and not g.get("negative"):

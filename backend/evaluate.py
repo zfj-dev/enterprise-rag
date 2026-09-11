@@ -34,8 +34,8 @@ DOC = os.environ.get("EVAL_DOC", os.path.join(BACKEND, "paper.pdf"))
 
 
 def _parse_sse(body: str) -> dict:
-    """把 /chat/stream 的 SSE 响应体拼成核心要的 {answer, sources}。"""
-    answer, sources = "", []
+    """把 /chat/stream 的 SSE 响应体拼成核心要的 {answer, sources, citation_coverage}。"""
+    answer, sources, coverage = "", [], None
     for line in body.splitlines():
         if not line.startswith("data:"):
             continue
@@ -47,7 +47,9 @@ def _parse_sse(body: str) -> dict:
             answer += ev.get("text", "")
         elif ev.get("type") == "sources":
             sources = ev.get("data", [])
-    return {"answer": answer, "sources": sources}
+        elif ev.get("type") == "done":
+            coverage = ev.get("citation_coverage")     # 逐句核验的引用覆盖率（真实模式才有）
+    return {"answer": answer, "sources": sources, "citation_coverage": coverage}
 
 
 def _answer_fn(client: httpx.Client, kb_id: str, headers: dict):
@@ -84,35 +86,49 @@ def _build_judge():
         return None, "%s: %s" % (type(e).__name__, e)
 
 
-def _upload(client: httpx.Client, kb_id: str, headers: dict) -> str:
-    """上传被评文档并等入库，返回一行状态描述。"""
-    d = upload_and_wait(client, kb_id, headers, DOC)
-    return "上传: %s chunks=%s 页数=%s" % (d.get("status"), d.get("chunk_count"), d.get("page_count"))
+def _upload_line(upload: dict) -> str:
+    """上传结果的一行描述。"""
+    return "上传: %s chunks=%s 页数=%s" % (upload.get("status"), upload.get("chunk_count"),
+                                           upload.get("page_count"))
+
+
+def run_online(base=None, golden_path=None, doc_path=None):
+    """对运行中的服务跑一遍：登录 → 建库 → 上传 → 逐问 → 返回 (报告对象, 上传信息)。
+
+    服务不可达等失败会**抛异常** —— 调用方自己决定怎么报（一页报告要能把它标成"没跑"）。
+    base / golden_path / doc_path 不给就用模块级常量（**调用时**才读，改得动）。
+    """
+    base = base or BASE
+    golden_path = golden_path or GOLDEN
+    doc_path = doc_path or DOC
+    with open(golden_path, encoding="utf-8") as f:
+        golden = json.load(f)
+
+    c = httpx.Client(base_url=base, timeout=300)
+    r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+    H = {"Authorization": "Bearer %s" % r.json().get("access_token")}
+    kb = c.post("/api/v1/knowledge", json={"name": "__eval__", "description": ""},
+                headers=H).json()["id"]
+    upload = upload_and_wait(c, kb, H, doc_path)
+
+    judge, judge_note = _build_judge()
+    report = run_eval(golden, _answer_fn(c, kb, H),
+                      judge_fn=judge, judge_label=judge.label if judge else None)
+    if judge_note:
+        report.judge_error = report.judge_error or judge_note
+    c.delete("/api/v1/knowledge/%s" % kb, headers=H)
+    return report, upload
 
 
 def main() -> None:
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
-    with open(GOLDEN, encoding="utf-8") as f:
-        golden = json.load(f)
-
     head = ["=== RAG 黄金集评估报告 ===",
             "黄金集: %s" % GOLDEN, "被评文档: %s" % DOC]
     try:
-        c = httpx.Client(base_url=BASE, timeout=300)
-        r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
-        H = {"Authorization": "Bearer %s" % r.json().get("access_token")}
-        kb = c.post("/api/v1/knowledge", json={"name": "__eval__", "description": ""},
-                    headers=H).json()["id"]
-        head.append(_upload(c, kb, H))
+        report, upload = run_online()
+        head.append(_upload_line(upload))
         head.append("")
-
-        judge, judge_note = _build_judge()
-        report = run_eval(golden, _answer_fn(c, kb, H),
-                          judge_fn=judge, judge_label=judge.label if judge else None)
-        if judge_note:
-            report.judge_error = report.judge_error or judge_note
         body = report.to_lines()
-        c.delete("/api/v1/knowledge/%s" % kb, headers=H)
     except Exception:
         body = ["fatal: " + traceback.format_exc()]
 

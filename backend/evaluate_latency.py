@@ -21,7 +21,6 @@ import json
 import os
 import threading
 import time
-import traceback
 
 import httpx
 
@@ -124,8 +123,8 @@ def main() -> None:
             batch = (questions * ((CONCURRENCY // len(questions)) + 1))[:CONCURRENCY]
             samples.extend(_run_round(c, H, kb, batch))
         c.delete("/api/v1/knowledge/%s" % kb, headers=H)
-    except Exception:
-        lines.append("fatal: " + traceback.format_exc())
+    except Exception as e:   # noqa: BLE001 —— 这页是给人看的，写一行就够；traceback 太长会淹掉其它段
+        lines.append("未跑：%s: %s" % (type(e).__name__, e))
 
     blocked = [s for s in samples if s.get("status") == 429]
     ok = [s for s in samples if s.get("status") == 200 and s.get("generate") is not None]
