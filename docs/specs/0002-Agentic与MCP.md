@@ -60,7 +60,7 @@
 ### 组件边界
 
 - **工具**：每个工具是一个独立单元，自带 MCP 规范的 `name` / `description` / `inputSchema`，实现一份、两种消费方式——**进程内直调**（测试与内部使用）与**经 MCP server 暴露**（对外）。
-- **代理核心**：给定（问题、会话上下文、工具集、LLM、步数上限），跑一个有上限的 ReAct 循环，返回 `{answer, sources, steps, latency}`。它**不直接构造 LLM**、**不直接建 MCP 连接**——两者都从外部注入。
+- **代理核心**：给定（问题、会话上下文、工具集、LLM、步数上限），跑一个有上限的 ReAct 循环，返回 `{answer, sources, steps, latency, stopped, trace}`（`stopped` 见下「终止路径」，`trace` 见「可观测」）。它**不直接构造 LLM**、**不直接建 MCP 连接**——两者都从外部注入。
 - **评测适配器**：把代理核心包装成与现有同步问答**同形**的 "问题 → 答案 + 来源" 调用，使 Spec 0001 的评测核心无需改动即可同时评两条链路。
 
 ### LLM 侧新增 tool-calling（保留既有文本流）
@@ -92,7 +92,7 @@
 - 有**步数上限**（默认取小值、可配）。每步：带工具定义调 LLM → 若有 tool_calls 则经 MCP 执行、把结果回灌 → 继续；无 tool_calls 即得到候选答案。
 - 终止路径全覆盖：拿到候选答案 / 达上限 / 工具报错，任一路径都必须产出可返回的结果（不得抛穿）。
 - **1 步 self-check**：候选答案过现有逐句来源支撑校验，覆盖率写入 trace；无来源时沿用现有 `no source → no claim` 处理。
-- **可观测**：trace 记录每步的工具名、参数、结果摘要与耗时（沿用现有 per-query trace 的思路）。
+- **可观测**：每步的工具名 / 参数 / 结果摘要 / 耗时记在返回的 `steps`（沿用现有 per-query trace 的思路）；`trace` 另记自检结论 `self_check`（`skipped` / `refused` / `passed_with_citation` / `passed_with_tool`）与 `citation_coverage`。
 
 ### 开关与兼容
 

@@ -22,14 +22,17 @@ class CitationResult:
 
 
 def validate_sources(candidates: Sequence[dict]) -> CitationResult:
-    """检查检索到的源片段是否具备可引用条件（稳定 chunk_id + 非空 + 绑定元数据）。"""
+    """检查源片段是否具备可引用条件（稳定 chunk_id + 非空）。
+
+    两种形状都认：候选块的 content / 对外 sources 的 text。
+    """
     notes: list[str] = []
     stable = True
     usable = 0
     for c in candidates:
         cid = c.get("chunk_id")
-        content = c.get("content")
-        meta = c.get("metadata", {}) or {}
+        # 候选块叫 content，对外 sources 叫 text —— 同一个东西的两种叫法，都得认
+        content = c.get("content") or c.get("text")
         if not cid:
             stable = False
             notes.append("存在无稳定 chunk_id 的源")

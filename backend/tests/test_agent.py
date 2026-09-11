@@ -87,8 +87,8 @@ def test_max_steps_converges_instead_of_raising():
     assert llm.calls[-1]["tools"] is None               # 最后那次是**不带工具**逼它作答
 
 
-def test_tool_error_degrades_instead_of_dropping_the_answer():
-    """单次工具失败不能把整个回答丢掉 —— 记下来、继续，最后仍要有答案。"""
+def test_tool_error_is_recorded_and_the_run_still_converges():
+    """单次工具失败不能把整轮丢掉 —— 记下来、继续跑；但报错的工具什么也没给，最终拒答。"""
     llm = ScriptedLLM([
         {"content": "", "tool_calls": [_calc_call("data[0]")]},     # 一定会被拒
         {"content": "换个说法：这个表达式不合法", "tool_calls": []},
@@ -97,8 +97,9 @@ def test_tool_error_degrades_instead_of_dropping_the_answer():
 
     assert got["steps"][0]["ok"] is False
     assert "只允许数字与算术运算" in got["steps"][0]["summary"]
-    assert got["answer"] == "换个说法：这个表达式不合法"
     assert got["stopped"] == "answered"
+    assert got["trace"]["self_check"] == "refused"
+    assert "无法确定" in got["answer"]
 
 
 def test_transport_blowing_up_is_recorded_not_raised():
@@ -195,16 +196,17 @@ def test_llm_blowing_up_only_at_the_convergence_step_still_returns():
 
 
 def test_every_run_reports_latency():
-    """spec 的返回契约是 {answer, sources, steps, latency} —— 多步代价要看得见。"""
+    """返回契约 {answer, sources, steps, latency, trace} —— 多步代价与自检结论都要看得见。"""
     llm = ScriptedLLM([
         {"content": "", "tool_calls": [_calc_call("1+1")]},
         {"content": "等于 2", "tool_calls": []},
     ])
     got = run_agent("1+1", llm=llm, transport=_calc_transport())
 
-    assert set(got) == {"answer", "sources", "steps", "latency", "stopped"}
+    assert set(got) == {"answer", "sources", "steps", "latency", "stopped", "trace"}
     assert got["latency"]["total_ms"] > 0
     assert got["latency"]["steps_ms"] == [got["steps"][0]["ms"]]
+    assert set(got["trace"]) == {"self_check", "citation_coverage"}
 
 
 def test_tool_failure_reason_reaches_the_model():
@@ -218,3 +220,127 @@ def test_tool_failure_reason_reaches_the_model():
     fed_back = llm.calls[1]["messages"][-1]
     assert fed_back["role"] == "tool"
     assert "error" in fed_back["content"] and "只允许数字与算术运算" in fed_back["content"]
+
+
+# ---------- 票 14：引用与 1 步自检 ----------
+
+_SRC = [{"chunk_id": "ch1", "doc_id": "d1", "doc_name": "年报.pdf", "page": 3,
+         "text": "比亚迪2025年营业收入为803.96亿元", "score": 0.9}]
+
+
+def _kb_tool(sources):
+    """总是返回给定 sources 的检索工具（结果形状与 KbRetrieve 一致）。"""
+    def handler(args):
+        return {"sources": sources}
+    return Tool(name="KbRetrieve", description="检索",
+                input_schema={"type": "object", "properties": {}}, handler=handler)
+
+
+def _kb_transport(sources):
+    return InProcessTransport(ToolRegistry(tools=[_kb_tool(sources)]))
+
+
+def _kb_then_answer(answer, *ids):
+    return ([{"content": "", "tool_calls": [ToolCall(id=i, name="KbRetrieve", arguments={})]}
+             for i in ids] + [{"content": answer, "tool_calls": []}])
+
+
+class VerdictLLM(ScriptedLLM):
+    """stream 返回逐句校验的 JSON —— 让 verify_claims 走真实分支（不是降级）。"""
+
+    def stream(self, messages):
+        yield '{"claims":[{"claim":"比亚迪2025年营业收入为803.96亿元。","supported":true}]}'
+
+
+def test_refuses_when_retrieval_comes_back_empty():
+    """检索跑了却一无所获 —— 沿用 no source → no claim，不许硬答。"""
+    llm = ScriptedLLM(_kb_then_answer("营收大概八百亿上下", "k1"))
+    got = run_agent("营收多少", llm=llm, transport=_kb_transport([]))
+
+    assert got["sources"] == []
+    assert "无法确定" in got["answer"]
+    assert got["trace"]["self_check"] == "refused"
+
+
+def test_refuses_when_no_tool_was_used_at_all():
+    """一次工具都没调、直接凭记忆作答 —— 同样无依据可追溯（多步不是免检理由）。"""
+    llm = ScriptedLLM([{"content": "比亚迪2025年营收803.96亿元", "tool_calls": []}])
+    got = run_agent("营收多少", llm=llm, transport=_kb_transport(_SRC))
+
+    assert "无法确定" in got["answer"]
+    assert got["trace"]["self_check"] == "refused"
+
+
+def test_arithmetic_answer_is_not_refused():
+    """算数题的依据是 Calculator 的结果，不是文档 —— 不该被 no-claim 顶掉。"""
+    llm = ScriptedLLM([
+        {"content": "", "tool_calls": [_calc_call("1+1")]},
+        {"content": "等于 2", "tool_calls": []},
+    ])
+    got = run_agent("1+1 等于几", llm=llm, transport=_calc_transport())
+
+    assert got["answer"] == "等于 2"
+    assert got["trace"]["self_check"] == "passed_with_tool"
+
+
+def test_cited_answer_keeps_its_sources_with_doc_name_and_page():
+    """"带引用"是可追溯的：来源里有文档名 + 页码，答案原文保留。"""
+    llm = ScriptedLLM(_kb_then_answer("比亚迪2025年营业收入为803.96亿元。", "k1"))
+    got = run_agent("营收多少", llm=llm, transport=_kb_transport(_SRC))
+
+    assert got["answer"] == "比亚迪2025年营业收入为803.96亿元。"
+    assert [(s["doc_name"], s["page"]) for s in got["sources"]] == [("年报.pdf", 3)]
+    assert got["trace"]["self_check"] == "passed_with_citation"
+
+
+def test_repeated_retrieval_does_not_duplicate_sources():
+    """同一块被检索两次，来源里只出现一次 —— 引用清单不该重复。"""
+    llm = ScriptedLLM(_kb_then_answer("按资料，803.96 亿元。", "k1", "k2"))
+    got = run_agent("营收多少", llm=llm, transport=_kb_transport(_SRC))
+
+    assert [s["chunk_id"] for s in got["sources"]] == ["ch1"]
+
+
+def test_citation_coverage_lands_in_trace():
+    llm = VerdictLLM(_kb_then_answer("比亚迪2025年营业收入为803.96亿元。", "k1"))
+    got = run_agent("营收多少", llm=llm, transport=_kb_transport(_SRC))
+
+    assert got["trace"]["citation_coverage"] == 1.0
+
+
+def test_a_failed_tool_does_not_count_as_grounding():
+    """工具报错等于没拿到东西 —— 不能因此就解锁凭记忆作答（审查抓到的漏拒答）。"""
+    llm = ScriptedLLM([
+        {"content": "", "tool_calls": [_calc_call("data[0]")]},          # 必被拒
+        {"content": "我凭记忆答：营收803.96亿元", "tool_calls": []},
+    ])
+    got = run_agent("营收多少", llm=llm, transport=_calc_transport())
+
+    assert got["steps"][0]["ok"] is False
+    assert got["trace"]["self_check"] == "refused"
+    assert "无法确定" in got["answer"]
+
+
+def test_a_successful_side_tool_cannot_unlock_a_groundless_answer():
+    """检索跑了却一无所获 —— 中间夹一次成功的 Calculator 也不解锁（模型能自己造这一步）。"""
+    from app.core.tools import default_registry
+    tools = default_registry().tools + [_kb_tool([])]
+    llm = ScriptedLLM([
+        {"content": "", "tool_calls": [ToolCall(id="k1", name="KbRetrieve", arguments={})]},
+        {"content": "", "tool_calls": [_calc_call("0+0", "c1")]},
+        {"content": "比亚迪2025年营收803.96亿元", "tool_calls": []},
+    ])
+    got = run_agent("营收多少", llm=llm, transport=InProcessTransport(ToolRegistry(tools=tools)))
+
+    assert [s["tool"] for s in got["steps"]] == ["KbRetrieve", "Calculator"]
+    assert all(s["ok"] for s in got["steps"])          # 两个工具都"成功"
+    assert got["trace"]["self_check"] == "refused"
+    assert "无法确定" in got["answer"]
+
+
+def test_fake_mode_skips_the_self_check():
+    """演示模式没有工具调用，等价一次普通生成 —— 不该被拒答文案顶掉。"""
+    got = run_agent("随便问", llm=FakeLLM(), transport=_kb_transport(_SRC))
+
+    assert got["trace"]["self_check"] == "skipped"
+    assert "无法确定" not in got["answer"]
