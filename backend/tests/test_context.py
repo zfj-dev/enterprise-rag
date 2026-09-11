@@ -201,3 +201,38 @@ def test_off_switch_disables_compression(client, monkeypatch):
     assert "【更早对话摘要】" not in prep.prompt
     assert prep.trace.get("context_dropped", 0) == 0
     assert summ.calls == []
+
+
+# ---------- 历史装配 ----------
+
+def test_load_history_pairs_turns_written_in_the_same_second(client):
+    """同秒写入的一轮 user/assistant 也必须配对正确。
+
+    回归：created_at 秒级精度时同秒全相等，而 sqlite 对相等的排序键 ASC/DESC 都按 rowid
+    返回（DESC 并不翻转），_load_history 再 reversed() 就把整段历史错开一格 —— 配成
+    {问2,答1}、{问1,答0} 这种张冠李戴。这里刻意不给 created_at，全部走 ORM 默认值。
+    """
+    from app.db.session import SessionLocal
+    from app.models.entities import ChatMessage, ChatSession
+    from app.services.chat_service import _load_history
+    from tests.helpers import register_and_kb
+
+    _, uid, kb_id = register_and_kb(client, "histtie")
+    db = SessionLocal()
+    try:
+        sess = ChatSession(user_id=uid, kb_id=kb_id, title="t")
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        for i in range(3):
+            db.add(ChatMessage(session_id=sess.id, role="user", content=f"问{i}"))
+            db.add(ChatMessage(session_id=sess.id, role="assistant", content=f"答{i}"))
+        db.commit()
+
+        assert _load_history(db, sess.id) == [
+            {"user": "问0", "assistant": "答0"},
+            {"user": "问1", "assistant": "答1"},
+            {"user": "问2", "assistant": "答2"},
+        ]
+    finally:
+        db.close()

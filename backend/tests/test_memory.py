@@ -103,6 +103,22 @@ def test_db_store_roundtrip_and_isolation(client):
     assert st.add("uA", []) == 0
 
 
+def test_db_store_list_follows_insertion_order(client):
+    """同秒内插入的多条记忆，list 必须按插入顺序返回。
+
+    回归：created_at 曾是 sqlite 的 CURRENT_TIMESTAMP（秒级），同秒写入的多行全部相等
+    -> 排序退化到 uuid 主键（随机）-> 列表顺序任意。这里一批 8 条 + 跨批 5 条，都落在同一秒。
+    """
+    st = DbMemoryStore()
+    batch = [f"事实{i}" for i in range(8)]
+    st.add("uA", batch)
+    assert [f["content"] for f in st.list("uA")] == batch
+
+    st.add("uB", ["B1", "B2", "B3"])            # 两批之间也只隔几微秒
+    st.add("uB", ["B4", "B5"])
+    assert [f["content"] for f in st.list("uB")] == ["B1", "B2", "B3", "B4", "B5"]
+
+
 # ---------- 接进问答链路 ----------
 
 class _StubFactory:
@@ -135,7 +151,8 @@ def test_db_store_delete_is_per_user(client):
     st = DbMemoryStore()
     st.add("uA", ["事实A", "事实B"])
     st.add("uB", ["别人的事实"])
-    # 按内容取 id，不依赖 list 的顺序（created_at 秒级精度，同秒内顺序不做约定）
+    # 按内容取 id，不依赖 list 的顺序（本用例只验过滤；顺序由
+    # test_db_store_list_follows_insertion_order 单独守）
     ids = {f["content"]: f["id"] for f in st.list("uA")}
 
     assert st.delete("uB", ids["事实A"]) is False   # 别人的删不掉

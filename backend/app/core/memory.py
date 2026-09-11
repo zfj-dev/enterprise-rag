@@ -131,6 +131,8 @@ class DbMemoryStore(MemoryStore):
     def list(self, user_id):
         db = SessionLocal()
         try:
+            # created_at 由 ORM 侧单调默认值保证严格递增（entities._monotonic_utc_now），
+            # id 只是本次改动之前写入的同秒旧行的确定性兜底。
             rows = (db.query(MemoryFact).filter(MemoryFact.user_id == user_id)
                     .order_by(MemoryFact.created_at.asc(), MemoryFact.id.asc()).all())
             return [{"id": r.id, "content": r.content, "session_id": r.source_session_id,

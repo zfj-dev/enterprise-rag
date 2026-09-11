@@ -78,7 +78,11 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
 
 
 def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
-    """取最近几轮的 {user, assistant} 对，用于多轮指代消解与上下文。"""
+    """取最近几轮的 {user, assistant} 对，用于多轮指代消解与上下文。
+
+    依赖 created_at 严格递增（entities._monotonic_utc_now）：sqlite 对相等的排序键
+    ASC/DESC 都按 rowid 返回、DESC 并不翻转，同秒消息曾在此整体错位、配对张冠李戴。
+    """
     msgs = (db.query(ChatMessage)
             .filter(ChatMessage.session_id == session_id)
             .order_by(ChatMessage.created_at.desc()).limit(limit).all())
