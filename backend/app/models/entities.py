@@ -146,6 +146,26 @@ class MemoryFact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_monotonic_utc_now, server_default=func.now())
 
 
+class UsageRecord(Base):
+    """per-query 用量记录：输入/输出 token、模型、**口径来源**（票 27）。按 user 隔离。
+
+    token 存 NULL 表示「量不到」—— 不记 0：0 是「没花 token」，与「量不到」是两回事。
+    """
+
+    __tablename__ = "usage_records"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
+    user_id: Mapped[str] = mapped_column(String(32), index=True)
+    model: Mapped[str] = mapped_column(String(128), default="")
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(16), default="")   # provider / local / unavailable
+    source_note: Mapped[str] = mapped_column(Text, default="")
+    source_session_id: Mapped[str] = mapped_column(String(32), default="")
+    source_message_id: Mapped[str] = mapped_column(String(32), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_monotonic_utc_now, server_default=func.now())
+
+
 class Feedback(Base):
     __tablename__ = "feedback"
 

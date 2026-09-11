@@ -19,6 +19,7 @@ from typing import Any
 from app.core.citation import apply_no_source_no_claim, validate_sources, verify_claims
 from app.core.context import cited_chunk_ids, trim_tool_result
 from app.core.llm import encode_tool_calls
+from app.core.usage import as_int
 from app.utils.text import truncate
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,22 @@ def _shrink(messages: list, entries: list, take_ids) -> int:
     return n
 
 
+def _accumulate_usage(llm, totals: dict) -> None:
+    """把这一步 provider 返回的 usage 累进合计（票 27）。
+
+    代理一次问答要调好几轮模型 —— 只记最后一轮会把成本低报。provider 没给（或只给了半边）
+    就把合计标记为不可信：**宁可报「不可用」，也不拿残缺数据凑一个数**。
+    """
+    usage = getattr(llm, "last_usage", None) or {}
+    p_in, p_out = as_int(usage.get("prompt_tokens")), as_int(usage.get("completion_tokens"))
+    if p_in is None or p_out is None:
+        totals["complete"] = False
+        return
+    totals["input_tokens"] += p_in
+    totals["output_tokens"] += p_out
+    totals["calls"] += 1
+
+
 def _self_check(answer: str, *, sources: list, retrieval_ran: bool,
                 tool_grounded: bool, llm) -> tuple[str, dict]:
     """1 步自检（票 14）：**复用** citation 的既有实现，不另起一套。
@@ -161,6 +178,8 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
     answer = ""
     stopped = "max_steps"
     trimmed = 0
+    # 多步调用的用量合计（票 27）：provider 每轮给的 usage 累加，缺一次就整体标记不可信
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0, "complete": True}
 
     for _ in range(max(1, max_steps)):
         try:
@@ -169,6 +188,7 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
             logger.warning("代理第 %d 步的模型调用失败：%s", len(steps) + 1, e)
             stopped = "llm_error"
             break
+        _accumulate_usage(llm, usage_totals)
 
         calls = list(outcome.get("tool_calls") or [])
         answer = outcome.get("content") or answer
@@ -214,6 +234,7 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
         # 没拿到终答（跑满上限 / 模型出错）也要收敛：再问一次但**不给工具**，逼它用手里的信息作答
         try:
             answer = llm.chat_with_tools(messages, tools=None).get("content") or answer
+            _accumulate_usage(llm, usage_totals)
         except Exception as e:             # noqa: BLE001 —— 收敛这一步也失败，就把已有的返回
             logger.warning("收敛作答失败：%s", e)
 
@@ -227,6 +248,11 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
     answer, trace = _self_check(answer, sources=sources, retrieval_ran=retrieval_ran,
                                 tool_grounded=tool_grounded, llm=llm)
     trace["tool_results_trimmed"] = trimmed
+    # 多步调用的用量合计（票 27）：缺过任何一轮就不报数 —— 记账宁可「不可用」也不低报。
+    # 键名与 provider usage 一致，记账那边才能一视同仁地按「账单口径」处理。
+    trace["llm_usage"] = ({"prompt_tokens": usage_totals["input_tokens"],
+                           "completion_tokens": usage_totals["output_tokens"]}
+                          if usage_totals["complete"] and usage_totals["calls"] else None)
 
     return {
         "answer": answer,

@@ -19,6 +19,7 @@ from app.core.memory import (DbMemoryStore, FactExtractor, LlmFactExtractor,
 from app.core.parser import ParserRouter
 from app.core.reranker import Reranker, get_reranker
 from app.core.retriever import HybridRetriever
+from app.core.usage import DbUsageStore, UsageStore
 from app.core.vector_store import VectorStore, get_vector_store
 
 
@@ -39,6 +40,7 @@ class Runtime:
     context_summarizer_factory: Callable[[LLM], Summarizer] = LlmSummarizer
     fact_extractor_factory: Callable[[LLM], FactExtractor] = LlmFactExtractor
     memory_store: MemoryStore = field(default_factory=DbMemoryStore)
+    usage_store: UsageStore = field(default_factory=DbUsageStore)
 
     def llm_for(self, user_id: str) -> LLM:
         """按发起用户解析 LLM：配了自带模型就用它，否则回落服务端全局（行为与今天一致）。"""

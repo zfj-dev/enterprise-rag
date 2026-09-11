@@ -17,6 +17,7 @@ from app.core.container import Runtime
 from app.core.context import ContextPlan, assemble_context, plan_exempt
 from app.core.llm import LLM
 from app.core.memory import FactExtractor
+from app.core.usage import build_usage
 from app.core.prompt import (build_prompt, build_rewrite_prompt, format_context,
                              format_memory)
 from app.models.entities import ChatMessage, ChatSession, User
@@ -520,6 +521,10 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
         answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
 
+    # 把**本次生成**的 provider usage 立刻快照下来（票 27）：后面的引用校验与事实抽取都会调同一个
+    # 模型实例，`last_usage` 会被它们覆盖（甚至被后台线程清掉）—— 那时再读，记的就是别人的账了。
+    prep.trace["llm_usage"] = None if cache_hit else getattr(prep.llm, "last_usage", None)
+
     yield from _finish(db, rt, prep, answer, cache_hit=cache_hit, t_generate=t_generate)
 
 
@@ -574,6 +579,8 @@ def _stream_agent(db: Session, rt: Runtime, prep: Prep, got: dict,
         "citation_coverage": checked.get("citation_coverage"),
         # 代理循环里收掉了几条已经用过的工具结果（票 21）
         "tool_results_trimmed": checked.get("tool_results_trimmed"),
+        # 多步调用的 provider 用量合计（票 27）；代理没拿到就是 None，记账那边自会写「不可用」
+        "llm_usage": checked.get("llm_usage"),
         # 代理链路不用 prepare 装配的那份上下文 —— 别把它的 token 数字算到代理头上
         "context_tokens": None,
     })
@@ -601,14 +608,47 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
 
     prep.trace["message_id"] = asst.id
     _launch_fact_extraction(rt, prep, answer=answer, message_id=asst.id)
+    prep.trace["usage"] = _record_usage(rt, prep, answer, cache_hit=cache_hit, message_id=asst.id)
     prep.trace["cache_hit"] = cache_hit
     yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
            "answer": answer, "cache_hit": cache_hit,
            "citation_coverage": prep.trace.get("citation_coverage"),
            "context": prep.trace.get("context_tokens"),   # 压缩前/后 token 与口径（票 19）
+           "usage": prep.trace.get("usage"),              # 本次用量的 token 与口径来源（票 27）
            # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
            "latency": {k: prep.trace.get(k) for k in
                        ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}
+
+
+def _model_name(llm) -> str:
+    """记录里写清是哪个模型 —— 换模型之后这些数字才有可比性。"""
+    return getattr(llm, "model", "") or ("fake" if getattr(llm, "is_fake", False) else "unknown")
+
+
+def _record_usage(rt: Runtime, prep: Prep, answer: str, *, cache_hit: bool,
+                  message_id: str) -> dict | None:
+    """生成完成后记一条用量（票 27）：**provider usage 优先**，否则本地分词器，都没有记「不可用」。
+
+    口径来源写进记录（账单 vs 估算），并挂在 per-query trace 上（不新开观测通道）。
+    开关关闭时不记账、也不往 trace 上挂 —— 行为与今天完全一致。记账失败一律旁路。
+
+    两处刻意不记：
+    - **缓存命中**没有生成调用 —— 谈不上这次用量。拿 `prep.prompt` 估一个数就等于给一次
+      没发生的调用记账。
+    - 代理链路的多步用量由它自己合计（`trace["llm_usage"]`）——只记最后一轮会把成本低报；
+      它没合计出来就是 None，这里自会写「不可用」。
+    """
+    if not get_settings().cost_enabled or cache_hit:
+        return None
+
+    record = build_usage(prompt_text=prep.prompt, answer_text=answer, model=_model_name(prep.llm),
+                         provider_usage=prep.trace.get("llm_usage"),
+                         token_counter=rt.token_counter)
+    try:
+        rt.usage_store.add(prep.user.id, record, session_id=prep.session_id, message_id=message_id)
+    except Exception as e:      # noqa: BLE001 —— 旁路：计量不该把问答打崩
+        logger.warning("用量记账失败（已旁路）：%s", e)
+    return record
 
 
 def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id: str) -> None:

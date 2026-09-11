@@ -78,6 +78,9 @@ FAKE_ANSWER = (
 
 class LLM(ABC):
     is_fake: bool = False   # 演示/测试用的假模型；真实模型为 False
+    # 上一次调用 provider 返回的 usage（`{prompt_tokens, completion_tokens}`）；拿不到就是 None。
+    # 记账（票 27）优先用它 —— 那是与账单一致的口径；没有才回退本地分词器。
+    last_usage: dict | None = None
 
     @abstractmethod
     def stream(self, messages: list[dict]) -> Iterator[str]:
@@ -128,13 +131,8 @@ class CloudLLM(LLM):
             payload["tools"] = list(tools)
         return payload
 
-    def stream(self, messages: list[dict]) -> Iterator[str]:
-        if not self.api_key:
-            yield "服务配置缺失（未设置 LLM API Key）。"
-            return
-        url = f"{self.base_url}/chat/completions"
-        payload = self._post_payload(messages)
-        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+    def _stream_lines(self, url: str, payload: dict, headers: dict) -> Iterator[str]:
+        """跑一次流式请求，逐 chunk 解析（顺带把 usage 记到 `last_usage`）。"""
         with self._httpx.Client(timeout=60) as client:
             with client.stream("POST", url, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
@@ -146,11 +144,39 @@ class CloudLLM(LLM):
                         break
                     try:
                         import json
-                        delta = json.loads(data)["choices"][0]["delta"].get("content")
+                        chunk = json.loads(data)
                     except Exception:
                         continue
+                    # 带 usage 的那个 chunk 通常 choices 为空 —— 先取 usage，再看有没有正文
+                    if chunk.get("usage"):
+                        self.last_usage = chunk["usage"]
+                    choices = chunk.get("choices") or []
+                    delta = choices[0].get("delta", {}).get("content") if choices else None
                     if delta:
                         yield delta
+
+    def stream(self, messages: list[dict]) -> Iterator[str]:
+        self.last_usage = None
+        if not self.api_key:
+            yield "服务配置缺失（未设置 LLM API Key）。"
+            return
+        url = f"{self.base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        payload = self._post_payload(messages)
+        # 让 OpenAI 兼容的 provider 在最后一个 chunk 里带上 usage（与账单同口径）
+        payload["stream_options"] = {"include_usage": True}
+        try:
+            yield from self._stream_lines(url, payload, headers)
+            return
+        except self._httpx.HTTPStatusError as e:
+            if not (400 <= e.response.status_code < 500):
+                raise
+            # provider 不认这个字段 —— 去掉它重来一次（这一次拿不到 usage，记账回退本地口径）。
+            # 状态码是在吐第一个字之前就检查的，所以重试不会把正文吐两遍。
+            logger.warning("provider 拒绝了 stream_options（%s），去掉后重试：本次拿不到账单口径", e)
+        self.last_usage = None
+        payload.pop("stream_options", None)
+        yield from self._stream_lines(url, payload, headers)
 
     def chat_with_tools(self, messages: list[dict],
                         tools: Sequence[dict] | None = None) -> dict:
@@ -165,15 +191,18 @@ class CloudLLM(LLM):
         url = f"{self.base_url}/chat/completions"
         payload = self._post_payload(messages, tools=tools, stream=False)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        self.last_usage = None
         try:
             with self._httpx.Client(timeout=60) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
-                message = resp.json()["choices"][0]["message"]
+                body = resp.json()
+                message = body["choices"][0]["message"]
         except Exception as e:   # noqa: BLE001 —— 不支持工具的 provider 会在这里炸，降级而不是抛穿
             logger.warning("带工具对话失败，降级为普通回答：%s", e)
             return super().chat_with_tools(messages, tools)
 
+        self.last_usage = body.get("usage")      # 非流式响应里 usage 在顶层（与账单同口径）
         return {"content": message.get("content") or "",
                 "tool_calls": parse_tool_calls(message.get("tool_calls"))}
 
