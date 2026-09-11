@@ -1,12 +1,64 @@
-"""LLM 抽象：`stream(messages)` 产出增量文本。含 Fake（离线 demo/测试）与云端 API（OpenAI 兼容）。"""
+"""LLM 抽象：`stream(messages)` 产出增量文本。含 Fake（离线 demo/测试）与云端 API（OpenAI 兼容）。
+
+另有 `chat_with_tools(messages, tools)` —— 带工具的一轮对话（返回内容 + 工具调用列表）。
+**基类给了会降级的默认实现**：不支持工具的模型就当成普通一问一答，依赖方自然退化为单步回答。
+既有 `stream` 的签名与行为一个字没动。
+"""
 from __future__ import annotations
 
+import json
+import logging
+
 from abc import ABC, abstractmethod
-from typing import Iterator
+from dataclasses import dataclass, field
+from typing import Iterator, Sequence
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ToolCall:
+    """模型要求调用的一次工具。`arguments` 已解析成 dict；解析不了就是空 dict（原文留在 raw）。"""
+
+    id: str
+    name: str
+    arguments: dict = field(default_factory=dict)
+    raw: str = ""
+
+
+def parse_tool_calls(raw) -> list["ToolCall"]:
+    """把 OpenAI 兼容协议里的 `tool_calls` 解析成 ToolCall 列表。
+
+    参数里的 JSON 可能是坏的（模型偶尔吐不合法 JSON、或把 JSON 裹进 ``` 代码块），
+    解析不了就**留空 dict + 原文**，让上层自己决定怎么办 —— **这里不抛**（元素不是 dict 也不抛）。
+
+    约定：参数不是 JSON 对象时（比如模型直接给了个数字），塞进 `{"value": ...}`。
+    """
+    out = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue                      # 协议外的杂项直接跳过，别让它把整轮对话带崩
+        fn = item.get("function") if isinstance(item.get("function"), dict) else {}
+        text = str(fn.get("arguments") or "")
+        args: dict = {}
+        if text:
+            parsed = extract_json(text, "{")    # 先在文本里抠 JSON 对象（兼容裹代码块的写法）
+            if isinstance(parsed, dict):
+                args = parsed
+            else:
+                try:
+                    value = json.loads(text)
+                    args = value if isinstance(value, dict) else {"value": value}
+                except Exception:
+                    args = {}
+        out.append(ToolCall(id=str(item.get("id") or ""), name=str(fn.get("name") or ""),
+                            arguments=args, raw=text))
+    return out
 
 import time
 
 from app.config import get_settings
+from app.utils.text import extract_json
 
 FAKE_ANSWER = (
     "（模拟回答）根据检索到的资料，这是一种基于检索增强生成（RAG）的问答：系统先对您的文档做解析、分块、向量化，"
@@ -20,6 +72,15 @@ class LLM(ABC):
     @abstractmethod
     def stream(self, messages: list[dict]) -> Iterator[str]:
         ...
+
+    def chat_with_tools(self, messages: list[dict],
+                        tools: Sequence[dict] | None = None) -> dict:
+        """带工具的一轮对话：返回 {"content": str, "tool_calls": [ToolCall, ...]}。
+
+        **默认实现明确降级**：把消息当普通一问一答，工具调用为空 —— 不支持工具的模型
+        （含演示用的 Fake）不会抛穿，依赖方自然退化成单步回答。
+        """
+        return {"content": "".join(self.stream(messages)), "tool_calls": []}
 
 
 class FakeLLM(LLM):
@@ -49,13 +110,20 @@ class CloudLLM(LLM):
         self.temperature = temperature if temperature is not None else s.llm_temperature
         self.max_tokens = max_tokens or s.llm_max_tokens
 
+    def _post_payload(self, messages: list[dict], tools=None, stream: bool = True) -> dict:
+        """请求体只在这里拼一份 —— 流式与带工具都走它，免得两边各写一遍还写不一致。"""
+        payload = {"model": self.model, "messages": messages,
+                   "temperature": self.temperature, "max_tokens": self.max_tokens, "stream": stream}
+        if tools:
+            payload["tools"] = list(tools)
+        return payload
+
     def stream(self, messages: list[dict]) -> Iterator[str]:
         if not self.api_key:
             yield "服务配置缺失（未设置 LLM API Key）。"
             return
         url = f"{self.base_url}/chat/completions"
-        payload = {"model": self.model, "messages": messages,
-                   "temperature": self.temperature, "max_tokens": self.max_tokens, "stream": True}
+        payload = self._post_payload(messages)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         with self._httpx.Client(timeout=60) as client:
             with client.stream("POST", url, json=payload, headers=headers) as resp:
@@ -73,6 +141,31 @@ class CloudLLM(LLM):
                         continue
                     if delta:
                         yield delta
+
+    def chat_with_tools(self, messages: list[dict],
+                        tools: Sequence[dict] | None = None) -> dict:
+        """带工具的一轮（非流式）。没配 Key / 没给工具 / 调用失败，都**降级**成一问一答。
+
+        降级后若连普通回答也失败（provider 整个不可用），异常照常上抛 ——
+        那是模型本身挂了，不是「不支持工具」，不该在这里被吞掉。
+        """
+        if not tools or not self.api_key:
+            return super().chat_with_tools(messages, tools)
+
+        url = f"{self.base_url}/chat/completions"
+        payload = self._post_payload(messages, tools=tools, stream=False)
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+        try:
+            with self._httpx.Client(timeout=60) as client:
+                resp = client.post(url, json=payload, headers=headers)
+                resp.raise_for_status()
+                message = resp.json()["choices"][0]["message"]
+        except Exception as e:   # noqa: BLE001 —— 不支持工具的 provider 会在这里炸，降级而不是抛穿
+            logger.warning("带工具对话失败，降级为普通回答：%s", e)
+            return super().chat_with_tools(messages, tools)
+
+        return {"content": message.get("content") or "",
+                "tool_calls": parse_tool_calls(message.get("tool_calls"))}
 
 
 def get_llm(provider: str | None = None) -> LLM:
