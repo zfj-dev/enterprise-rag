@@ -9,7 +9,7 @@ import time
 
 from app.core.memory import (DbMemoryStore, FactExtractor, InMemoryMemoryStore,
                              LlmFactExtractor)
-from tests.helpers import wait_until
+from tests.helpers import register_and_kb, wait_until
 
 
 class StubLLM:
@@ -115,20 +115,8 @@ def _setup(client, name: str, extractor):
     import app.api.deps as deps
     from app.core.byok import InMemoryUserLLMConfigStore, LLMConfig
     from app.core.container import build_runtime
-    from app.db.session import SessionLocal
-    from app.models.entities import User
 
-    tok = client.post("/api/v1/auth/register",
-                      json={"username": name, "password": "pw123456"}).json()["access_token"]
-    H = {"Authorization": f"Bearer {tok}"}
-    kb = client.post("/api/v1/knowledge", json={"name": f"{name}-kb", "description": ""},
-                     headers=H).json()["id"]
-
-    db = SessionLocal()
-    try:
-        uid = db.query(User).filter(User.username == name).first().id
-    finally:
-        db.close()
+    H, uid, kb = register_and_kb(client, name)
 
     store = InMemoryMemoryStore()
     rt = build_runtime()
@@ -140,6 +128,21 @@ def _setup(client, name: str, extractor):
     rt.user_llm_config_store = cfg_store
     deps._runtime = rt
     return H, kb, uid, store
+
+
+def test_db_store_delete_is_per_user(client):
+    """落库实现的删除也按用户下推：别人的、不存在的都删不掉。"""
+    st = DbMemoryStore()
+    st.add("uA", ["事实A", "事实B"])
+    st.add("uB", ["别人的事实"])
+    # 按内容取 id，不依赖 list 的顺序（created_at 秒级精度，同秒内顺序不做约定）
+    ids = {f["content"]: f["id"] for f in st.list("uA")}
+
+    assert st.delete("uB", ids["事实A"]) is False   # 别人的删不掉
+    assert st.delete("uA", "nope") is False         # 不存在的删不掉
+    assert st.delete("uA", ids["事实A"]) is True
+    assert [f["content"] for f in st.list("uA")] == ["事实B"]
+    assert [f["content"] for f in st.list("uB")] == ["别人的事实"]
 
 
 def test_chat_extracts_facts_per_user(client):

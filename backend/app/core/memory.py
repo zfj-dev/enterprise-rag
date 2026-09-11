@@ -1,7 +1,7 @@
 """跨会话记忆：抽取 + 落库（票 23）、召回 + 注入块正文（票 24）。
 
 抽取器、存储与嵌入都从外部注入 —— 测试因而无网络、无真实 LLM。
-**不在**本模块范围：面向用户的列出与删除（票 25）。
+面向用户的 HTTP 接口在 `app/api/v1/memory.py`。
 """
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ class LlmFactExtractor(FactExtractor):
 
 
 class MemoryStore(ABC):
-    """按用户存取记忆事实。（删除由票 25 补上。）"""
+    """按用户存取与删除记忆事实。全部按 user 下推过滤，取不到他人的。"""
 
     @abstractmethod
     def add(self, user_id: str, facts: Sequence[str], *, session_id: str = "",
@@ -78,6 +78,10 @@ class MemoryStore(ABC):
 
     @abstractmethod
     def list(self, user_id: str) -> list[dict]: ...
+
+    @abstractmethod
+    def delete(self, user_id: str, fact_id: str) -> bool:
+        """删掉该用户的某条记忆；不是他的（或不存在）返回 False。"""
 
 
 class InMemoryMemoryStore(MemoryStore):
@@ -97,6 +101,14 @@ class InMemoryMemoryStore(MemoryStore):
 
     def list(self, user_id):
         return list(self._by_user.get(user_id, []))
+
+    def delete(self, user_id, fact_id):
+        bucket = self._by_user.get(user_id, [])
+        for i, f in enumerate(bucket):
+            if f["id"] == fact_id:
+                del bucket[i]
+                return True
+        return False
 
 
 class DbMemoryStore(MemoryStore):
@@ -121,7 +133,21 @@ class DbMemoryStore(MemoryStore):
         try:
             rows = (db.query(MemoryFact).filter(MemoryFact.user_id == user_id)
                     .order_by(MemoryFact.created_at.asc(), MemoryFact.id.asc()).all())
-            return [{"id": r.id, "content": r.content, "session_id": r.source_session_id} for r in rows]
+            return [{"id": r.id, "content": r.content, "session_id": r.source_session_id,
+                     "message_id": r.source_message_id} for r in rows]
+        finally:
+            db.close()
+
+    def delete(self, user_id, fact_id):
+        db = SessionLocal()
+        try:
+            row = (db.query(MemoryFact)
+                   .filter(MemoryFact.id == fact_id, MemoryFact.user_id == user_id).first())
+            if not row:
+                return False
+            db.delete(row)
+            db.commit()
+            return True
         finally:
             db.close()
 

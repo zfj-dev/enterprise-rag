@@ -101,3 +101,10 @@ class MetricsOut(BaseModel):
     answer_relevancy: float | None = None
     citation_coverage: float | None = None
     total_answered: int = 0
+
+
+# ---- 跨会话记忆 ----
+class MemoryFactOut(BaseModel):
+    id: str
+    content: str
+    session_id: str = ""

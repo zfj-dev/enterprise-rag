@@ -9,19 +9,10 @@ from __future__ import annotations
 
 from app.core.memory import InMemoryMemoryStore, MemoryRecall
 from app.core.prompt import format_memory
-from tests.helpers import wait_until
+from tests.helpers import StubEmbedding, register_and_kb, wait_until
 
 FACT = "用户在跟进电池项目"
 QUERY = "电池进展如何"
-
-
-class StubEmbedding:
-    """含关键词给 [1,0]，否则零向量；于是相似度只可能是 1（命中）或 0（不命中）。"""
-
-    KEY = "电池"
-
-    def encode(self, texts):
-        return [[1.0, 0.0] if self.KEY in t else [0.0, 0.0] for t in texts]
 
 
 # ---------- 纯函数：召回 ----------
@@ -90,22 +81,8 @@ def _seed(client, name, facts=None, with_doc=False):
     """
     import app.api.deps as deps
     from app.core.container import build_runtime
-    from app.db.session import SessionLocal
-    from app.models.entities import KnowledgeBase, User
 
-    tok = client.post("/api/v1/auth/register",
-                      json={"username": name, "password": "pw123456"}).json()["access_token"]
-    H = {"Authorization": "Bearer {}".format(tok)}
-    db = SessionLocal()
-    try:
-        u = db.query(User).filter(User.username == name).first()
-        kb = KnowledgeBase(owner_id=u.id, name="{}-kb".format(name), description="")
-        db.add(kb)
-        db.commit()
-        db.refresh(kb)
-        uid, kb_id = u.id, kb.id
-    finally:
-        db.close()
+    H, uid, kb_id = register_and_kb(client, name)
 
     store = InMemoryMemoryStore()
     if facts:
@@ -276,21 +253,8 @@ def test_cross_session_recall_end_to_end(client):
     import app.api.deps as deps
     from app.core.byok import InMemoryUserLLMConfigStore, LLMConfig
     from app.core.container import build_runtime
-    from app.db.session import SessionLocal
-    from app.models.entities import User
 
-    name = "recallx"
-    tok = client.post("/api/v1/auth/register",
-                      json={"username": name, "password": "pw123456"}).json()["access_token"]
-    H = {"Authorization": "Bearer {}".format(tok)}
-    kb = client.post("/api/v1/knowledge", json={"name": "recallx-kb", "description": ""},
-                     headers=H).json()["id"]
-
-    db = SessionLocal()
-    try:
-        uid = db.query(User).filter(User.username == name).first().id
-    finally:
-        db.close()
+    H, uid, kb = register_and_kb(client, "recallx")
 
     llm = RecordingLLM()
     store = InMemoryMemoryStore()

@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.api.v1 import auth, chat, debug, documents, feedback, knowledge, metrics
+from app.api.v1 import auth, chat, debug, documents, feedback, knowledge, memory, metrics
 from app.config import get_settings
 from app.db.session import SessionLocal, engine
 from app.models.entities import Base, User
@@ -63,6 +63,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router, prefix=settings.api_prefix)
     app.include_router(feedback.router, prefix=settings.api_prefix)
     app.include_router(debug.router, prefix=settings.api_prefix)
+    app.include_router(memory.router, prefix=settings.api_prefix)
     app.include_router(metrics.router, prefix=settings.api_prefix)
 
     # 静态前端（前台直接托管，无需构建即可本地/LAN 使用）
