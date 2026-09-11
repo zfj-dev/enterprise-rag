@@ -12,7 +12,7 @@ from typing import Sequence
 from app.config import get_settings
 from app.core.llm import LLM
 from app.core.similarity import cosine
-from app.utils.text import lines_of
+from app.utils.text import lines_of, truncate
 from app.db.session import SessionLocal
 from app.models.entities import MemoryFact
 
@@ -137,11 +137,6 @@ class DbMemoryStore(MemoryStore):
             db.close()
 
 
-def _truncate(text: str, limit: int) -> str:
-    """超长事实截断时补省略号 —— 注入半句事实会读成另一句，比注入稍短的事实更糟。"""
-    return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
-
-
 class MemoryRecall:
     """按相似度从某用户的记忆里召回 top-k 条相关事实。
 
@@ -167,5 +162,5 @@ class MemoryRecall:
         hits = [(cosine(qv, v), f) for f, v in zip(facts, vecs) if v]
         hits = [(sc, f) for sc, f in hits if sc >= self._min_score]
         hits.sort(key=lambda x: x[0], reverse=True)
-        return [{"content": _truncate(f["content"], self._max_chars), "score": round(sc, 3)}
+        return [{"content": truncate(f["content"], self._max_chars), "score": round(sc, 3)}
                 for sc, f in hits[: self._top_k]]

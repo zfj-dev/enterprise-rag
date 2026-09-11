@@ -26,6 +26,16 @@ class ToolCall:
     raw: str = ""
 
 
+def encode_tool_calls(calls) -> list[dict]:
+    """ToolCall 列表 -> OpenAI 兼容的 `tool_calls`（回灌给模型时的形状）。
+
+    与 parse_tool_calls 成对放在一起 —— 同一份协议只该有一个地方知道它长什么样。
+    """
+    return [{"id": c.id, "type": "function",
+             "function": {"name": c.name, "arguments": json.dumps(c.arguments, ensure_ascii=False)}}
+            for c in calls]
+
+
 def parse_tool_calls(raw) -> list["ToolCall"]:
     """把 OpenAI 兼容协议里的 `tool_calls` 解析成 ToolCall 列表。
 

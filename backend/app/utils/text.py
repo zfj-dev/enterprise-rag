@@ -46,6 +46,12 @@ def extract_json(text, kind: str = "{"):
     return None
 
 
+def truncate(text, limit: int) -> str:
+    """超长就截断并加省略号 —— 看得见是被截了，别让人读成另一句。"""
+    s = str(text or "")
+    return s if len(s) <= limit else s[: max(1, limit - 1)] + "…"
+
+
 def lines_of(text) -> list[str]:
     """按行拆开，去掉行首列表标记与空行 —— 模型爱把要点写成一行一条的列表。"""
     return [t for t in (strip_list_marker(ln) for ln in str(text or "").splitlines()) if t]
