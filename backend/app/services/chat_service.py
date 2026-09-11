@@ -17,7 +17,8 @@ from app.core.container import Runtime
 from app.core.context import ContextPlan, assemble_context
 from app.core.llm import LLM
 from app.core.memory import FactExtractor
-from app.core.prompt import build_prompt, build_rewrite_prompt, format_context
+from app.core.prompt import (build_prompt, build_rewrite_prompt, format_context,
+                             format_memory)
 from app.models.entities import ChatMessage, ChatSession, User
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,17 @@ class Prep:
     _ccit: object = None
 
     trace: dict = field(default_factory=dict)
+
+
+def _recall_memories(rt: Runtime, s, user: User, query: str) -> list[dict]:
+    """召回该用户的相关记忆。开关关闭或召回失败一律当「无记忆」—— 旁路，不拖垮回答。"""
+    if not s.memory_enabled:
+        return []
+    try:
+        return rt.recall_memory(user.id, query)
+    except Exception as e:   # noqa: BLE001 —— 旁路：记忆是辅助层
+        logger.warning("记忆召回失败（已旁路）：%s", e)
+        return []
 
 
 def _maybe_rewrite(llm: LLM, question: str, history: list[dict]) -> str:
@@ -277,14 +289,21 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     refs = [r for r in _named_ref_intent(question) if r[0] in ("表", "表格", "图", "公式")]
     # 枚举/具体编号类问题本身完整清晰：跳过 LLM 改写，避免历史污染查询
     llm = rt.llm_for(user.id)   # 按发起用户解析：自带模型 / 回落服务端全局
+    q2 = question if (cat or refs) else _maybe_rewrite(llm, question, history)
+    # 跨会话记忆：召回该用户的相关事实，作为独立的【已知信息】注入。
+    memories = _recall_memories(rt, s, user, q2)
+    memory_text = format_memory(memories)
+    # 记忆也吃预算：先扣掉它，历史在剩余额度内装配，两块的合计才不会超预算
+    # （Spec 0003 的上下文预算 × Spec 0004 的记忆注入；无记忆时预算一分不动）
+    budget = (s.context_token_budget - rt.token_counter.count(memory_text)
+              if memory_text else s.context_token_budget)
     if s.context_compress:
-        plan = assemble_context(history, budget=s.context_token_budget,
+        plan = assemble_context(history, budget=max(0, budget),
                                 keep_recent=s.context_keep_recent,
                                 count_tokens=rt.token_counter.count,
                                 summarize=rt.context_summarizer_factory(llm).summarize)
     else:   # 关闭压缩：直接透传全部已加载历史
         plan = ContextPlan(summary=None, kept=history)
-    q2 = question if (cat or refs) else _maybe_rewrite(llm, question, history)
     candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
     enum_hint = None
     if cat:
@@ -326,7 +345,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                      f"请严格依据【参考资料】中该编号对应的块回答，不要引用历史对话中的其他表格/图片/内容。")
     ccit = validate_sources(candidates)
     context = format_context(candidates)
-    prompt = build_prompt(question, context, history=plan.kept, enum_hint=enum_hint, summary=plan.summary)
+    prompt = build_prompt(question, context, history=plan.kept, enum_hint=enum_hint,
+                          summary=plan.summary, memory=memory_text)
 
     user_msg = ChatMessage(session_id=sess.id, role="user", content=question)
     db.add(user_msg)
@@ -340,8 +360,10 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         session_id=sess.id, user=user, kb_id=kb_id, question=question, rewrite=q2,
         candidates=candidates, sources=_to_sources(candidates), prompt=prompt, llm=llm, _ccit=ccit,
         trace={"query": question, "rewrite": q2, "history_turns": len(plan.kept),
-               "context_dropped": plan.dropped,
+               "context_dropped": plan.dropped, "context_budget": budget,
                "enum_cat": cat, "candidates": len(candidates),
+               "memory_recalled": len(memories),
+               "memory_top_score": memories[0]["score"] if memories else None,
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
 

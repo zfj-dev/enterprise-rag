@@ -5,20 +5,11 @@
 from __future__ import annotations
 
 import logging
-import math
-from typing import Sequence
 
 from app.config import get_settings
+from app.core.similarity import cosine
 
 logger = logging.getLogger(__name__)
-
-
-def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    na = math.sqrt(sum(x * x for x in a)) or 1.0
-    nb = math.sqrt(sum(x * x for x in b)) or 1.0
-    return dot / (na * nb)
-
 
 _REDIS_KEY = "rag:semcache"
 
@@ -74,7 +65,7 @@ class SemanticCache:
         for e in self._load_entries():
             if e["kb_id"] != kb_id:
                 continue
-            sim = _cosine(qv, e["query_vec"])
+            sim = cosine(qv, e["query_vec"])
             if sim >= self.threshold and (best is None or sim > best[0]):
                 best = (sim, e["answer"])
         if best:

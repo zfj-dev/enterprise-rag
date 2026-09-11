@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     semantic_cache: bool = True
     memory_enabled: bool = True   # 跨会话记忆：问答后异步抽取"用户告知的事实"并按用户落库
     memory_extract_max_facts: int = 5  # 单轮最多抽取几条事实
+    memory_recall_top_k: int = 3          # 每次问答最多注入几条记忆（有上限，不堆爆上下文）
+    memory_recall_min_score: float = 0.35  # 相似度低于此不注入：无相关记忆时零注入
+    memory_inject_max_chars: int = 200     # 单条事实**注入时**的长度上限（存储不截断）
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
     login_rate_limit_per_min: int = 10  # 登录限流:每用户名每分钟最多尝试次数,超限 429

@@ -1,7 +1,7 @@
-"""跨会话记忆 —— 票 23 只做「抽取 + 按用户落库」。
+"""跨会话记忆：抽取 + 落库（票 23）、召回 + 注入块正文（票 24）。
 
-抽取器与存储都从外部注入 —— 测试因而无网络、无真实 LLM。
-**不在**本模块范围：召回与注入（票 24）、面向用户的列出与删除（票 25）。
+抽取器、存储与嵌入都从外部注入 —— 测试因而无网络、无真实 LLM。
+**不在**本模块范围：面向用户的列出与删除（票 25）。
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from typing import Sequence
 
 from app.config import get_settings
 from app.core.llm import LLM
+from app.core.similarity import cosine
 from app.db.session import SessionLocal
 from app.models.entities import MemoryFact
 
@@ -123,3 +124,37 @@ class DbMemoryStore(MemoryStore):
             return [{"id": r.id, "content": r.content, "session_id": r.source_session_id} for r in rows]
         finally:
             db.close()
+
+
+def _truncate(text: str, limit: int) -> str:
+    """超长事实截断时补省略号 —— 注入半句事实会读成另一句，比注入稍短的事实更糟。"""
+    return text if len(text) <= limit else text[: max(1, limit - 1)] + "…"
+
+
+class MemoryRecall:
+    """按相似度从某用户的记忆里召回 top-k 条相关事实。
+
+    复用现有嵌入缝（不新增相似度算法）。store 与 embedding 在调用时现取 ——
+    测试替换 Runtime 上的这两个缝，即可确定性地测召回。
+    """
+
+    def __init__(self, store: MemoryStore, embedding, top_k: int | None = None,
+                 min_score: float | None = None, max_chars: int | None = None):
+        s = get_settings()
+        self._store = store
+        self._embedding = embedding
+        self._top_k = top_k if top_k is not None else s.memory_recall_top_k
+        self._min_score = min_score if min_score is not None else s.memory_recall_min_score
+        self._max_chars = max_chars if max_chars is not None else s.memory_inject_max_chars
+
+    def recall(self, user_id: str, question: str) -> list[dict]:
+        facts = self._store.list(user_id)
+        if not facts or not question:
+            return []
+        qv = self._embedding.encode([question])[0]
+        vecs = self._embedding.encode([f["content"] for f in facts])
+        hits = [(cosine(qv, v), f) for f, v in zip(facts, vecs) if v]
+        hits = [(sc, f) for sc, f in hits if sc >= self._min_score]
+        hits.sort(key=lambda x: x[0], reverse=True)
+        return [{"content": _truncate(f["content"], self._max_chars), "score": round(sc, 3)}
+                for sc, f in hits[: self._top_k]]

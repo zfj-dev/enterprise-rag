@@ -13,6 +13,18 @@ SYSTEM_PROMPT = (
     "5. 引用只标注直接支撑论断的来源，通常 1-2 个；不要把全部参考资料都标一遍。"
 )
 
+MEMORY_HEADER = (
+    "【已知信息】以下是用户此前告知过的背景，只用于理解问题与消歧。"
+    "它**不是**文档依据：不得用它支撑论断，也不得出现在 [来源: …] 标注里。"
+)
+
+
+def format_memory(facts: Sequence[dict] | None) -> str | None:
+    """把召回的事实拼成「已知信息」块的正文；无召回返回 None（不塞空块）。"""
+    if not facts:
+        return None
+    return "\n".join(f"- {f['content']}" for f in facts)
+
 
 def format_turn(turn: dict) -> str:
     """把一轮对话渲染成「用户：…／助手：…」。装配、摘要、提示词共用同一形状。"""
@@ -27,8 +39,11 @@ def build_prompt(
     system: str = SYSTEM_PROMPT,
     enum_hint: str | None = None,
     summary: str | None = None,
+    memory: str | None = None,
 ) -> str:
     parts = [system]
+    if memory:
+        parts.append(f"{MEMORY_HEADER}\n{memory}")
     if context:
         parts.append(f"【参考资料】\n{context}")
     if graph_context:

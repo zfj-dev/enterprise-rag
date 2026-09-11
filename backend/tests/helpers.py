@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 
 
 def sse_events(text: str) -> list[dict]:
@@ -14,3 +15,13 @@ def sse_events(text: str) -> list[dict]:
             except Exception:
                 continue
     return out
+
+
+def wait_until(pred, timeout: float = 5.0, interval: float = 0.05) -> bool:
+    """轮询等待条件成立 —— 后台线程落库这类异步副作用的测试用。"""
+    end = time.time() + timeout
+    while time.time() < end:
+        if pred():
+            return True
+        time.sleep(interval)
+    return False

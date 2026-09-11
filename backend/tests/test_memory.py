@@ -9,6 +9,7 @@ import time
 
 from app.core.memory import (DbMemoryStore, FactExtractor, InMemoryMemoryStore,
                              LlmFactExtractor)
+from tests.helpers import wait_until
 
 
 class StubLLM:
@@ -141,15 +142,6 @@ def _setup(client, name: str, extractor):
     return H, kb, uid, store
 
 
-def _wait(pred, timeout=5.0):
-    end = time.time() + timeout
-    while time.time() < end:
-        if pred():
-            return True
-        time.sleep(0.05)
-    return False
-
-
 def test_chat_extracts_facts_per_user(client):
     """一轮问答后，事实被抽出并归属到该用户。"""
     ex = StubExtractor(["用户所在项目是 XX"])
@@ -159,7 +151,7 @@ def test_chat_extracts_facts_per_user(client):
                     json={"kb_id": kb, "question": "我在做 XX 项目", "stream": True})
     assert r.status_code == 200
 
-    assert _wait(lambda: bool(store.list(uid))), "事实未落库"
+    assert wait_until(lambda: bool(store.list(uid))), "事实未落库"
     assert [f["content"] for f in store.list(uid)] == ["用户所在项目是 XX"]
     assert ex.seen and ex.seen[0][0] == "我在做 XX 项目"
 
@@ -173,7 +165,7 @@ def test_extraction_failure_does_not_break_answer(client):
                     json={"kb_id": kb, "question": "我在做 XX 项目", "stream": True})
     assert r.status_code == 200
     assert '"done"' in r.text or "done" in r.text
-    assert _wait(lambda: bool(ex.seen)), "抽取器应被调用过"
+    assert wait_until(lambda: bool(ex.seen)), "抽取器应被调用过"
     assert store.list(uid) == []      # 失败 → 什么都没写，但也没崩
 
 
@@ -211,7 +203,7 @@ def test_slow_extraction_does_not_block_the_answer(client):
     assert store.list(uid) == []               # 抽取器还卡着 → 尚未落库
 
     gate.set()                                 # 放行
-    assert _wait(lambda: bool(store.list(uid))), "放行后事实应落库"
+    assert wait_until(lambda: bool(store.list(uid))), "放行后事实应落库"
 
 
 def test_list_marker_stripping_keeps_digit_leading_facts():
