@@ -308,7 +308,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                                 summarize=rt.context_summarizer_factory(llm).summarize)
     else:   # 关闭压缩：直接透传全部已加载历史
         plan = ContextPlan(summary=None, kept=history)
-    candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
+    timings: dict = {}
+    candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id, timings=timings)
     enum_hint = None
     if cat:
         typed = _load_typed_chunks(db, kb_id, user.id, _classifier_for(cat))
@@ -368,12 +369,17 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                "enum_cat": cat, "candidates": len(candidates),
                "memory_recalled": len(memories),
                "memory_top_score": memories[0]["score"] if memories else None,
+               "retrieval_ms": timings.get("retrieval_ms"),
+               "rerank_ms": timings.get("rerank_ms"),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
 
 
 def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。"""
+    t_generate = time.perf_counter()
+    prep.trace["ttft_ms"] = None
+
     yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
     # 精确编号引用（表3.1 vs 表3.3 只差数字）跳过语义缓存，避免返回相似问题的旧答案
     precise = bool(_named_ref_intent(prep.question))
@@ -390,16 +396,23 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
         # 缓存命中：仍走"流式外观"——把答案切成小块逐条下发，前端逐段追加；禁止整块一次性插入
         answer = apply_no_source_no_claim(hit["answer"], prep._ccit)
         for i in range(0, len(answer), 12):
+            if i == 0:
+                prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
             yield {"type": "delta", "text": answer[i:i + 12]}
             time.sleep(0.01)
     else:
         chunks: list[str] = []
         for piece in prep.llm.stream([{"role": "user", "content": prep.prompt}]):
+            if prep.trace["ttft_ms"] is None:
+                # 首字延迟：从开始生成到吐出第一个增量
+                prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
             chunks.append(piece)
             yield {"type": "delta", "text": piece}
         if use_cache:
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
         answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
+
+    prep.trace["generate_ms"] = (time.perf_counter() - t_generate) * 1000
 
     if not prep.llm.is_fake:  # 真实模型才逐句校验引用覆盖率
         try:
@@ -419,7 +432,10 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     prep.trace["cache_hit"] = cache_hit
     yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
            "answer": answer, "cache_hit": cache_hit,
-           "citation_coverage": prep.trace.get("citation_coverage")}
+           "citation_coverage": prep.trace.get("citation_coverage"),
+           # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
+           "latency": {k: prep.trace.get(k) for k in
+                       ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}
 
 
 def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id: str) -> None:

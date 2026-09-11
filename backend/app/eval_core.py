@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
 
@@ -83,6 +85,7 @@ class ItemResult:
 class Report:
     items: list[ItemResult] = field(default_factory=list)
     retrieval: RetrievalMetrics | None = None   # 检索层指标（票 04）；有就一并渲染（票 08 接线）
+    latency: LatencyMetrics | None = None       # 延迟分桶（票 07）；同上
     judge_label: str | None = None              # 裁判口径，写进报告才可跨时间比较
     judge_error: str | None = None              # 裁判整体不可用的原因（缺 Key 等）
 
@@ -268,8 +271,12 @@ class Report:
                 lines.append("  %-18s %s" % (metric, "%.3f" % v if v is not None else "缺"))
             if self.judge_error:
                 lines.append("  部分条目裁判失败：%s" % self.judge_error)
-        if self.retrieval is not None:
+        if self.latency is not None:
+            lines.append("")
+            lines.extend(self.latency.to_lines())
+        if self.retrieval is not None or self.latency is not None:
             lines.insert(0, "=== 生成层指标 ===")
+        if self.retrieval is not None:
             lines.append("")
             lines.extend(self.retrieval.to_lines())
         return lines
@@ -509,3 +516,61 @@ def run_retrieval_eval(questions: Sequence[dict], retrieve_fn: Callable[[str], d
         skipped_questions=skipped_questions,
         negatives=negatives, rows=rows, threshold=threshold,
     )
+
+
+# ---------- 延迟（票 07） ----------
+# 与其它指标同一份报告渲染；分段与并发都由调用方喂样本，核心只做统计。
+
+LATENCY_STAGES = ("retrieval", "rerank", "ttft", "generate")
+
+_STAGE_LABELS = {"retrieval": "检索", "rerank": "重排", "ttft": "首字(TTFT)", "generate": "生成"}
+
+
+def percentile(values: Sequence, p: float) -> float | None:
+    """最近秩法（nearest-rank）：排序后取第 ceil(p/100 × n) 个。
+
+    样本少时比插值法稳，也不会出现 P95 小于 P50 这种怪事。空样本返回 None。
+    """
+    xs = sorted(v for v in values if v is not None)
+    if not xs:
+        return None
+    k = max(1, math.ceil(p / 100 * len(xs)))
+    return xs[min(k, len(xs)) - 1]
+
+
+@dataclass
+class LatencyMetrics:
+    """并发下的分段耗时：检索 / 重排 / 生成 / 首字，各给 P50 与 P95。"""
+
+    concurrent: int = 1
+    rounds: int = 1
+    samples: list = field(default_factory=list)   # 每次一条：{阶段名: 毫秒}
+    note: str = ""                                # 测量方式说明（由脚本填，写进报告）
+
+    @property
+    def count(self) -> int:
+        return len(self.samples)
+
+    def p(self, stage: str, pct: float):
+        """某一段的第 pct 百分位（毫秒）；没采到就是 None。"""
+        return percentile([s.get(stage) for s in self.samples], pct)
+
+    def to_lines(self) -> list[str]:
+        lines = [
+            "=== 延迟（并发 %d × %d 轮）===" % (self.concurrent, self.rounds),
+            "测量方式：%s" % (self.note or "(未标注)"),
+            "本段只测延迟，**不参与正确性判定** —— 正确性按单次顺序跑的那一遍判",
+            "",
+        ]
+        if not self.count:
+            lines.append("没有采到样本")
+            return lines
+        lines.append("%-12s %10s %10s" % ("分段", "P50", "P95"))
+        for stage in LATENCY_STAGES:
+            p50, p95 = self.p(stage, 50), self.p(stage, 95)
+            lines.append("%-12s %10s %10s"
+                         % (_STAGE_LABELS[stage],
+                            "-" if p50 is None else "%.0f ms" % p50,
+                            "-" if p95 is None else "%.0f ms" % p95))
+        lines.append("样本 n=%d" % self.count)
+        return lines

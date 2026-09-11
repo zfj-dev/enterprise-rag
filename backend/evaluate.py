@@ -24,6 +24,7 @@ import traceback
 import httpx
 
 from app.eval_core import run_eval
+from app.eval_http import upload_and_wait
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 BASE = os.environ.get("SELFTEST_BASE", "http://localhost:8000")
@@ -85,15 +86,7 @@ def _build_judge():
 
 def _upload(client: httpx.Client, kb_id: str, headers: dict) -> str:
     """上传被评文档并等入库，返回一行状态描述。"""
-    with open(DOC, "rb") as f:
-        up = client.post("/api/v1/documents?kb_id=%s" % kb_id, headers=headers,
-                         files={"file": (os.path.basename(DOC), f, "application/pdf")}).json()
-    d = {}
-    for _ in range(240):
-        d = client.get("/api/v1/documents/%s" % up["id"], headers=headers).json()
-        if d.get("status") in ("indexed", "failed"):
-            break
-        time.sleep(1)
+    d = upload_and_wait(client, kb_id, headers, DOC)
     return "上传: %s chunks=%s 页数=%s" % (d.get("status"), d.get("chunk_count"), d.get("page_count"))
 
 
