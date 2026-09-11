@@ -2,6 +2,10 @@
 
 只暴露 **tools**（不做 resources / prompts）；默认走本地 stdio，不占端口、不出网络。
 对外暴露（http/sse）与鉴权见票 16。
+
+这里挂的是 `default_registry()`（不依赖请求上下文的工具，如 Calculator）。
+需要请求上下文（kb_id / owner_id）的工具由 `app/mcp/registry.build_registry` 造 ——
+把它们一起对外暴露是票 16 的事。
 """
 from __future__ import annotations
 
