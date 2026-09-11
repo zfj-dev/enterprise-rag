@@ -77,6 +77,7 @@ class ItemResult:
 @dataclass
 class Report:
     items: list[ItemResult] = field(default_factory=list)
+    retrieval: RetrievalMetrics | None = None   # 检索层指标（票 04）；有就一并渲染（票 08 接线）
 
     @property
     def total(self) -> int:
@@ -195,6 +196,10 @@ class Report:
                             sum(1 for x in scored if x.page_hit), len(scored), extra))
         else:
             lines.append("引用页码正确 不适用  (%d 条黄金集条目，无一声明页码，分母为 0)" % self.total)
+        if self.retrieval is not None:
+            lines.insert(0, "=== 生成层指标 ===")
+            lines.append("")
+            lines.extend(self.retrieval.to_lines())
         return lines
 
 
@@ -226,3 +231,196 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
         if judge_fn is not None:
             report.items[-1].judged = judge_fn(question, answer, sources)
     return report
+
+
+# ---------- 检索层指标（票 04） ----------
+# 与生成层同一份报告渲染，但**离线可跑**：检索方式与打分全由 retrieve_fn 注入，
+# 核心只做算术 —— 不依赖运行中的服务，也不依赖真实嵌入。
+
+def hit_recall_at_k(ranked_ids: Sequence[str], gold: set, k: int) -> tuple[float, float]:
+    """hit@k：任一正确分块落在前 k 条；recall@k：前 k 条里命中的占全部正确分块的比例。"""
+    ids = list(ranked_ids)[:k]
+    hit = 1.0 if any(g in ids for g in gold) else 0.0
+    recall = len(gold & set(ids)) / max(1, len(gold))
+    return hit, recall
+
+
+def reciprocal_rank(ranked_ids: Sequence[str], gold: set) -> float:
+    """RR：首个正确分块名次的倒数。**用全排名**，不受 k 影响。"""
+    for i, cid in enumerate(ranked_ids, start=1):
+        if cid in gold:
+            return 1.0 / i
+    return 0.0
+
+
+@dataclass
+class LabelScore:
+    """一种检索方式的成绩单。"""
+
+    hit: dict = field(default_factory=dict)      # k -> 平均 hit@k
+    recall: dict = field(default_factory=dict)   # k -> 平均 recall@k
+    mrr: float = 0.0
+
+
+@dataclass
+class QuestionRow:
+    """逐条明细：这条问题捞到没有 —— 用来定位「检索是否漏了正确答案」。"""
+
+    question: str
+    doc: str
+    expect: str
+    gold_count: int
+    rr: dict = field(default_factory=dict)       # 方式名 -> RR
+
+
+@dataclass
+class NegativeCheck:
+    """负样本：向量 top-1 相似度越低，越有机会走到「没有可用来源 → 拒答」。"""
+
+    question: str
+    top1: float | None
+    chunk_id: str | None = None
+    below: bool | None = None                    # top1 是否低于参照阈值；没给阈值时为 None
+
+
+@dataclass
+class RetrievalMetrics:
+    """多检索方式 × 多 k 的成绩，外加负样本的相似度检查。"""
+
+    ks: tuple
+    labels: tuple
+    scores: dict = field(default_factory=dict)     # 方式名 -> LabelScore
+    scored_count: int = 0                          # 计入指标的正样本条数
+    skipped_count: int = 0                         # 判不出正确分块、未计入的条数
+    skipped_questions: list = field(default_factory=list)   # 上面这些是哪些题（不静默）
+    negatives: list = field(default_factory=list)  # [NegativeCheck]
+    rows: list = field(default_factory=list)       # [QuestionRow]
+    threshold: float | None = None                 # 参照阈值（见 to_lines 的口径说明）
+
+    def to_lines(self) -> list[str]:
+        lines = [
+            "=== 检索层指标 ===",
+            "判据口径：正确分块 = 内容含期望事实（声明了页码时还要求页码相符）的 child 块",
+            "  hit@k    任一正确分块落在前 k 条",
+            "  recall@k 前 k 条里命中的正确分块占全部正确分块的比例",
+            "  MRR      首个正确分块名次的倒数（用全排名，不看 k）",
+            "",
+        ]
+        lines.append("计入 %d 条正样本" % self.scored_count
+                     + ("；%d 条因判不出正确分块未计入：%s"
+                        % (self.skipped_count, " / ".join(self.skipped_questions))
+                        if self.skipped_count else ""))
+        lines.append("")
+
+        head = "%-14s" % "方式"
+        for k in self.ks:
+            head += " hit@%-2d rec@%-2d " % (k, k)
+        lines.append(head + " MRR")
+        for label in self.labels:
+            sc = self.scores[label]
+            row = "%-14s" % label
+            for k in self.ks:
+                row += " %5.2f  %5.2f " % (sc.hit[k], sc.recall[k])
+            lines.append(row + " %.3f" % sc.mrr)
+
+        lines.append("")
+        lines.append(self._negative_header())
+        if not self.negatives:
+            lines.append("  本次没有负样本条目")
+        for n in self.negatives:
+            if n.below is None:
+                tag = "无相似度"
+            else:
+                tag = "低(该拒)" if n.below else "高(会被当成相关内容)"
+            lines.append("  [%s] Q:%s | 向量top-1=%s%s"
+                         % (tag, n.question, n.top1,
+                            " chunk=%s" % n.chunk_id if n.chunk_id else ""))
+
+        if self.rows:
+            lines.append("")
+            lines.append("--- 逐条明细（RR = 首个正确分块名次的倒数，全排名；0 = 一个都没捞到）---")
+            for r in self.rows:
+                marks = "  ".join("%s=%.2f" % (l, r.rr.get(l, 0.0)) for l in self.labels)
+                best = max(r.rr.values()) if r.rr else 0.0
+                where = "[%s] " % r.doc if r.doc else ""
+                lines.append("[%s] %sQ:%s | 期望:%s | 正确分块=%d 条 | %s"
+                             % ("OK" if best > 0 else "MISS", where, r.question,
+                                r.expect or "(未写)", r.gold_count, marks))
+        return lines
+
+    def _negative_header(self) -> str:
+        if self.threshold is None:
+            return "负样本（期望拒答）：未给参照阈值，只记录向量 top-1 相似度"
+        return ("负样本（期望拒答）：向量 top-1 相似度参照阈值 %.2f —— "
+                "**这不是系统真正的拒答条件**（系统是「没有可用来源就不作断言」，"
+                "并不按相似度卡），这里只看负样本的相似度是否明显偏低。" % self.threshold)
+
+
+def run_retrieval_eval(questions: Sequence[dict], retrieve_fn: Callable[[str], dict],
+                       ks: Sequence[int] = (3, 5, 10),
+                       threshold: float | None = None) -> RetrievalMetrics:
+    """算检索层指标。**不碰服务、不碰真实嵌入** —— 检索方式与打分全由 retrieve_fn 注入。
+
+    questions 每条：{"question", "doc"?, "expect"?, "gold_ids": 该问题的正确分块 id 集合}；
+                    负样本写 {"question", "negative": True}（只查 top-1 相似度）。
+    retrieve_fn(question) -> {"ranks": {方式名: [分块 id 按名次]},
+                              "top1": 向量 top-1 相似度, "top1_id": 那个分块 id}
+    """
+    ks = tuple(ks)
+    acc: dict[str, dict] = {}          # 方式名 -> {"hit": {k: []}, "recall": {k: []}, "rr": []}
+
+    def bucket(label: str) -> dict:
+        return acc.setdefault(label, {"hit": {k: [] for k in ks},
+                                      "recall": {k: [] for k in ks}, "rr": []})
+
+    scored_count = 0
+    skipped_questions: list[str] = []
+    negatives: list[NegativeCheck] = []
+    rows: list[QuestionRow] = []
+
+    for q in questions:
+        out = retrieve_fn(q["question"]) or {}
+        ranks = out.get("ranks") or {}
+        for label in ranks:
+            bucket(label)
+
+        if q.get("negative"):
+            top1 = out.get("top1")
+            below = (top1 < threshold) if (top1 is not None and threshold is not None) else None
+            negatives.append(NegativeCheck(question=q["question"], top1=top1,
+                                           chunk_id=out.get("top1_id"), below=below))
+            continue
+
+        gold = set(q.get("gold_ids") or ())
+        if not gold:            # 判不出正确分块 —— 记下是哪一题，别让它悄悄把分母改小
+            skipped_questions.append(q["question"])
+            continue
+
+        scored_count += 1
+        row_rr: dict[str, float] = {}
+        for label, ranked in ranks.items():
+            b = bucket(label)
+            for k in ks:
+                h, r = hit_recall_at_k(ranked, gold, k)
+                b["hit"][k].append(h)
+                b["recall"][k].append(r)
+            rr = reciprocal_rank(ranked, gold)
+            b["rr"].append(rr)
+            row_rr[label] = rr
+        rows.append(QuestionRow(question=q["question"], doc=q.get("doc", ""),
+                                expect=q.get("expect", ""), gold_count=len(gold), rr=row_rr))
+
+    def avg(xs):
+        return sum(xs) / len(xs) if xs else 0.0
+
+    return RetrievalMetrics(
+        ks=ks, labels=tuple(acc.keys()),
+        scores={l: LabelScore(hit={k: avg(v["hit"][k]) for k in ks},
+                              recall={k: avg(v["recall"][k]) for k in ks},
+                              mrr=avg(v["rr"]))
+                for l, v in acc.items()},
+        scored_count=scored_count,
+        skipped_count=len(skipped_questions),
+        skipped_questions=skipped_questions,
+        negatives=negatives, rows=rows, threshold=threshold,
+    )

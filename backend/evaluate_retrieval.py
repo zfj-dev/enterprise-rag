@@ -1,8 +1,8 @@
-"""离线检索质量评估：量化"检索层"是否把含答案的 chunk 捞进 top-k。
+"""离线检索质量评估：量化「检索层」是否把含答案的 chunk 捞进 top-k。
 
-与 evaluate.py(端到端:fact_hit/grounded/page)互补。本脚本不依赖运行中的服务、不需要 LLM：
-直接 build_runtime() 解析→分块→索引 paper.pdf,然后用混合/向量/BM25/重排四种检索方式,
-对每个问题算 hit-rate@k / recall@k / MRR;负样本算 top-1 相似度(看是否该被拒答)。
+指标本身在可注入的评测核心 app/eval_core.py（run_retrieval_eval）；本脚本只做两件事：
+把索引与四种检索方式包成 retrieve_fn、把核心算出的指标落盘。
+**不依赖运行中的服务、不需要 LLM。**
 
 用法:  cd backend && python evaluate_retrieval.py
 报告:  logs/retrieval-eval-report.log
@@ -12,8 +12,9 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import time
+
+from app.eval_core import normalize, run_retrieval_eval
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 
@@ -22,10 +23,6 @@ DOC = os.environ.get("EVAL_DOC", os.path.join(BACKEND, "paper.pdf"))
 GOLDEN = os.environ.get("EVAL_GOLDEN", os.path.join(BACKEND, "data", "golden_set_retrieval.json"))
 KB_ID, OWNER_ID = "eval_kb", "eval_owner"
 K_LIST = (3, 5, 10)  # 评估 hit-rate/recall/MRR 的 top-k
-
-
-def _norm(s) -> str:
-    return re.sub(r"\s+", "", s or "").lower()
 
 
 def _index_doc(rt, path: str) -> list[dict]:
@@ -72,91 +69,79 @@ def _rank_lists(rt, query: str, top_n: int = 20):
     return reranked, merged, v_list, b_list
 
 
-def _metrics(ranked: list[dict], gold: set[str], k: int):
-    """hit@k: 任一 gold 在前 k; recall@k: 找到的 gold 占 gold 总数; mrr: 首个 gold 的名次倒数。"""
-    ids = [x["chunk_id"] for x in ranked[:k]]
-    hit = 1.0 if any(g in ids for g in gold) else 0.0
-    recall = len(gold & set(ids)) / max(1, len(gold))
-    mrr = 0.0
-    for i, cid in enumerate(ids, start=1):
-        if cid in gold:
-            mrr = 1.0 / i
-            break
-    return hit, recall, mrr
+
+def _gold_ids(chunks: list[dict], g: dict) -> set:
+    """含期望事实（声明了页码时还要求页码相符）的 child 块 —— 该问题「应该被捞到」的那些。"""
+    want = normalize(g["expect"])
+    return {c["id"] for c in chunks
+            if want in normalize(c["content"])
+            and (g.get("page") is None or c["page_num"] == g["page"])}
+
+
+def _retrieve_fn(rt):
+    """把运行时包成核心要的 retrieve_fn：四种检索方式的排名 + 向量 top-1 相似度。"""
+
+    def retrieve(question: str) -> dict:
+        reranked, merged, v_list, b_list = _rank_lists(rt, question)
+        qvec = rt.embedding.encode([question])[0]
+        top = rt.vector_store.search(qvec, top_k=1,
+                                     filter_meta={"kb_id": KB_ID, "owner_id": OWNER_ID})
+        return {
+            "ranks": {
+                "hybrid+rerank": [x["chunk_id"] for x in reranked],
+                "hybrid": [x["chunk_id"] for x in merged],
+                "vector": [x["chunk_id"] for x in v_list],
+                "bm25": [x["chunk_id"] for x in b_list],
+            },
+            "top1": round(top[0].score, 3) if top else None,
+            "top1_id": top[0].id if top else None,
+        }
+
+    return retrieve
 
 
 def main() -> None:
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     os.environ.setdefault("PARSER_USE_DOCLING", "false")
+    from app.config import get_settings
+    from app.core.container import build_runtime
+
     docs = [d for d in os.environ.get("EVAL_DOCS", "").split(",") if d.strip()] or [DOC]
-    lines: list[str] = ["=== RAG 检索质量评估(离线) ==="]
-    lines.append(f"嵌入: {os.environ.get('EMBEDDING_PROVIDER','fake')} | 文档数: {len(docs)}")
     with open(GOLDEN, encoding="utf-8") as f:
         golden = json.load(f)
 
-    from app.core.container import build_runtime
+    lines: list[str] = [
+        "=== RAG 检索质量评估(离线) ===",
+        "嵌入: %s | 文档数: %d" % (os.environ.get("EMBEDDING_PROVIDER", "fake"), len(docs)),
+        "黄金集: %s" % GOLDEN,
+    ]
     rt = build_runtime()
 
     chunks_by_doc: dict[str, list[dict]] = {}
     t0 = time.time()
     for path in docs:
-        c = _index_doc(rt, path)
         name = os.path.basename(path)
-        chunks_by_doc[name] = c
-        lines.append(f"索引 {name}: {len(c)} child")
-    lines.append(f"索引耗时 {time.time()-t0:.1f}s")
+        chunks_by_doc[name] = _index_doc(rt, path)
+        lines.append("索引 %s: %d child" % (name, len(chunks_by_doc[name])))
+    lines.append("索引耗时 %.1fs" % (time.time() - t0))
+    lines.append("")
 
-    def _doc_of(g: dict) -> str:
-        gd = g.get("doc")
-        if gd:
-            return gd
-        return os.path.basename(docs[0]) if docs else ""
+    def doc_of(g: dict) -> str:
+        """条目归属哪份文档：黄金集写了 doc 就用它，否则算在第一份上。"""
+        return g.get("doc") or (os.path.basename(docs[0]) if docs else "")
 
-    acc = {label: {"hit": {k: [] for k in K_LIST}, "recall": {k: [] for k in K_LIST}, "mrr": []}
-           for label in ("hybrid+rerank", "hybrid", "vector", "bm25")}
-    neg_all = [g for g in golden if g.get("negative")]
+    questions: list[dict] = []
+    for g in golden:
+        if g.get("negative"):
+            questions.append({"question": g["question"], "doc": doc_of(g), "negative": True})
+        else:
+            questions.append({"question": g["question"], "doc": doc_of(g),
+                              "expect": g.get("expect", ""),
+                              "gold_ids": _gold_ids(chunks_by_doc.get(doc_of(g), []), g)})
 
-    for docname, chunks in chunks_by_doc.items():
-        fq = [g for g in golden if not g.get("negative") and _doc_of(g) == docname]
-        if not fq:
-            continue
-        lines.append(f"\n--- 文档: {docname} ({len(fq)} 事实问) ---")
-        for g in fq:
-            q, exp = g["question"], g["expect"]
-            gold = {c["id"] for c in chunks if _norm(exp) in _norm(c["content"])
-                    and (g.get("page") is None or c["page_num"] == g["page"])}
-            if not gold:
-                lines.append(f"[GOLD缺失] Q:{q} 期望:{exp}")
-                continue
-            reranked, merged, v_list, b_list = _rank_lists(rt, q)
-            for label, ranked in (("hybrid+rerank", reranked), ("hybrid", merged), ("vector", v_list), ("bm25", b_list)):
-                for k in K_LIST:
-                    h, r, _m = _metrics(ranked, gold, k)
-                    acc[label]["hit"][k].append(h)
-                    acc[label]["recall"][k].append(r)
-                _h, _r, m = _metrics(ranked, gold, len(ranked))   # mrr 每个问题只记一次(用全排名)
-                acc[label]["mrr"].append(m)
-            last = acc["hybrid+rerank"]["mrr"][-1]
-            hit3 = sum(acc[x]["hit"][3][-1] for x in acc) / len(acc)
-            lines.append(f"[{'OK' if hit3 >= 0.5 else '..'}] Q:{q} | 期望:{exp} | gold={len(gold)} | MRR(hybrid+rerank)={last:.3f}")
-
-    lines.append("\n=== 汇总(各问题平均) ===")
-    n = len(acc["hybrid"]["mrr"])
-    for label in acc:
-        a = acc[label]
-        sweep = [f"@{k}: hit={sum(a['hit'][k])/max(1,n):.2f} rec={sum(a['recall'][k])/max(1,n):.2f}" for k in K_LIST]
-        lines.append(f"{label:>12}  MRR={sum(a['mrr'])/max(1,n):.3f}  " + "  ".join(sweep))
-
-    lines.append("\n=== 负样本(向量top-1相似度应低于 min_relevance -> 该被拒答) ===")
-    from app.config import get_settings
-    min_rel = get_settings().min_relevance
-    for g in neg_all:
-        qvec = rt.embedding.encode([g["question"]])[0]
-        top = rt.vector_store.search(qvec, top_k=1, filter_meta={"kb_id": KB_ID, "owner_id": OWNER_ID})
-        top_score = round(top[0].score, 3) if top else None
-        top_cid = top[0].id if top else None
-        flag = "低(可拒)" if (top_score or 0) < min_rel else "高(需端到端验证)"
-        lines.append(f"[{flag}] Q:{g['question']} | 向量top-1={top_score} chunk={top_cid} (min_relevance={min_rel})")
+    metrics = run_retrieval_eval(questions, _retrieve_fn(rt), ks=K_LIST,
+                                 threshold=get_settings().min_relevance)
+    lines.extend(metrics.to_lines())
 
     with open(REPORT, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
