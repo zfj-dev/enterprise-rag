@@ -45,6 +45,9 @@ def test_page_rate_is_none_when_no_item_declares_a_page():
     assert rep.page_rate is None
     assert rep.items[0].page_hit is None
 
+    text = "\n".join(rep.to_lines())
+    assert "引用页码正确 不适用" in text and "分母为 0" in text
+
 
 def test_empty_goldenset_is_all_zero():
     rep = run_eval([], lambda q: {"answer": "", "sources": []})
@@ -61,6 +64,10 @@ def test_missing_expect_is_a_miss_not_a_skip():
     assert rep.total == 2
     assert rep.items[0].fact_hit is False
     assert rep.fact_rate == pytest.approx(0.5)
+    assert rep.missing_expect_count == 1
+
+    text = "\n".join(rep.to_lines())
+    assert "(未写期望事实)" in text and "按未命中计" in text
 
 
 def test_answer_fn_may_omit_sources():
@@ -140,3 +147,38 @@ def test_report_lines_state_the_criterion_and_the_numbers():
     assert "67%" in text                                # 答案含期望事实 2/3
     assert "50%" in text                                # 引用页码正确 1/2
     assert "Q3" in text                                 # 逐条都在
+
+
+# ---------- 缺失时的口径：不静默跳过 ----------
+
+def test_item_without_declared_page_is_stated_not_silently_dropped():
+    """没声明页码的条目不计入页码率 —— 但报告必须写明条数，不能看着像被跳过。"""
+    golden = [{"question": "Q1", "expect": "甲"}, {"question": "Q2", "expect": "乙", "page": 5}]
+    table = {"Q1": {"answer": "甲", "sources": [{"text": "甲", "page": 1}]},
+             "Q2": {"answer": "乙", "sources": [{"text": "乙", "page": 5}]}}
+    rep = run_eval(golden, _answer_fn(table))
+
+    assert rep.total == 2
+    assert rep.undeclared_page_count == 1
+    assert rep.page_rate == 1.0                       # 分母只算声明了页码的那条
+    text = "\n".join(rep.to_lines())
+    assert "另有 1 条黄金集条目未声明页码" in text
+    assert "未声明页码" in text                        # 逐条那行也点名了
+def test_item_whose_run_produced_nothing_is_a_miss_not_a_skip():
+    """答案空、来源空：声明了期望与页码的那条要判成未命中，而不是消失。"""
+    rep = run_eval([{"question": "Q", "expect": "甲", "page": 3}],
+                   lambda q: {"answer": "", "sources": []})
+
+    assert rep.total == 1
+    assert rep.items[0].fact_hit is False
+    assert rep.items[0].grounded is False
+    assert rep.items[0].page_hit is False             # 声明了页码却没有来源页码
+    assert rep.page_rate == 0.0
+
+
+def test_all_three_numbers_always_get_a_line():
+    """三个数字必须行行都在 —— 空黄金集也不例外。"""
+    text = "\n".join(run_eval([], lambda q: {}).to_lines())
+    assert "答案含期望事实" in text
+    assert "引用忠实度" in text
+    assert "引用页码正确" in text

@@ -1,4 +1,4 @@
-"""RAG 黄金集评估（论文版）：对运行中的服务跑黄金集，出「答案含期望事实」等数字。
+"""RAG 黄金集评估：对运行中的服务跑黄金集，出「答案含期望事实」等数字。
 
 判据本身在可注入的评测核心 app/eval_core.py；本脚本只做两件事：
 把运行中的服务包成 answer_fn、把核心给的报告落盘。
@@ -70,7 +70,8 @@ def main() -> None:
     with open(GOLDEN, encoding="utf-8") as f:
         golden = json.load(f)
 
-    head = ["=== RAG 黄金集评估报告（论文版）===", "文档: %s" % DOC]
+    head = ["=== RAG 黄金集评估报告 ===",
+            "黄金集: %s" % GOLDEN, "被评文档: %s" % DOC]
     try:
         c = httpx.Client(base_url=BASE, timeout=300)
         r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})

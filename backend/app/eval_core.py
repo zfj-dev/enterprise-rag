@@ -34,6 +34,16 @@ class ItemResult:
     page_hit: bool | None       # 期望页码是否在来源页码里；本条没声明页码时为 None
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
 
+    @property
+    def has_expect(self) -> bool:
+        """黄金集条目写没写期望事实。"""
+        return bool(normalize(self.expect))
+
+    @property
+    def has_page(self) -> bool:
+        """黄金集条目声明没声明页码 —— 全模块只认这一处定义。"""
+        return self.expect_page is not None
+
 
 @dataclass
 class Report:
@@ -56,39 +66,59 @@ class Report:
 
     @property
     def page_rate(self) -> float | None:
-        scored = [x for x in self.items if x.page_hit is not None]
+        scored = [x for x in self.items if x.has_page]
         if not scored:
             return None
         return sum(1 for x in scored if x.page_hit) / len(scored)
+
+    @property
+    def missing_expect_count(self) -> int:
+        """没写期望事实的黄金集条目 —— 按未命中计，但仍留在报告里（不静默跳过）。"""
+        return sum(1 for x in self.items if not x.has_expect)
+
+    @property
+    def undeclared_page_count(self) -> int:
+        """没声明页码的黄金集条目 —— 不计入页码率，但报告写明条数，看着不像被跳过。"""
+        return sum(1 for x in self.items if not x.has_page)
 
     def to_lines(self) -> list[str]:
         """报告正文：先口径、再逐条、后汇总 —— 数字脱离口径就不可信。"""
         lines = [
             "判据口径：期望事实与待查文本都「去空白 + 转小写」后做子串匹配",
             "  fact_hit  期望事实出现在答案里",
-            "  grounded  期望事实出现在引用来源文本里（引用忠实度）",
-            "  page_hit  期望页码出现在引用来源页码里",
+            "  grounded  期望事实出现在**随答案返回的来源文本**里（系统给出的来源集合；"
+            "不逐条核对该论断是否被答案显式引用）",
+            "  page_hit  期望页码出现在随答案返回的来源页码里（声明了页码却没来源页码 = 未命中）",
+            "  黄金项缺期望事实 / 页码时：不跳过该条，而是按未命中计入或写明不计入",
             "",
         ]
         for x in self.items:
             tail = (" | 页码:%s->%s" % (x.expect_page, "✓" if x.page_hit else x.pages)
-                    if x.expect_page else " | 来源页:%s" % (x.pages,))
+                    if x.has_page else " | 未声明页码; 来源页:%s" % (x.pages,))
             lines.append("[%s] Q:%s | 期望:%s | 命中:%s|忠实:%s%s"
                          % ("PASS" if x.fact_hit else "FAIL",
-                            x.question, x.expect, x.fact_hit, x.grounded, tail))
+                            x.question, x.expect or "(未写期望事实)",
+                            x.fact_hit, x.grounded, tail))
             lines.append("    答案前90字: %s" % x.answer[:90].replace(chr(10), " / "))
         lines.append("")
-        lines.append("结果: 答案含期望事实 %d%%  (%d/%d)"
+        miss = ("；其中 %d 条黄金集条目未写期望事实，按未命中计" % self.missing_expect_count
+                if self.missing_expect_count else "")
+        lines.append("结果: 答案含期望事实 %d%%  (%d/%d)%s"
                      % (round(self.fact_rate * 100),
-                        sum(1 for x in self.items if x.fact_hit), self.total))
-        lines.append("引用忠实度(事实在来源里) %d%%  (%d/%d)"
+                        sum(1 for x in self.items if x.fact_hit), self.total, miss))
+        lines.append("引用忠实度(期望事实在随答案返回的来源里) %d%%  (%d/%d)"
                      % (round(self.grounded_rate * 100),
                         sum(1 for x in self.items if x.grounded), self.total))
-        if self.page_rate is not None:
-            scored = [x for x in self.items if x.page_hit is not None]
-            lines.append("引用页码正确 %d%%  (%d/%d)"
+        # 页码这一项无论有没有分母都要出一行 —— 三个数字不能有一个凭空消失
+        scored = [x for x in self.items if x.has_page]
+        if scored:
+            extra = ("；另有 %d 条黄金集条目未声明页码，不计入" % self.undeclared_page_count
+                     if self.undeclared_page_count else "")
+            lines.append("引用页码正确 %d%%  (%d/%d)%s"
                          % (round(self.page_rate * 100),
-                            sum(1 for x in scored if x.page_hit), len(scored)))
+                            sum(1 for x in scored if x.page_hit), len(scored), extra))
+        else:
+            lines.append("引用页码正确 不适用  (%d 条黄金集条目，无一声明页码，分母为 0)" % self.total)
         return lines
 
 
