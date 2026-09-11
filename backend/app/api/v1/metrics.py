@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, get_db, get_runtime, require_admin
 from app.config import get_settings
 from app.core.container import Runtime
-from app.core.cost import summarize
+from app.core.cost import summarize, summarize_note
 from app.core.quota import window_start
 from app.core.schemas import CostSummaryOut, MetricsOut
 from app.utils.times import as_aware
@@ -73,14 +73,7 @@ def _within(record: dict, since: datetime) -> bool:
 
 
 def _note(payload: dict) -> str:
-    """口径写清：数字到了面板上，**口径不能丢** —— 账单 / 估算 / 模拟必须跟着一起显示。"""
-    clauses = []
-    simulated = (payload.get("by_source") or {}).get("simulated", 0)
-    if simulated:
-        clauses.append("含 %d 笔**模拟口径**（演示假模型自报的用量，不是账单）—— 那部分数字只演示链路"
-                       % simulated)
-    if payload["total_cost"] is None and payload["records"]:
-        clauses.append("这段时间的用量**一笔都折不出费用**（单价未知 / token 量不到）—— 不按 0 算")
-    elif payload["unpriced"]:
-        clauses.append("合计是**下界**：有 %d 笔费用折不出来，未计入" % payload["unpriced"])
-    return "；".join(clauses)
+    """口径写清：数字到了面板上，**口径不能丢** —— 账单 / 估算 / 模拟必须跟着一起显示；
+    并且**标明这是我方统计、不是厂商余额**（票 35 要求两个数字各自的来源分别写明）。"""
+    parts = ["我方统计用量（本地记账按单价折算，不是厂商余额）", summarize_note(payload)]
+    return "；".join(p for p in parts if p)

@@ -154,6 +154,23 @@ class LLMConfigOut(BaseModel):
     persistent: bool = False    # 重启后还在不在 —— 只存内存时如实说「不在」，别让人以为存住了
 
 
+class VendorBalanceOut(BaseModel):
+    """厂商余额（能查则查）。`available=False` 时 `amount` 一定是 None —— 不拿 0 顶替。"""
+
+    available: bool = False
+    amount: float | None = None
+    currency: str = ""
+    note: str = ""          # 这个数字**从哪来** / 为什么没有
+    alert: str = ""         # 低于提醒线时的文案（只提醒，不拦截）
+
+
+class BalanceOut(BaseModel):
+    """两个维度**分开报**：厂商余额（能查则查）+ 我方统计用量（照常、可审计）。"""
+
+    vendor: VendorBalanceOut = Field(default_factory=VendorBalanceOut)
+    ours: CostSummaryOut = Field(default_factory=CostSummaryOut)
+
+
 # ---- 跨会话记忆 ----
 class MemoryFactOut(BaseModel):
     id: str

@@ -142,6 +142,7 @@
   .thinking-head .arrow{transition:transform .2s;font-size:11px}
   .thinking-head.open .arrow{transform:rotate(90deg)}
   .thinking-body{padding:0 12px 10px;font-size:13px;color:var(--text-quaternary);font-style:italic;line-height:1.7}
+  .bal-src{font-size:11px;opacity:.75;margin-top:2px}
   .agent-note{margin-top:10px;border-left:3px solid var(--warn,#d97706);background:var(--surface-muted);border-radius:8px;padding:8px 12px;font-size:13px;color:var(--text-muted,#6b7280);line-height:1.6}
   .src-card{margin-top:12px;border:1px solid var(--border);border-radius:12px;background:var(--surface-muted);padding:12px 14px}
   .src-card .src-title{font-size:13px;font-weight:500;margin-bottom:8px;color:var(--text-secondary);display:flex;align-items:center;gap:6px}
@@ -322,6 +323,7 @@
     <div class="side-brand"><div class="logo">📄</div><span class="brand-name">文档问答</span><span id="modeBadge" class="mode-badge" style="display:none">演示</span><button class="icon-btn" onclick="toggleSidebar()" title="收起侧栏" style="margin-left:auto">«</button></div>
     <div class="side-new"><button onclick="newChat()">＋ 新建对话</button></div>
     <div style="padding:0 16px 6px;display:flex;gap:6px;align-items:center"><select id="kbSel" onchange="selectKb()" style="flex:1;font-size:12px;padding:6px 8px" title="知识库"></select><button class="icon-btn" onclick="createKb()" title="新建知识库" style="flex:none">➕</button><button class="icon-btn" onclick="renameKb()" title="重命名当前知识库" style="flex:none">✏️</button><button class="icon-btn" onclick="deleteKb()" title="删除当前知识库" style="flex:none">🗑</button></div>
+    <div id="balBox" style="padding:0 16px 8px;font-size:12px;color:var(--text-muted,#6b7280);line-height:1.7"></div>
     <div class="side-nav">
       <div class="nav-item" onclick="openDocLib()">📚 文档库</div>
       <div class="nav-item">🗂 知识库设置</div>
@@ -562,7 +564,14 @@ async function login(){if(AUTH_BUSY)return;setAuthBusy(true);try{const r=await a
 async function register(){if(AUTH_BUSY)return;setAuthBusy(true);try{const r=await api('/auth/register',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});document.getElementById('loginMsg').textContent=r.ok?'注册成功，请登录':(fmtErr(r.data.detail)||'注册失败')}finally{setAuthBusy(false)}}
 
 /* 知识库 */
-async function loadKbs(){const r=await api('/knowledge');if(!r.ok){clearAuth();document.getElementById('loginMsg').textContent='登录已过期';return}let arr=r.data||[];if(!arr.length){const c=await api('/knowledge',{method:'POST',body:{name:'默认知识库',description:''}});if(c.ok)arr=[c.data];else toast('自动创建知识库失败，请点左栏➕手动创建')}KBS=arr;const sel=document.getElementById('kbSel');sel.innerHTML=KBS.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');const curId=KB?KB.id:(KBS[0]?KBS[0].id:null);if(curId){sel.value=curId;KB=KBS.find(k=>k.id===curId)||KBS[0]||null}if(KB){loadDocs();loadSessions();loadHistory()}else{document.getElementById('chatInner').innerHTML='';document.getElementById('docsBox').innerHTML=''}}
+async function loadKbs(){const r=await api('/knowledge');if(!r.ok){clearAuth();document.getElementById('loginMsg').textContent='登录已过期';return}let arr=r.data||[];if(!arr.length){const c=await api('/knowledge',{method:'POST',body:{name:'默认知识库',description:''}});if(c.ok)arr=[c.data];else toast('自动创建知识库失败，请点左栏➕手动创建')}KBS=arr;const sel=document.getElementById('kbSel');sel.innerHTML=KBS.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');const curId=KB?KB.id:(KBS[0]?KBS[0].id:null);if(curId){sel.value=curId;KB=KBS.find(k=>k.id===curId)||KBS[0]||null}loadBalance();if(KB){loadDocs();loadSessions();loadHistory()}else{document.getElementById('chatInner').innerHTML='';document.getElementById('docsBox').innerHTML=''}}
+// 余额与用量**两个维度分开显示**：厂商余额（能查则查）+ 我方统计用量（本地记账）。
+// 查不到就照实写出来（「该厂商不支持余额查询」/「查询失败」），**不留空、也不拿用量冒充余额**。
+async function loadBalance(){const el=document.getElementById('balBox');if(!el)return;const r=await api('/llm/balance');if(!r.ok){el.textContent='';return}const v=r.data.vendor||{},o=r.data.ours||{};
+const vt=v.available?('厂商余额：'+v.amount+' '+(v.currency||'')):(v.note||'厂商余额：不可用');
+const ot=(o.total_cost===null||o.total_cost===undefined)?'不可用（单价未知 / 量不到）':(o.total_cost+' 元');
+el.innerHTML='<div>💰 '+esc(vt)+'</div><div>📊 我方统计用量：'+esc(ot)+'</div>'
++'<div class="bal-src">来源：'+esc(v.note||'')+' | '+esc(o.note||'')+'</div>'+(v.alert?'<div style="color:#d97706">⚠️ '+esc(v.alert)+'</div>':'')}
 async function selectKb(){const sel=document.getElementById('kbSel');KB=KBS.find(k=>k.id===sel.value)||null;if(KB){await loadDocs();loadSessions();loadHistory();if(document.getElementById('docView').style.display!=='none'){document.getElementById('docLibTitle').textContent='文档库 · '+KB.name;renderDocList();SEL_DOC=null}}else{document.getElementById('chatInner').innerHTML='';document.getElementById('docsBox').innerHTML=''}}
 
 async function createKb(){const name=(prompt('新建知识库名称：','默认知识库')||'').trim();if(!name)return;const r=await api('/knowledge',{method:'POST',body:{name,description:''}});if(!r.ok){toast('创建失败：'+((r.data&&r.data.detail)||''));return}await loadKbs();const sel=document.getElementById('kbSel');const opt=sel.querySelector(`option[value="${r.data.id}"]`);if(opt){sel.value=r.data.id;selectKb()}toast('已创建知识库「'+name+'」')}

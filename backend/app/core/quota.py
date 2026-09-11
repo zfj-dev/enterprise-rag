@@ -11,7 +11,8 @@
 - 判定发生在**生成开始前**，依据的是**此前已累计**的用量 —— 本次请求的用量完成后才入账，
   所以拦截只对**下一个**请求生效，**已在进行中的流不会被打断**；
 - **管理员豁免**（免得运维把自己锁在系统外面），但其用量照常记录与展示；
-- 窗口按**自然**日 / 月滚动（不是「最近 24 小时」）—— 用户问「这个月还剩多少」时想的是自然月。
+- 窗口按**自然**日 / 月滚动（不是「最近 24 小时」）—— 用户问「这个月还剩多少」时想的是自然月；
+- **自带 Key 的用户不纳入硬拦**（票 35）：花的是他自己的钱，用量照记、只是不拦。
 
 费用折不出来的用量（单价未知 / token 量不到）**不折算、也不当 0** —— 累计值因此只是**下界**：
 这种账拦不住人（拦不准），但**也不会假装拦住了** —— 每遇上一笔折不出来的，都会 warning 一次，
@@ -78,13 +79,17 @@ def quota_message(spent: float, limit: float, window: str, unknown: int) -> str:
 
 
 def check_quota(store, user, *, enabled: bool, window: str, limit: float | None,
-                 now: datetime | None = None) -> str | None:
+                 byok: bool = False, now: datetime | None = None) -> str | None:
     """要不要拦这个用户的下一次生成：拦就返回**原因文案**，不拦返回 None。
 
     纯判定在 `over_quota`；这里只负责取数（按用户下推）与豁免规则。
     """
     if not enabled or getattr(user, "role", "") == "admin":
         return None                       # 关掉开关 / 管理员豁免 —— 用量照记，只是不拦
+    if byok:
+        # 自带 Key：花的是**用户自己的钱**，用他的 key 还拿平台额度拦他是荒谬的（票 35）。
+        # 用量照常记账（可审计），只是不纳入硬拦。
+        return None
     now = now or datetime.now().astimezone()
     spent, unknown = spent_in_window(store.list(user.id), window_start(now, window))
     if unknown:

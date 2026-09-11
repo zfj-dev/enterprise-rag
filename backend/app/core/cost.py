@@ -13,6 +13,22 @@ from typing import Sequence
 from app.utils.times import as_aware
 
 
+def summarize_note(payload: dict) -> str:
+    """这条摘要的口径说明（**只此一处**）—— 折不出的账不当 0，所以合计是**下界**；
+    含模拟口径时也要说出来。两个接口（成本可见性 / BYOK 余额）共用，免得各写一句。
+    """
+    clauses = []
+    simulated = (payload.get("by_source") or {}).get("simulated", 0)
+    if simulated:
+        clauses.append("含 %d 笔**模拟口径**（演示假模型自报的用量，不是账单）—— 那部分数字只演示链路"
+                       % simulated)
+    if payload.get("total_cost") is None and payload.get("records"):
+        clauses.append("这段时间的用量**一笔都折不出费用**（单价未知 / token 量不到）—— 不按 0 算")
+    elif payload.get("unpriced"):
+        clauses.append("合计是**下界**：有 %d 笔费用折不出来，未计入" % payload["unpriced"])
+    return "；".join(clauses)
+
+
 def _record_cost(record: dict) -> float | None:
     """折得出来的费用；**折不出来的返回 None**（bool 也是 int，挡掉）。"""
     cost = record.get("cost")

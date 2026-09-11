@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from app.config import get_settings
+from app.core.balance import BalanceProbe, OpenAICompatBalanceProbe
 from app.core.bm25 import InMemoryBm25
 from app.core.byok import (DbUserLLMConfigStore, InMemoryUserLLMConfigStore, LLMFactory,
                            OpenAICompatLLMFactory, UserLLMConfigStore)
@@ -53,6 +54,8 @@ class Runtime:
     price_table: PriceTable = field(default_factory=PriceTable)
     # 自填 base_url 的域名解析器（票 33）：真实运行走系统 DNS，测试注入 stub
     url_resolver: Callable[[str], list] = default_resolver
+    # 厂商余额查询（票 35）：能查则查，查不到如实说 —— 由它自己判断厂商有没有这个接口
+    balance_probe: BalanceProbe = field(default_factory=OpenAICompatBalanceProbe)
     # 自带模型的能力探测（票 34）：带缓存，不为每次问答都探一遍
     capability_probe: CapabilityProbe = field(
         default_factory=lambda: CachedCapabilityProbe(OpenAICompatCapabilityProbe()))
@@ -62,11 +65,11 @@ class Runtime:
         cfg = self.user_llm_config_store.get(user_id)
         if not cfg:
             return self.llm
-        if not self._base_url_is_still_safe(cfg.base_url):
+        if not self.base_url_is_still_safe(cfg.base_url):
             return self.llm          # 兜底：不拿一个可能已指向内网的地址去发请求
         return self.llm_factory.build(cfg)
 
-    def _base_url_is_still_safe(self, base_url: str) -> bool:
+    def base_url_is_still_safe(self, base_url: str) -> bool:
         """**用之前再验一次**用户自填的地址（票 33）。
 
         保存时验过一道，但保存与真正发请求之间隔着任意长的时间 —— 域名可以在这中间被改指到

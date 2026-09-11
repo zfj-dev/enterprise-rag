@@ -59,8 +59,13 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
     # 预算硬拦（票 29）：判定在**生成之前**、依据此前已累计的用量 —— 所以拦截只对**下一个**
     # 请求生效，已在进行中的流不被打断；管理员豁免（用量照记）。
     conf = get_settings()
+    # 自带 Key 的用户不纳入硬拦：花的是他自己的钱（票 35）。
+    # 但**必须是他自己的 key 真的在用**：地址复查不过时 llm_for 会回落到服务端全局，
+    # 那时花的是我们的钱，就不能豁免（否则白送额度）。
+    own = rt.user_llm_config_store.get(user.id)
+    byok = own is not None and rt.base_url_is_still_safe(own.base_url)
     reason = check_quota(rt.usage_store, user, enabled=conf.quota_enabled,
-                          window=conf.quota_window, limit=conf.quota_limit)
+                          window=conf.quota_window, limit=conf.quota_limit, byok=byok)
     if reason:
         from fastapi import HTTPException
         # 402：额度用尽（既不是「请求太快」，也不是「没权限」）

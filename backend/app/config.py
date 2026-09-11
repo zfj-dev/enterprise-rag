@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     byok_allowed_hosts: str = ""
     byok_allow_insecure: bool = False
     byok_request_timeout_seconds: float = 30.0
+    # 厂商余额的**提醒线**（票 35）：低于它只提醒、不拦截；<=0 表示不设提醒
+    byok_balance_alert_threshold: float = 0.0
     # 预算硬拦（票 29）。**默认关**：硬拦会挡住用户，先让人显式打开。
     quota_enabled: bool = False
     quota_window: Literal["day", "month"] = "day"   # 自然窗口（日 / 月）
