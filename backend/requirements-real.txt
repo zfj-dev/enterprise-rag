@@ -15,3 +15,6 @@ psycopg[binary]>=3.1
 
 # docling 版面/表格模型（onnxruntime，Windows wheel 不随 docling-slim standard 自动带）
 onnxruntime>=1.17
+
+# MCP（代理的工具层 + 对外可挂载的 server）
+mcp>=2.0
