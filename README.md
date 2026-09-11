@@ -238,12 +238,34 @@ enterprise-rag/
 
 ## 已知边界与路线图
 
-- ✅ **已完成**：全链路（上传→检索→引用→反馈）、混合检索 + RRF + 重排、逐句引用校验、评测闭环、私有推理节点、生产编排、94 项自动化测试。
-- 🚧 **计划中**（详见 [docs/ROADMAP.md](docs/ROADMAP.md)）：RAGAS 四项 + RGB 中文基准（→ 业界可比数字）；Agentic（ReAct + 3 工具）；MCP server；会话摘要压缩上下文；成本面板；自带 Key（BYOK）。
+- ✅ **已完成**：全链路（上传→检索→引用→反馈）、混合检索 + RRF + 重排、逐句引用校验、评测闭环、Agentic（ReAct + 3 工具 + 引用自检）、MCP server（可被任意 MCP 客户端挂载）、跨会话记忆、私有推理节点、生产编排。
+- 🚧 **计划中**（详见 [docs/ROADMAP.md](docs/ROADMAP.md)）：RAGAS 四项 + RGB 中文基准的一页报告（代码已就位，待真机跑出数字）；上下文压缩；成本面板；自带 Key（BYOK）。
 - ⚠️ **边界**：
   - **在线 Demo 地址与演示视频尚未上线**（本仓库目前是源码 + 一键本地/局域网部署）。
   - 真实模式依赖 `requirements-real.txt`（`bge` / `docling` / 公式 OCR 模型）；Windows 上 Docling 下载 HuggingFace 模型需要 `run_real.ps1` 里预设的几个环境变量（关闭符号链接、关闭 Xet、走镜像）。
   - 生产编排的 pgvector 切换尚待真机验证。
+
+### 挂载 MCP（可选：让 Claude Desktop / Claude Code 直接用这些工具）
+
+三个工具（`KbRetrieve` / `SqlQuery` / `Calculator`）实现只有一份：进程内给代理调，也能挂成 MCP
+server 给任意客户端调。默认走本地 stdio，不占端口、不出网络。
+
+```json
+"enterprise-rag": {
+  "command": "<backend>/.venv/Scripts/python.exe",
+  "args": ["-m", "app.mcp.server", "--user", "admin", "--kb", "<kb_id>"],
+  "cwd": "<backend>",
+  "env": {"DATABASE_URL": "sqlite:///./rag.db"}
+}
+```
+
+`--user` / `--kb` 决定这次挂载的**身份与范围**（服务端配置注入，客户端传什么都不看）；`env` 要给全
+—— MCP SDK 默认只把一份白名单环境交给子进程，少了 `DATABASE_URL` 挂载点会当场退出。挂上之前先跑
+`scripts/verify_mcp.ps1` 做一次真机往返自检（报告 `backend/logs/mcp-verify.log`）。
+
+对外暴露（HTTP）默认关闭：要同时设 `MCP_TRANSPORT=http` + `MCP_ALLOW_NETWORK=true` +
+`MCP_TOKEN=<随机串>` 才启动，且不写 `MCP_HOST` 就只绑 127.0.0.1。
+
 
 ---
 

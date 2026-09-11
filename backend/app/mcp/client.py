@@ -67,14 +67,17 @@ class StdioMCPClient(ToolTransport):
     """
 
     def __init__(self, command: str, args: list, cwd: str | None = None,
-                 timeout: float = 30.0):
+                 timeout: float = 30.0, env: dict | None = None):
         from mcp import StdioServerParameters
         from mcp.client.session import ClientSession
         from mcp.client.stdio import stdio_client
 
         self._stdio_client = stdio_client
         self._ClientSession = ClientSession
-        self._params = StdioServerParameters(command=command, args=list(args), cwd=cwd)
+        # env 必须显式传：SDK 默认只给子进程一份**白名单**环境（PATH / TEMP 之类），
+        # 数据库地址、模型配置都不在里面 —— 挂载点会因「连不上库」当场退出。
+        self._params = StdioServerParameters(command=command, args=list(args), cwd=cwd,
+                                             env=dict(env) if env is not None else None)
         self._timeout = timeout
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
