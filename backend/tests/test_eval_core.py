@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.eval_core import normalize, run_eval
+from app.eval_core import is_refusal, normalize, run_eval
 
 GOLDEN = [
     {"question": "Q1", "expect": "803.96"},
@@ -182,3 +182,89 @@ def test_all_three_numbers_always_get_a_line():
     assert "答案含期望事实" in text
     assert "引用忠实度" in text
     assert "引用页码正确" in text
+
+# ---------- 拒答判据（免 LLM） ----------
+
+def test_is_refusal_matches_explicit_refusals():
+    assert is_refusal("根据现有资料无法确定（未检索到可引用的内容）。") is True
+    assert is_refusal("资料中没有相关信息，无法回答。") is True
+    assert is_refusal("未找到相关内容。") is True
+
+
+def test_is_refusal_covers_the_systems_own_phrasings():
+    """系统自己的拒答话术必须全认出来 —— 兜底串与 prompt 规则 2/3 的敏感信息拒答。"""
+    from app.core.citation import apply_no_source_no_claim, validate_sources
+
+    assert is_refusal(apply_no_source_no_claim("原始答案", validate_sources([]))) is True
+    assert is_refusal("抱歉，涉及薪资等敏感信息，我不能提供。") is True
+    assert is_refusal("文中未提及该数据。") is True
+    assert is_refusal("该文档未包含相关内容。") is True
+
+
+def test_long_answer_that_merely_mentions_refusal_is_not_a_refusal():
+    """先拒后硬答：长篇里夹一句拒答，仍是在拿模型自身知识作答 —— 算成拒答会把数字抬高。"""
+    hard = "资料中没有相关信息。" + "不过据我所知，" + "这个数字大约是 42。" * 20
+    assert is_refusal(hard) is False
+    assert is_refusal("资料中没有相关信息。") is True     # 同一句话，短的就是真拒答
+
+
+def test_is_refusal_does_not_fire_on_ordinary_answers():
+    assert is_refusal("比亚迪2025年营业收入为 803.96 亿元。") is False
+    assert is_refusal("这个数字不太确定，但资料显示约为 803.96 亿元。") is False   # 有"不确定"但不是拒答
+    assert is_refusal("") is False                                              # 空答案 = 没答，不是拒答
+
+
+# ---------- 负样本与拒答率 ----------
+
+NEG = [{"question": "公司的考勤打卡截止时间是几点", "negative": True},
+       {"question": "软件著作权登记号是多少", "negative": True}]
+
+
+def test_negative_samples_are_supported_and_refusal_rate_is_computed():
+    golden = [{"question": "Q1", "expect": "803.96"}] + NEG
+    table = {
+        "Q1": {"answer": "803.96 [来源: a.pdf, 第1页]", "sources": [{"text": "803.96", "page": 1}]},
+        "公司的考勤打卡截止时间是几点": {"answer": "根据现有资料无法确定。", "sources": []},
+        "软件著作权登记号是多少": {"answer": "登记号是 2024SR1234567。", "sources": []},
+    }
+    rep = run_eval(golden, _answer_fn(table))
+
+    assert rep.total == 3
+    assert len(rep.positives) == 1 and len(rep.negatives) == 2
+    assert rep.refuse_rate == pytest.approx(0.5)              # 一个明确拒答、一个硬答
+    assert [x.refused for x in rep.negatives] == [True, False]
+    assert rep.refused_count == 1
+
+
+def test_negatives_stay_out_of_the_fact_and_page_denominators():
+    """负样本没有期望事实，不能被当成"未命中"把事实命中率拉低。"""
+    golden = [{"question": "Q1", "expect": "甲"}] + NEG
+    table = {"Q1": {"answer": "甲", "sources": []},
+             "公司的考勤打卡截止时间是几点": {"answer": "无法确定", "sources": []},
+             "软件著作权登记号是多少": {"answer": "无法确定", "sources": []}}
+    rep = run_eval(golden, _answer_fn(table))
+
+    assert rep.fact_rate == 1.0            # 分母只有那 1 条正样本
+    assert rep.missing_expect_count == 0   # 负样本没写 expect，不算数据缺口
+    assert rep.undeclared_page_count == 1  # 只数正样本
+
+
+def test_report_puts_refusal_rate_next_to_fact_hit_rate():
+    """两者并列 —— 免得"拒答率高是因为什么都不答"被误读。"""
+    golden = [{"question": "Q1", "expect": "甲"}] + NEG
+    table = {"Q1": {"answer": "甲", "sources": []},
+             "公司的考勤打卡截止时间是几点": {"answer": "无法确定", "sources": []},
+             "软件著作权登记号是多少": {"answer": "登记号是 2024SR1234567。", "sources": []}}
+    text = "\n".join(run_eval(golden, _answer_fn(table)).to_lines())
+
+    assert text.index("答案含期望事实") < text.index("拒答率") < text.index("引用忠实度")
+    assert "另有 2 条负样本另计拒答率" in text
+    assert "明确拒答 1，未拒答 1" in text
+    assert "REFUSED" in text and "ANSWERED" in text          # 逐条区分两种结局
+    assert "负样本(期望拒答)" in text
+
+
+def test_refusal_rate_absent_when_there_are_no_negative_samples():
+    rep = run_eval(GOLDEN, _answer_fn(ANSWERS))
+    assert rep.refuse_rate is None
+    assert "拒答率 不适用" in "\n".join(rep.to_lines())

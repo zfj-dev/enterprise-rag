@@ -6,6 +6,13 @@
 用法: 先启动 run_real.ps1，再  python backend/evaluate.py
 可配环境变量:  EVAL_DOC=backend/paper.pdf  EVAL_GOLDEN=backend/data/golden_set_paper.json
 报告写到 logs/eval-report.log（助手可读）。
+
+黄金集条目（JSON 数组，每条一个对象）：
+  question  问题
+  expect    期望事实（判 fact_hit / grounded 用）
+  page      可选，期望页码（判 page_hit 用）
+  negative  可选，true = 负样本：答案不在文档里，期望系统拒答；
+            这种条目不写 expect，也不参与事实 / 页码的分母，只计入拒答率
 """
 from __future__ import annotations
 

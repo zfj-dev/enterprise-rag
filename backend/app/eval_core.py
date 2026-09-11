@@ -22,6 +22,32 @@ def normalize(text) -> str:
     return "".join(str(text or "").split()).lower()
 
 
+# 拒答措辞。只收明确表示「答不了」的说法，不收「不确定」「可能」这类正常答案里也有的词。
+# 覆盖系统自己的话术（citation.apply_no_source_no_claim、prompt 规则 2/3）与云端模型常见的拒答说法。
+_REFUSAL_MARKERS = (
+    "无法确定", "无法回答", "无法提供", "无法给出", "无法从", "无法协助", "无法帮",
+    "不能提供", "不便提供", "不予回答", "拒绝回答",
+    "未检索到", "没有找到相关", "未找到相关", "未找到", "没有相关信息",
+    "不足以为", "不足以回答", "不足以",
+    "资料中没有", "资料中未", "文档中没有", "没有相关资料", "资料未提及",
+    "未提及", "文中未", "未包含相关",
+)
+
+# 拒答是「一句话把人挡回去」，不会长篇大论。超过这个长度就不再当拒答看 ——
+# 专门用来挡住「资料里没有…，不过据我所知…」这种**先拒后硬答**，那正是要抓的幻觉，
+# 让它混进拒答会把拒答率抬成虚高，与这条指标的本意相反。
+_REFUSAL_MAX_CHARS = 120
+
+
+def is_refusal(answer: str) -> bool:
+    """免 LLM 的拒答判据：答案**整段**就是一句拒答话术，才算「明确拒答」。
+
+    口径写死、确定性可单测。空答案**不算**拒答 —— 那是没答，不是拒答。
+    """
+    a = normalize(answer)
+    return bool(a) and len(a) <= _REFUSAL_MAX_CHARS and any(m in a for m in _REFUSAL_MARKERS)
+
+
 @dataclass
 class ItemResult:
     question: str
@@ -32,6 +58,8 @@ class ItemResult:
     expect_page: int | None
     pages: list                 # 来源里的页码
     page_hit: bool | None       # 期望页码是否在来源页码里；本条没声明页码时为 None
+    negative: bool = False      # 负样本：答案不在文档里，期望拒答（黄金集写 "negative": true）
+    refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
 
     @property
@@ -45,6 +73,7 @@ class ItemResult:
         return self.expect_page is not None
 
 
+
 @dataclass
 class Report:
     items: list[ItemResult] = field(default_factory=list)
@@ -53,8 +82,19 @@ class Report:
     def total(self) -> int:
         return len(self.items)
 
+    @property
+    def positives(self) -> list[ItemResult]:
+        """正样本：要查事实的。负样本只判拒答，不进事实 / 页码的分母。"""
+        return [x for x in self.items if not x.negative]
+
+    @property
+    def negatives(self) -> list[ItemResult]:
+        """负样本：答案不在文档里，期望拒答。"""
+        return [x for x in self.items if x.negative]
+
     def _rate(self, picked: Callable[[ItemResult], bool]) -> float:
-        return sum(1 for x in self.items if picked(x)) / max(1, len(self.items))
+        items = self.positives
+        return sum(1 for x in items if picked(x)) / max(1, len(items))
 
     @property
     def fact_rate(self) -> float:
@@ -65,21 +105,37 @@ class Report:
         return self._rate(lambda x: x.grounded)
 
     @property
+    def refused_count(self) -> int:
+        """明确拒答的负样本条数 —— 拒答率与报告渲染共用这一处，免得两处各数一遍。"""
+        return sum(1 for x in self.negatives if x.refused)
+
+    @property
+    def refuse_rate(self) -> float | None:
+        """负样本里「明确拒答」的占比；没有负样本条目则为 None。"""
+        negs = self.negatives
+        if not negs:
+            return None
+        return self.refused_count / len(negs)
+
+    @property
     def page_rate(self) -> float | None:
-        scored = [x for x in self.items if x.has_page]
+        scored = [x for x in self.positives if x.has_page]
         if not scored:
             return None
         return sum(1 for x in scored if x.page_hit) / len(scored)
 
     @property
     def missing_expect_count(self) -> int:
-        """没写期望事实的黄金集条目 —— 按未命中计，但仍留在报告里（不静默跳过）。"""
-        return sum(1 for x in self.items if not x.has_expect)
+        """该写期望事实却没写的正样本 —— 按未命中计，但仍留在报告里（不静默跳过）。
+
+        负样本本来就没有期望事实，不算数据缺口。
+        """
+        return sum(1 for x in self.positives if not x.has_expect)
 
     @property
     def undeclared_page_count(self) -> int:
-        """没声明页码的黄金集条目 —— 不计入页码率，但报告写明条数，看着不像被跳过。"""
-        return sum(1 for x in self.items if not x.has_page)
+        """没声明页码的正样本 —— 不计入页码率，但报告写明条数，看着不像被跳过。"""
+        return sum(1 for x in self.positives if not x.has_page)
 
     def to_lines(self) -> list[str]:
         """报告正文：先口径、再逐条、后汇总 —— 数字脱离口径就不可信。"""
@@ -89,10 +145,20 @@ class Report:
             "  grounded  期望事实出现在**随答案返回的来源文本**里（系统给出的来源集合；"
             "不逐条核对该论断是否被答案显式引用）",
             "  page_hit  期望页码出现在随答案返回的来源页码里（声明了页码却没来源页码 = 未命中）",
-            "  黄金项缺期望事实 / 页码时：不跳过该条，而是按未命中计入或写明不计入",
+            "  黄金集条目缺期望事实 / 页码时：不跳过该条，而是按未命中计入或写明不计入",
+            "  refuse    负样本（黄金集标 negative: true）期望拒答。判据：答案整段不超 %d 字"
+            "且含「无法确定 / 未找到 / 不能提供」等拒答措辞 → 明确拒答；"
+            "长篇里夹带一句拒答（先拒后硬答）与空答案都不算 —— 负样本不参与上面三项的分母"
+            % _REFUSAL_MAX_CHARS,
             "",
         ]
         for x in self.items:
+            if x.negative:
+                lines.append("[%s] Q:%s | 负样本(期望拒答) | %s"
+                             % ("REFUSED" if x.refused else "ANSWERED", x.question,
+                                "已明确拒答" if x.refused else "未拒答（多为用模型自身知识硬答）"))
+                lines.append("    答案前90字: %s" % x.answer[:90].replace(chr(10), " / "))
+                continue
             tail = (" | 页码:%s->%s" % (x.expect_page, "✓" if x.page_hit else x.pages)
                     if x.has_page else " | 未声明页码; 来源页:%s" % (x.pages,))
             lines.append("[%s] Q:%s | 期望:%s | 命中:%s|忠实:%s%s"
@@ -103,14 +169,24 @@ class Report:
         lines.append("")
         miss = ("；其中 %d 条黄金集条目未写期望事实，按未命中计" % self.missing_expect_count
                 if self.missing_expect_count else "")
-        lines.append("结果: 答案含期望事实 %d%%  (%d/%d)%s"
+        neg_note = ("，另有 %d 条负样本另计拒答率" % len(self.negatives)) if self.negatives else ""
+        lines.append("结果: 答案含期望事实 %d%%  (%d/%d)%s%s"
                      % (round(self.fact_rate * 100),
-                        sum(1 for x in self.items if x.fact_hit), self.total, miss))
+                        sum(1 for x in self.positives if x.fact_hit), len(self.positives),
+                        miss, neg_note))
+        # 拒答率紧挨事实命中率并列 —— 免得「拒答率高是因为什么都不答」被误读
+        if self.negatives:
+            n_ref = self.refused_count
+            lines.append("拒答率(负样本) %d%%  (%d/%d；明确拒答 %d，未拒答 %d)"
+                         % (round(self.refuse_rate * 100), n_ref, len(self.negatives),
+                            n_ref, len(self.negatives) - n_ref))
+        else:
+            lines.append("拒答率 不适用  (本次黄金集没有负样本条目)")
         lines.append("引用忠实度(期望事实在随答案返回的来源里) %d%%  (%d/%d)"
                      % (round(self.grounded_rate * 100),
-                        sum(1 for x in self.items if x.grounded), self.total))
+                        sum(1 for x in self.positives if x.grounded), len(self.positives)))
         # 页码这一项无论有没有分母都要出一行 —— 三个数字不能有一个凭空消失
-        scored = [x for x in self.items if x.has_page]
+        scored = [x for x in self.positives if x.has_page]
         if scored:
             extra = ("；另有 %d 条黄金集条目未声明页码，不计入" % self.undeclared_page_count
                      if self.undeclared_page_count else "")
@@ -145,6 +221,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             grounded=bool(want) and want in normalize(src_text),
             expect_page=expect_page, pages=pages,
             page_hit=(expect_page in pages) if expect_page else None,
+            negative=bool(g.get("negative")), refused=is_refusal(answer),
         ))
         if judge_fn is not None:
             report.items[-1].judged = judge_fn(question, answer, sources)
