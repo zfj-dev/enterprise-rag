@@ -8,6 +8,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
+from app.utils.text import extract_json
+
 logger = logging.getLogger(__name__)
 
 
@@ -57,19 +59,10 @@ def _split_claims(answer: str, max_claims: int = 8) -> list[str]:
 
 
 def _extract_json_object(text: str):
-    try:
-        start = text.index("{")
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    return json.loads(text[start:i + 1])
-    except Exception as e:
-        logger.warning("提取 JSON 对象失败: %s", e)
-    return None
+    obj = extract_json(text, "{")      # 抽取口径与评测裁判共用一份（app/utils/text.py）
+    if obj is None:
+        logger.warning("提取 JSON 对象失败")
+    return obj
 
 
 def _parse_verification(raw: str, claims: list[str]) -> dict:

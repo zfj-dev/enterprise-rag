@@ -12,6 +12,7 @@ from typing import Sequence
 from app.config import get_settings
 from app.core.llm import LLM
 from app.core.similarity import cosine
+from app.utils.text import lines_of
 from app.db.session import SessionLocal
 from app.models.entities import MemoryFact
 
@@ -25,23 +26,6 @@ _EXTRACT_PROMPT = (
     "2. 用户没明确说过的不要抽（不要从提问方式里推测）。\n"
     "3. 每条事实占一行，不要编号、不要解释；没有可抽的就输出空行。\n\n"
 )
-
-
-def _strip_list_marker(line: str) -> str:
-    """去掉行首的列表标记（`- ` / `* ` / `2. ` / `3) `），**只**去标记，不吞正文。
-
-    不能用 lstrip 把数字和点号统统削掉 —— 那会把「2024 年营收」这类以数字开头的事实削成「年营收」。
-    """
-    t = line.strip()
-    for pre in ("-", "•", "*"):
-        if t.startswith(pre):
-            return t[len(pre):].strip()
-    i = 0
-    while i < len(t) and t[i].isdigit():
-        i += 1
-    if 0 < i < len(t) and t[i] in ".、)）":
-        return t[i + 1:].strip()
-    return t
 
 
 class FactExtractor(ABC):
@@ -62,9 +46,8 @@ class LlmFactExtractor(FactExtractor):
         prompt = _EXTRACT_PROMPT + f"【用户提问】\n{question}\n\n【助手回答】\n{answer}"
         raw = "".join(self._llm.stream([{"role": "user", "content": prompt}]))
         facts: list[str] = []
-        for line in raw.splitlines():
-            t = _strip_list_marker(line)
-            if t and t not in facts:
+        for t in lines_of(raw):        # 拆行 + 去列表标记（与评测判据共用同一份口径）
+            if t not in facts:
                 facts.append(t)
         return facts[: self._max]
 

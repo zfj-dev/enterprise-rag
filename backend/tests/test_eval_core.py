@@ -103,7 +103,7 @@ def test_parser_inserted_spaces_do_not_break_the_hit():
 def test_judge_fn_is_called_per_item_and_recorded():
     seen = []
 
-    def judge(question, answer, sources):
+    def judge(question, answer, sources, reference):
         seen.append(question)
         return {"faithful": True}
 
@@ -116,7 +116,7 @@ def test_judge_fn_is_called_per_item_and_recorded():
 def test_judge_receives_the_answer_and_sources():
     got = {}
 
-    def judge(question, answer, sources):
+    def judge(question, answer, sources, reference):
         got["question"], got["answer"], got["sources"] = question, answer, sources
         return {}
 
@@ -268,3 +268,105 @@ def test_refusal_rate_absent_when_there_are_no_negative_samples():
     rep = run_eval(GOLDEN, _answer_fn(ANSWERS))
     assert rep.refuse_rate is None
     assert "拒答率 不适用" in "\n".join(rep.to_lines())
+
+
+# ---------- RAGAS 四项（票 05） ----------
+
+def test_report_averages_the_four_ragas_metrics():
+    calls = []
+
+    def judge(question, answer, sources, reference):
+        calls.append((question, reference))
+        v = 0.8 if question == "Q1" else 0.4
+        return {"faithfulness": v, "answer_relevancy": v, "context_precision": v, "context_recall": v}
+
+    golden = [{"question": "Q1", "expect": "甲"}, {"question": "Q2", "expect": "乙"}]
+    rep = run_eval(golden, _answer_fn({"Q1": {"answer": "甲"}, "Q2": {"answer": "乙"}}),
+                   judge_fn=judge, judge_label="RAGAS(judge=stub, temp=0.0)")
+
+    assert calls == [("Q1", "甲"), ("Q2", "乙")]        # 裁判拿得到参考答案（context_recall 要用）
+    assert rep.ragas_count == 2
+    assert set(rep.ragas) == {"faithfulness", "answer_relevancy", "context_precision", "context_recall"}
+    assert rep.ragas["faithfulness"] == pytest.approx(0.6)      # (0.8 + 0.4) / 2
+
+    text = "\n".join(rep.to_lines())
+    assert "=== RAGAS 四项 ===" in text
+    assert "RAGAS(judge=stub, temp=0.0)" in text                # 口径必须写进报告
+    assert "计入 2/2 条" in text
+
+
+def test_judge_failure_is_recorded_not_swallowed():
+    """裁判挂了要记下来并明说 —— 宁可报错，也不给看着正常的假数字。"""
+    def boom(question, answer, sources, reference):
+        raise RuntimeError("裁判超时")
+
+    rep = run_eval([{"question": "Q", "expect": "甲"}], lambda q: {"answer": "甲"}, judge_fn=boom)
+
+    assert rep.ragas is None
+    assert "裁判超时" in (rep.judge_error or "")
+    text = "\n".join(rep.to_lines())
+    assert "裁判不可用" in text and "RuntimeError" in text
+    assert "faithfulness" not in text          # 一个数都不许编
+
+
+def test_no_judge_means_no_ragas_numbers():
+    rep = run_eval([{"question": "Q", "expect": "甲"}], lambda q: {"answer": "甲"})
+    assert rep.ragas is None and rep.ragas_count == 0
+    text = "\n".join(rep.to_lines())
+    assert "未接裁判" in text
+    assert "faithfulness" not in text
+
+
+def test_judge_giving_no_usable_scores_is_said_so():
+    """裁判跑了但没给出可解析的分：不能报成"未接裁判"，得说清楚是哪一种。"""
+    rep = run_eval([{"question": "Q", "expect": "甲"}], lambda q: {"answer": "甲"},
+                   judge_fn=lambda q, a, s, r: {})
+    assert rep.ragas_count == 1 and rep.ragas is None
+    assert "裁判没给出可解析的分" in "\n".join(rep.to_lines())
+
+
+def test_negative_samples_never_reach_the_judge():
+    """负样本只判拒答：送进 RAGAS 会把四项均值无端拖低，分母也会对不上。"""
+    seen = []
+
+    def judge(question, answer, sources, reference):
+        seen.append(question)
+        return {"faithfulness": 1.0}
+
+    golden = [{"question": "Q1", "expect": "甲"}, {"question": "N1", "negative": True}]
+    table = {"Q1": {"answer": "甲"}, "N1": {"answer": "这个我不知道"}}
+    rep = run_eval(golden, _answer_fn(table), judge_fn=judge)
+
+    assert seen == ["Q1"]                                   # 负样本没送去裁判
+    assert rep.ragas_count == 1
+    assert "计入 1/1 条" in "\n".join(rep.to_lines())        # 分母只算正样本
+
+
+def test_judge_gets_the_golden_reference_when_provided():
+    got = {}
+
+    def judge(question, answer, sources, reference):
+        got["ref"] = reference
+        return {}
+
+    run_eval([{"question": "Q", "expect": "关键词", "reference": "完整的参考答案。"}],
+             lambda q: {"answer": "甲"}, judge_fn=judge)
+    assert got["ref"] == "完整的参考答案。"
+
+
+def test_reference_falls_back_to_expect():
+    got = {}
+
+    def judge(question, answer, sources, reference):
+        got["ref"] = reference
+        return {}
+
+    run_eval([{"question": "Q", "expect": "甲"}], lambda q: {"answer": "甲"}, judge_fn=judge)
+    assert got["ref"] == "甲"
+
+
+def test_report_states_the_context_recall_baseline():
+    rep = run_eval([{"question": "Q", "expect": "甲"}], lambda q: {"answer": "甲"},
+                   judge_fn=lambda q, a, s, r: {"context_recall": 1.0})
+    text = "\n".join(rep.to_lines())
+    assert "reference" in text and "退化成 0/1" in text

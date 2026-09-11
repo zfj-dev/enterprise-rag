@@ -58,6 +58,31 @@ def _answer_fn(client: httpx.Client, kb_id: str, headers: dict):
     return ask
 
 
+def _build_judge():
+    """按固定口径造 RAGAS 裁判（judge 模型 + 温度 0）。
+
+    返回 (裁判, 要不到的原因)：要不到时裁判为 None、原因原样返回 —— 报告里会写明，
+    **绝不给看着正常的假数字**。只有真异常才往外抛。
+    """
+    from app.config import get_settings
+    from app.core.embedding import get_embedding
+    from app.core.llm import CloudLLM
+    from app.eval_judge import JudgeUnavailable, RagasJudge
+
+    s = get_settings()
+    try:
+        if s.llm_provider == "fake":
+            raise JudgeUnavailable("LLM_PROVIDER=fake（演示/假模型），没有真实裁判可用")
+        llm = CloudLLM(model=s.ragas_judge_model, temperature=s.ragas_judge_temperature)
+        if not (llm.api_key or ""):
+            raise JudgeUnavailable("未配置 LLM API Key，RAGAS 裁判不可用")   # 先查 Key，别白加载嵌入
+        return RagasJudge(llm, get_embedding()), None
+    except JudgeUnavailable as e:
+        return None, str(e)
+    except Exception as e:   # noqa: BLE001 —— 嵌入/模型加载失败也算裁判要不到，但要说清是哪一类
+        return None, "%s: %s" % (type(e).__name__, e)
+
+
 def _upload(client: httpx.Client, kb_id: str, headers: dict) -> str:
     """上传被评文档并等入库，返回一行状态描述。"""
     with open(DOC, "rb") as f:
@@ -87,7 +112,13 @@ def main() -> None:
                     headers=H).json()["id"]
         head.append(_upload(c, kb, H))
         head.append("")
-        body = run_eval(golden, _answer_fn(c, kb, H)).to_lines()
+
+        judge, judge_note = _build_judge()
+        report = run_eval(golden, _answer_fn(c, kb, H),
+                          judge_fn=judge, judge_label=judge.label if judge else None)
+        if judge_note:
+            report.judge_error = report.judge_error or judge_note
+        body = report.to_lines()
         c.delete("/api/v1/knowledge/%s" % kb, headers=H)
     except Exception:
         body = ["fatal: " + traceback.format_exc()]

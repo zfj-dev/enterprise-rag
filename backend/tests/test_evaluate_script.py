@@ -92,10 +92,11 @@ def test_main_runs_offline_and_judges_via_the_core(tmp_path, monkeypatch):
     seen = {}
     real_run_eval = evaluate.run_eval
 
-    def spy(goldenset, answer_fn, judge_fn=None):
+    def spy(goldenset, answer_fn, judge_fn=None, judge_label=None):
         seen["golden"] = list(goldenset)
         seen["answer"] = answer_fn("Q")
-        return real_run_eval(goldenset, answer_fn, judge_fn)
+        seen["judge_label"] = judge_label
+        return real_run_eval(goldenset, answer_fn, judge_fn, judge_label)
 
     monkeypatch.setattr(evaluate, "run_eval", spy)
     evaluate.main()
@@ -107,3 +108,4 @@ def test_main_runs_offline_and_judges_via_the_core(tmp_path, monkeypatch):
     assert "答案含期望事实 100%" in text
     assert "口径" in text                             # 报告带口径
     assert "上传: indexed" in text                     # 头部信息也在
+    assert "=== RAGAS 四项 ===" in text                 # RAGAS 段无论有没有裁判都要出

@@ -13,8 +13,11 @@ from typing import Callable, Sequence
 
 # 问题 -> {"answer": str, "sources": [{"text": str, "page": int, ...}]}
 AnswerFn = Callable[[str], dict]
-# (问题, 答案, 来源) -> 裁判结论（RAGAS 之类；其内容由票 05 定义）
-JudgeFn = Callable[[str, str, list], dict]
+# (问题, 答案, 来源, 参考答案) -> 裁判结论（RAGAS 四项见票 05 与 app/eval_judge.py）
+JudgeFn = Callable[[str, str, list, str], dict]
+
+# RAGAS 四项的固定指标名 —— 裁判返回的 dict 就按这几个键取值汇总
+RAGAS_METRICS = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
 
 
 def normalize(text) -> str:
@@ -61,6 +64,7 @@ class ItemResult:
     negative: bool = False      # 负样本：答案不在文档里，期望拒答（黄金集写 "negative": true）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
+    judge_error: str | None = None  # 这条裁判挂了的原因（要明说，不能当没算过）
 
     @property
     def has_expect(self) -> bool:
@@ -78,6 +82,30 @@ class ItemResult:
 class Report:
     items: list[ItemResult] = field(default_factory=list)
     retrieval: RetrievalMetrics | None = None   # 检索层指标（票 04）；有就一并渲染（票 08 接线）
+    judge_label: str | None = None              # 裁判口径，写进报告才可跨时间比较
+    judge_error: str | None = None              # 裁判整体不可用的原因（缺 Key 等）
+
+    @property
+    def ragas(self) -> dict | None:
+        """RAGAS 四项的均值；一条都没打上分则为 None（报告会说清为什么）。"""
+        scored = [x.judged for x in self.items if isinstance(x.judged, dict)]
+        if not scored:
+            return None
+        out: dict = {}
+        for metric in RAGAS_METRICS:
+            vals = [float(d[metric]) for d in scored
+                    if isinstance(d.get(metric), (int, float))]
+            if vals:
+                out[metric] = sum(vals) / len(vals)
+        return out or None
+
+    @property
+    def ragas_count(self) -> int:
+        """打上分的**正样本**条数 —— 与正样本总数一起报，缺几条一眼看得出。
+
+        分母只算正样本：负样本走拒答率，不进 RAGAS。
+        """
+        return sum(1 for x in self.positives if isinstance(x.judged, dict))
 
     @property
     def total(self) -> int:
@@ -196,6 +224,25 @@ class Report:
                             sum(1 for x in scored if x.page_hit), len(scored), extra))
         else:
             lines.append("引用页码正确 不适用  (%d 条黄金集条目，无一声明页码，分母为 0)" % self.total)
+        lines.append("")
+        lines.append("=== RAGAS 四项 ===")
+        if self.ragas is None:
+            lines.append("没有可用的 RAGAS 数字：%s"
+                         % ("裁判没给出可解析的分" if self.ragas_count else "未接裁判"))
+            if self.judge_error:
+                lines.append("  裁判不可用：%s" % self.judge_error)
+        else:
+            lines.append("裁判口径：%s" % (self.judge_label or "(未标注)"))
+            lines.append("逐条由裁判按 RAGAS 各指标定义算出 0~1 分，报告取均值；"
+                         "计入 %d/%d 条（只算正样本，负样本归拒答率）"
+                         % (self.ragas_count, len(self.positives)))
+            lines.append("  context_recall 的基准取黄金集条目的 reference，没写就退回 expect；"
+                         "expect 若只是几个关键词，这一项会退化成 0/1")
+            for metric in RAGAS_METRICS:
+                v = self.ragas.get(metric)
+                lines.append("  %-18s %s" % (metric, "%.3f" % v if v is not None else "缺"))
+            if self.judge_error:
+                lines.append("  部分条目裁判失败：%s" % self.judge_error)
         if self.retrieval is not None:
             lines.insert(0, "=== 生成层指标 ===")
             lines.append("")
@@ -204,9 +251,13 @@ class Report:
 
 
 def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
-             judge_fn: JudgeFn | None = None) -> Report:
-    """对黄金集逐条跑 answer_fn，按固定口径判据算出报告。"""
-    report = Report()
+             judge_fn: JudgeFn | None = None,
+             judge_label: str | None = None) -> Report:
+    """对黄金集逐条跑 answer_fn，按固定口径判据算出报告。
+
+    judge_fn 挂了不会被吞掉：记在条目与报告上，报告里明说 —— 宁可报错也不给假数字。
+    """
+    report = Report(judge_label=judge_label)
     for g in goldenset:
         question = g.get("question", "")
         expect = g.get("expect", "")
@@ -228,8 +279,16 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             page_hit=(expect_page in pages) if expect_page else None,
             negative=bool(g.get("negative")), refused=is_refusal(answer),
         ))
-        if judge_fn is not None:
-            report.items[-1].judged = judge_fn(question, answer, sources)
+        # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低
+        if judge_fn is not None and not g.get("negative"):
+            item = report.items[-1]
+            reference = g.get("reference") or expect
+            try:
+                item.judged = judge_fn(question, answer, sources, reference)
+            except Exception as e:   # noqa: BLE001 —— 裁判失败要记下来，不能被当成"没算"
+                item.judge_error = "%s: %s" % (type(e).__name__, e)
+                if report.judge_error is None:
+                    report.judge_error = item.judge_error
     return report
 
 
