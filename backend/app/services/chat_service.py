@@ -17,6 +17,7 @@ from app.core.container import Runtime
 from app.core.context import ContextPlan, assemble_context, plan_exempt
 from app.core.llm import LLM
 from app.core.memory import FactExtractor
+from app.core.pricing import cost_of
 from app.core.usage import build_usage
 from app.core.prompt import (build_prompt, build_rewrite_prompt, format_context,
                              format_memory)
@@ -644,6 +645,8 @@ def _record_usage(rt: Runtime, prep: Prep, answer: str, *, cache_hit: bool,
     record = build_usage(prompt_text=prep.prompt, answer_text=answer, model=_model_name(prep.llm),
                          provider_usage=prep.trace.get("llm_usage"),
                          token_counter=rt.token_counter)
+    # 折算费用（票 28）：未知单价 / token 量不到都记 None 并写明原因 —— 不按 0 算
+    record.update(cost_of(record, rt.price_table))
     try:
         rt.usage_store.add(prep.user.id, record, session_id=prep.session_id, message_id=message_id)
     except Exception as e:      # noqa: BLE001 —— 旁路：计量不该把问答打崩

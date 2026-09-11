@@ -1,6 +1,8 @@
 """运行时组件装配（按 settings 选择 Fake/真实，依赖注入入口）。"""
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -17,10 +19,13 @@ from app.core.llm import LLM, get_llm
 from app.core.memory import (DbMemoryStore, FactExtractor, LlmFactExtractor,
                              MemoryRecall, MemoryStore)
 from app.core.parser import ParserRouter
+from app.core.pricing import PriceTable
 from app.core.reranker import Reranker, get_reranker
 from app.core.retriever import HybridRetriever
 from app.core.usage import DbUsageStore, UsageStore
 from app.core.vector_store import VectorStore, get_vector_store
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -41,6 +46,7 @@ class Runtime:
     fact_extractor_factory: Callable[[LLM], FactExtractor] = LlmFactExtractor
     memory_store: MemoryStore = field(default_factory=DbMemoryStore)
     usage_store: UsageStore = field(default_factory=DbUsageStore)
+    price_table: PriceTable = field(default_factory=PriceTable)
 
     def llm_for(self, user_id: str) -> LLM:
         """按发起用户解析 LLM：配了自带模型就用它，否则回落服务端全局（行为与今天一致）。"""
@@ -71,6 +77,11 @@ def build_runtime() -> Runtime:
     from app.core.tokenizer import setup_token_counter
 
     token_counter, _ = setup_token_counter(s.tokenizer_model)   # 拿不到就回落估算（只是预算用）
+    price_table = PriceTable(s.llm_price_overrides)
+    for issue in price_table.warnings:
+        # 启动时就说出来：静默回落内置价，会让人拿到一个看着正常的费用却不知道配置没生效
+        logger.warning("价格表配置有问题：%s", issue)
     return Runtime(embedding=embedding, vector_store=vector_store, bm25=bm25,
                    reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever,
-                   semantic_cache=semantic_cache, token_counter=token_counter)
+                   semantic_cache=semantic_cache, token_counter=token_counter,
+                   price_table=price_table)

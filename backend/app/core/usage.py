@@ -94,6 +94,8 @@ class DbUsageStore(UsageStore):
                                output_tokens=record.get("output_tokens"),
                                source=record.get("source") or "",
                                source_note=record.get("source_note") or "",
+                               cost=record.get("cost"),
+                               price_note=record.get("price_note") or "",
                                source_session_id=session_id or "",
                                source_message_id=message_id or ""))
             db.commit()
@@ -109,6 +111,7 @@ class DbUsageStore(UsageStore):
             return [{"id": r.id, "user_id": r.user_id, "model": r.model,
                      "input_tokens": r.input_tokens, "output_tokens": r.output_tokens,
                      "source": r.source, "source_note": r.source_note,
+                     "cost": r.cost, "price_note": r.price_note,
                      "session_id": r.source_session_id, "message_id": r.source_message_id}
                     for r in rows]
         finally:

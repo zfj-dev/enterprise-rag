@@ -9,7 +9,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -161,6 +161,8 @@ class UsageRecord(Base):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source: Mapped[str] = mapped_column(String(16), default="")   # provider / local / unavailable
     source_note: Mapped[str] = mapped_column(Text, default="")
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)   # 折算费用（元）；折不出为 NULL
+    price_note: Mapped[str] = mapped_column(Text, default="")          # 单价口径 / 折不出的原因
     source_session_id: Mapped[str] = mapped_column(String(32), default="")
     source_message_id: Mapped[str] = mapped_column(String(32), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_monotonic_utc_now, server_default=func.now())

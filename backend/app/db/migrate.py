@@ -15,6 +15,10 @@ _NEEDED: dict[str, dict[str, str]] = {
         "summary": "summary TEXT DEFAULT ''",
         "summary_upto": "summary_upto VARCHAR(32)",
     },
+    "usage_records": {                       # 票 28：用量记录上的折算费用与单价口径
+        "cost": "cost FLOAT",
+        "price_note": "price_note TEXT DEFAULT ''",
+    },
 }
 
 

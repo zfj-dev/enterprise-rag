@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     agent_max_steps: int = 4      # ReAct 循环步数上限（失控时能停下、不烧钱）
     memory_enabled: bool = True   # 跨会话记忆：问答后异步抽取"用户告知的事实"并按用户落库
     cost_enabled: bool = True     # 用量记账（票 27）：每次生成记一条 token 用量与口径来源
+    # 价格表覆盖（票 28）：JSON，形如 {"qwen-plus": {"input": 0.0008, "output": 0.002}}（元/1K token）。
+    # 内置价只是**参考价**、会过期；表里没有的模型一律标「单价未知」而**不按 0 算**。
+    llm_price_overrides: str = ""
     memory_extract_max_facts: int = 5  # 单轮最多抽取几条事实
     memory_recall_top_k: int = 3          # 每次问答最多注入几条记忆（有上限，不堆爆上下文）
     memory_recall_min_score: float = 0.35  # 相似度低于此不注入：无相关记忆时零注入
