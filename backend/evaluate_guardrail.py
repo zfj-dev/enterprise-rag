@@ -18,7 +18,8 @@ import os
 
 from app.eval_agent import deterministic_answer_fn
 from app.eval_compare import guardrail_lines, render_compare, run_links
-from app.eval_setup import drop_kb, ensure_schema, eval_user, ingest_file, new_kb
+from app.eval_setup import (drop_kb, ensure_schema, eval_user, ingest_file, new_kb,
+                            with_setting, write_report)
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.environ.get("EVAL_GUARDRAIL_REPORT",
@@ -26,26 +27,6 @@ REPORT = os.environ.get("EVAL_GUARDRAIL_REPORT",
 GOLDEN = os.environ.get("EVAL_GOLDEN", os.path.join(BACKEND, "data", "golden_set_paper.json"))
 DOC = os.environ.get("EVAL_DOC", os.path.join(BACKEND, "paper.pdf"))
 USERNAME = "__guardrail_eval__"
-
-
-def _with_compress(ask, on: bool):
-    """把这次问答的压缩开关**临时**扳到 on/off —— 两条配置共用同一套管线，只差这一个开关。
-
-    `get_settings()` 是进程级单例，所以这两条链路**只能顺序跑**（`run_links` 正是顺序的）；
-    若将来并发跑多条链路，列与开关会互相串台 —— 那时得把开关做成显式参数而非全局态。
-    """
-    from app.config import get_settings
-
-    def wrapped(question: str) -> dict:
-        s = get_settings()
-        was = s.context_compress
-        s.context_compress = on
-        try:
-            return ask(question)
-        finally:
-            s.context_compress = was
-
-    return wrapped
 
 
 def _config_lines() -> list[str]:
@@ -57,13 +38,6 @@ def _config_lines() -> list[str]:
         "上下文预算 %d tokens；保留最近 %d 轮" % (s.context_token_budget, s.context_keep_recent),
         "分词器（配置）: %s" % (s.tokenizer_model or "（未配置 —— 降幅那一行会写「不可用」）"),
     ]
-
-
-def _write(report: str, lines: list[str]) -> None:
-    os.makedirs(os.path.dirname(report), exist_ok=True)
-    with open(report, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    print(report)
 
 
 def main(golden: str | None = None, doc: str | None = None, report: str | None = None) -> None:
@@ -82,7 +56,7 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
                   "  黄金集 %s：%s" % (golden, "有" if os.path.exists(golden) else "**缺**"),
                   "  文档 %s：%s" % (doc, "有" if os.path.exists(doc) else "**缺**"),
                   "补上前置再跑 —— 这里不会拿假数据顶替。"]
-        _write(report, lines)
+        write_report(report, lines)
         return
 
     with open(golden, encoding="utf-8") as f:
@@ -111,10 +85,12 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
         lines.append("")
 
         links = {
-            "压缩前": _with_compress(
-                deterministic_answer_fn(db, rt, user, kb.id, "guardrail-off"), False),
-            "压缩后": _with_compress(
-                deterministic_answer_fn(db, rt, user, kb.id, "guardrail-on"), True),
+            "压缩前": with_setting(
+                deterministic_answer_fn(db, rt, user, kb.id, "guardrail-off"),
+                "context_compress", False),
+            "压缩后": with_setting(
+                deterministic_answer_fn(db, rt, user, kb.id, "guardrail-on"),
+                "context_compress", True),
         }
         reports, spans = run_links(goldenset, links)
         lines.extend(guardrail_lines(reports["压缩前"], reports["压缩后"]))
@@ -128,7 +104,7 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
             except Exception as e:      # noqa: BLE001 —— 清理失败不该毁掉已算出的报告
                 print("清库失败（不影响报告）：%s" % e)
         db.close()
-    _write(report, lines)
+    write_report(report, lines)
 
 
 if __name__ == "__main__":

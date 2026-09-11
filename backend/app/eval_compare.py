@@ -133,7 +133,23 @@ def compare_links(goldenset: Sequence[dict], links: dict[str, AnswerFn],
     return render_compare(reports, spans, note=note)
 
 
-# ---------- 质量护栏（票 22）----------
+# ---------- 质量护栏（票 22；判据与记忆护栏共用）----------
+
+def quality_verdict(name: str, first: float, second: float, *, failure_note: str = "") -> str:
+    """同一个质量指标「改前 -> 改后」的通用结论（压缩护栏与记忆护栏共用这一处）。
+
+    下降就是**未通过**；没有分母的调用方自己先判「不可判定」，别拿这里当兜底。
+    两边都是 0 时如实标注「没有信息量」—— 0 和 0 相等不构成任何证据。
+    """
+    if first == 0 and second == 0:
+        return "通过 —— 但两边都是 0%，这条通过没有信息量，先确认黄金集与模型可用"
+    delta = second - first
+    if delta < -1e-9:
+        return "**未通过** —— %s下降 %dpp%s" % (name, round(-delta * 100), failure_note)
+    if delta > 1e-9:
+        return "通过 —— %s还上升了 %dpp" % (name, round(delta * 100))
+    return "通过 —— %s未下降" % name
+
 
 def _reduction_phrase(report: Report) -> str:
     """降幅那一句：有数字就带上口径，没有就照评测核心给的原因如实写。"""
@@ -174,17 +190,9 @@ def guardrail_lines(before: Report, after: Report) -> list[str]:
         lines.append("  压缩降幅 %s" % _reduction_phrase(after))
         return lines
 
-    delta = second - first
-    if first == 0 and second == 0:
-        verdict = "通过 —— 但两边都是 0%，这条通过没有信息量，先确认黄金集与模型可用"
-    elif delta < -1e-9:
-        verdict = "**未通过** —— 事实命中下降 %dpp；压缩降幅不算数" % round(-delta * 100)
-    elif delta > 1e-9:
-        verdict = "通过 —— 事实命中还上升了 %dpp" % round(delta * 100)
-    else:
-        verdict = "通过 —— 事实命中未下降"
     lines.append("  事实命中 压缩前 %.0f%% -> 压缩后 %.0f%%   %s"
-                 % (first * 100, second * 100, verdict))
+                 % (first * 100, second * 100,
+                    quality_verdict("事实命中", first, second, failure_note="；压缩降幅不算数")))
     lines.append("  压缩降幅 %s" % _reduction_phrase(after))
 
     lost, gained = _fact_moves(before, after)
@@ -200,4 +208,42 @@ def guardrail_lines(before: Report, after: Report) -> list[str]:
         lines.append("  注意：这一轮**没有真的压到东西**（降幅不适用）——"
                      "这条通过只能证明链路跑得通，证明不了压缩安全")
     lines.append("  判据：两侧都只用评测核心的数字；降幅与事实命中**一起看** —— 单看降幅不算成果")
+    return lines
+
+
+def memory_guardrail_lines(before: Report, after: Report) -> list[str]:
+    """记忆护栏（票 26）：**答案侧**的引用覆盖率不下降才算通过 —— 防「记得更多 = 编得更多」。
+
+    为什么不判来源侧的「引用忠实度」：记忆**不进入 `sources`** 是构造性的硬约束，
+    来源侧那些指标（grounded / page）**不可能**因记忆变化 —— 判它们等于自证，测不出任何东西。
+    真正会被记忆推动的是**答案**：把记忆当依据写进去，论断就失去来源支撑，覆盖率随之下降。
+    覆盖率拿不到（演示模式 / 免 LLM 跑法）时写「不可判定」，绝不写「通过」。
+    """
+    lines = ["", "=== 记忆护栏（记忆关闭 -> 记忆开启）==="]
+
+    cov_b, cov_a = before.citation_coverage_rate, after.citation_coverage_rate
+    if cov_b is None or cov_a is None:
+        lines.append("  引用覆盖率(答案侧) %s -> %s   不可判定 —— 这两次都没拿到答案侧的覆盖率"
+                     "（演示模式 / 免 LLM 跑法）；「记得更多 = 编得更多」这条要在真实模型下才验得了"
+                     % (_pct(cov_b), _pct(cov_a)))
+    else:
+        lines.append("  引用覆盖率(答案侧) 记忆关闭 %.0f%% -> 记忆开启 %.0f%%   %s"
+                     % (cov_b * 100, cov_a * 100, quality_verdict("引用覆盖率", cov_b, cov_a)))
+
+    judged = False
+    for name, b, a in (("引用忠实度(来源侧)", before.grounded_rate, after.grounded_rate),
+                       ("事实命中", before.fact_rate, after.fact_rate)):
+        fb = _ratio(b, before.positives)
+        fa = _ratio(a, after.positives)
+        if fb is None or fa is None:
+            continue
+        judged = True
+        lines.append("  %s 记忆关闭 %.0f%% -> 记忆开启 %.0f%%  %s"
+                     % (name, fb * 100, fa * 100, quality_verdict(name, fb, fa)))
+    if not judged:
+        lines.append("  不可判定 —— 黄金集里没有正样本，上面两项都没有分母")
+    lines.append("  说明：来源侧的引用忠实度**不可能**因记忆而变（记忆不进入 sources 是构造性的）"
+                 "—— 它不下降是设计保证，不是测出来的；会动的是答案侧的覆盖率。")
+    lines.append("  硬约束：记忆可以进 prompt，但**不进入 sources** —— 回答的依据仍必须来自文档")
+    lines.append("  判据：两侧都只用评测核心的数字；记得多不等于答得好，覆盖率掉下来就不算数")
     return lines

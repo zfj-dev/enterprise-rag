@@ -14,7 +14,8 @@ import os
 
 from app.eval_agent import agent_answer_fn, deterministic_answer_fn
 from app.eval_compare import compare_links
-from app.eval_setup import drop_kb, ensure_schema, eval_user, ingest_file, new_kb
+from app.eval_setup import (drop_kb, ensure_schema, eval_user, ingest_file, new_kb,
+                            write_report)
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.environ.get("EVAL_AGENT_REPORT",
@@ -35,13 +36,6 @@ def _config_lines() -> list[str]:
     ]
 
 
-def _write(report: str, lines: list[str]) -> None:
-    os.makedirs(os.path.dirname(report), exist_ok=True)
-    with open(report, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    print(report)
-
-
 def main(golden: str | None = None, doc: str | None = None, report: str | None = None) -> None:
     golden = golden or GOLDEN
     doc = doc or DOC
@@ -58,7 +52,7 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
                   "  黄金集 %s：%s" % (golden, "有" if os.path.exists(golden) else "**缺**"),
                   "  文档 %s：%s" % (doc, "有" if os.path.exists(doc) else "**缺**"),
                   "补上前置再跑 —— 这里不会拿假数据顶替。"]
-        _write(report, lines)
+        write_report(report, lines)
         return
 
     with open(golden, encoding="utf-8") as f:
@@ -98,7 +92,7 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
             except Exception as e:      # noqa: BLE001 —— 清理失败不该毁掉已算出的报告
                 print("清库失败（不影响报告）：%s" % e)
         db.close()
-    _write(report, lines)
+    write_report(report, lines)
 
 
 if __name__ == "__main__":

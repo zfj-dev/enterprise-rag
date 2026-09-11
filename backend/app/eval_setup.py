@@ -1,7 +1,8 @@
-"""评测脚本共用的「本地起一套可问答的库」—— 别每个脚本各写一遍（同 app/eval_index.py 的用意）。
+"""评测脚本共用的「本地起一套可问答的库」+ 几个人人要写一遍的小工具。
 
 评测要在真实管线里跑，就得有：一个发起人、一个知识库、一份**真走过入库管线**的文档
 （解析 -> 分块 -> 嵌入 -> 向量库 + BM25，还要落关系库 —— 枚举/编号检索要查 Chunk 表）。
+落盘报告与「临时扳全局开关」也一样，三个 runner 共用这里的一份，别各写各的。
 """
 from __future__ import annotations
 
@@ -20,6 +21,37 @@ def ensure_schema() -> None:
 
     Base.metadata.create_all(bind=engine)
     ensure_sqlite_columns(engine)
+
+
+def write_report(path: str, lines: list[str]) -> None:
+    """把报告落盘并打印路径 —— 所有评测脚本共用这一处。"""
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    print(path)
+
+
+def with_setting(ask, name: str, value):
+    """把这次问答的某个**全局开关**临时扳到 value，问完立刻还原。
+
+    两条配置共用同一套管线，只差这一个开关，差异归因才干净。`get_settings()` 是**进程级单例**，
+    所以用它的多条链路只能**顺序跑**（`eval_compare.run_links` 正是顺序的）；并发跑会串台，
+    那时得把开关做成显式参数而不是全局态。
+    """
+    from app.config import get_settings
+
+    def wrapped(question: str):
+        s = get_settings()
+        was = getattr(s, name)
+        setattr(s, name, value)
+        try:
+            return ask(question)
+        finally:
+            setattr(s, name, was)
+
+    return wrapped
 
 
 def eval_user(db, username: str):
