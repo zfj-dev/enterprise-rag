@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from app.core.memory import InMemoryMemoryStore, MemoryRecall
 from app.core.prompt import format_memory
-from tests.helpers import StubEmbedding, register_and_kb, wait_until
+from tests.helpers import offline_resolver as _resolver,  StubEmbedding, register_and_kb, wait_until
 
 FACT = "用户在跟进电池项目"
 QUERY = "电池进展如何"
@@ -89,6 +89,7 @@ def _seed(client, name, facts=None, with_doc=False):
         store.add(uid, facts)
     rt = build_runtime()
     rt.memory_store = store
+    rt.url_resolver = _resolver()   # 票 33：用之前会复查 base_url，测试里不查真 DNS
     deps._runtime = rt
 
     if with_doc:
@@ -265,6 +266,7 @@ def test_cross_session_recall_end_to_end(client):
     cfg_store = InMemoryUserLLMConfigStore()
     cfg_store.set(uid, LLMConfig(base_url="https://x/v1", api_key="k", model="m"))
     rt.user_llm_config_store = cfg_store
+    rt.url_resolver = _resolver()   # 票 33：用之前会复查 base_url，测试里不查真 DNS
     deps._runtime = rt
     rt.embedding = StubEmbedding()
 

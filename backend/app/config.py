@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     # BYOK（票 32）：用户自带 Key。加密口令**没有默认值、也没有弱默认** —— 没配就不落库
     # （凭据只存内存、重启即失），绝不退化成明文存储。
     byok_secret_key: str = ""
+    # 自填 base_url 的三条线（票 33）：白名单（逗号分隔，空=不限主机）、显式放行明文 http
+    # （只在本地开发用）、以及**请求超时上限**（用户填的地址不由我们控制，超时必须封顶）。
+    byok_allowed_hosts: str = ""
+    byok_allow_insecure: bool = False
+    byok_request_timeout_seconds: float = 30.0
     # 预算硬拦（票 29）。**默认关**：硬拦会挡住用户，先让人显式打开。
     quota_enabled: bool = False
     quota_window: Literal["day", "month"] = "day"   # 自然窗口（日 / 月）

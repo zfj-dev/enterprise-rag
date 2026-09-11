@@ -201,7 +201,14 @@ class LLMFactory(ABC):
 
 
 class OpenAICompatLLMFactory(LLMFactory):
-    """默认工厂：按 OpenAI 兼容协议构造（覆盖 DeepSeek / SiliconFlow / DashScope / OpenAI 等）。"""
+    """默认工厂：按 OpenAI 兼容协议构造（覆盖 DeepSeek / SiliconFlow / DashScope / OpenAI 等）。
+
+    `timeout` 是**用户地址不由我们控制**时的封顶：不能让一个不回话的自填端点把请求挂死。
+    """
+
+    def __init__(self, timeout: float | None = None):
+        self._timeout = timeout
 
     def build(self, cfg: LLMConfig) -> LLM:
-        return CloudLLM(base_url=cfg.base_url, api_key=cfg.api_key, model=cfg.model)
+        return CloudLLM(base_url=cfg.base_url, api_key=cfg.api_key, model=cfg.model,
+                        timeout=self._timeout)

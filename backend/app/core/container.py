@@ -21,6 +21,7 @@ from app.core.memory import (DbMemoryStore, FactExtractor, LlmFactExtractor,
 from app.core.parser import ParserRouter
 from app.core.pricing import PriceTable
 from app.core.reranker import Reranker, get_reranker
+from app.core.ssrf import check_base_url, default_resolver, parse_allowed_hosts
 from app.core.retriever import HybridRetriever
 from app.core.usage import DbUsageStore, UsageStore
 from app.core.vector_store import VectorStore, get_vector_store
@@ -48,11 +49,33 @@ class Runtime:
     memory_store: MemoryStore = field(default_factory=DbMemoryStore)
     usage_store: UsageStore = field(default_factory=DbUsageStore)
     price_table: PriceTable = field(default_factory=PriceTable)
+    # 自填 base_url 的域名解析器（票 33）：真实运行走系统 DNS，测试注入 stub
+    url_resolver: Callable[[str], list] = default_resolver
 
     def llm_for(self, user_id: str) -> LLM:
         """按发起用户解析 LLM：配了自带模型就用它，否则回落服务端全局（行为与今天一致）。"""
         cfg = self.user_llm_config_store.get(user_id)
-        return self.llm_factory.build(cfg) if cfg else self.llm
+        if not cfg:
+            return self.llm
+        if not self._base_url_is_still_safe(cfg.base_url):
+            return self.llm          # 兜底：不拿一个可能已指向内网的地址去发请求
+        return self.llm_factory.build(cfg)
+
+    def _base_url_is_still_safe(self, base_url: str) -> bool:
+        """**用之前再验一次**用户自填的地址（票 33）。
+
+        保存时验过一道，但保存与真正发请求之间隔着任意长的时间 —— 域名可以在这中间被改指到
+        内网（DNS rebinding），只靠保存时那次检查挡不住。这里复查，不通过就**回落服务端全局**
+        （而不是把问答打成 500）。残余窗口只剩「这次查询」到「真连接」之间的一瞬；要彻底封死
+        得把解析出来的 IP 钉住，那会破坏 TLS 证书校验，代价更大。
+        """
+        s = get_settings()
+        reason = check_base_url(base_url, allowed_hosts=parse_allowed_hosts(s.byok_allowed_hosts),
+                                allow_insecure=s.byok_allow_insecure, resolve=self.url_resolver)
+        if reason:
+            logger.warning("自带 base_url 复查不通过，已回落服务端全局：%s", reason)
+            return False
+        return True
 
     def recall_memory(self, user_id: str, question: str) -> list[dict]:
         """按相似度召回该用户的相关记忆（供注入；不进检索候选池、不作引用来源）。
@@ -87,6 +110,7 @@ def build_runtime() -> Runtime:
                   else InMemoryUserLLMConfigStore())
     return Runtime(embedding=embedding, vector_store=vector_store, bm25=bm25,
                    user_llm_config_store=byok_store,
+                   llm_factory=OpenAICompatLLMFactory(s.byok_request_timeout_seconds),
                    reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever,
                    semantic_cache=semantic_cache, token_counter=token_counter,
                    price_table=price_table)

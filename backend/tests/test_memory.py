@@ -9,7 +9,7 @@ import time
 
 from app.core.memory import (DbMemoryStore, FactExtractor, InMemoryMemoryStore,
                              LlmFactExtractor)
-from tests.helpers import register_and_kb, wait_until
+from tests.helpers import offline_resolver as _resolver,  register_and_kb, wait_until
 
 
 class StubLLM:
@@ -142,6 +142,7 @@ def _setup(client, name: str, extractor):
     cfg_store = InMemoryUserLLMConfigStore()
     cfg_store.set(uid, LLMConfig(base_url="https://x/v1", api_key="k", model="m"))
     rt.user_llm_config_store = cfg_store
+    rt.url_resolver = _resolver()   # 票 33：用之前会复查 base_url，测试里不查真 DNS
     deps._runtime = rt
     return H, kb, uid, store
 

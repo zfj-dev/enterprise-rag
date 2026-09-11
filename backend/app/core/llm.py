@@ -118,11 +118,12 @@ class CloudLLM(LLM):
 
     def __init__(self, base_url: str | None = None, api_key: str | None = None,
                  model: str | None = None, temperature: float | None = None,
-                 max_tokens: int | None = None):
+                 max_tokens: int | None = None, timeout: float | None = None):
         import httpx
 
         s = get_settings()
         self._httpx = httpx
+        self.timeout = 60.0 if timeout is None else float(timeout)   # 0 不静默变 60
         self.base_url = (base_url or s.all_llm_url()).rstrip("/")
         self.api_key = api_key or s.llm_api_key or ""
         self.model = model or s.llm_model
@@ -138,8 +139,12 @@ class CloudLLM(LLM):
         return payload
 
     def _stream_lines(self, url: str, payload: dict, headers: dict) -> Iterator[str]:
-        """跑一次流式请求，逐 chunk 解析（顺带把 usage 记到 `last_usage`）。"""
-        with self._httpx.Client(timeout=60) as client:
+        """跑一次流式请求，逐 chunk 解析（顺带把 usage 记到 `last_usage`）。
+
+        `timeout` 封的是**连接**与**两次数据之间的等待**（httpx 的 read 是「等下一个 chunk」），
+        **不封整段生成的墙钟时间** —— 一个长回答本来就该慢慢流完，掐掉它才是错的。
+        """
+        with self._httpx.Client(timeout=self.timeout) as client:
             with client.stream("POST", url, json=payload, headers=headers) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
@@ -199,7 +204,7 @@ class CloudLLM(LLM):
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
         self.last_usage = None
         try:
-            with self._httpx.Client(timeout=60) as client:
+            with self._httpx.Client(timeout=self.timeout) as client:
                 resp = client.post(url, json=payload, headers=headers)
                 resp.raise_for_status()
                 body = resp.json()

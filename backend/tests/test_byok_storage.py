@@ -13,6 +13,14 @@ from tests.helpers import register_and_kb
 
 SECRET = "server-side-passphrase-用于派生加密密钥"
 KEY = "sk-abcdefghijklmnop-1234"          # 尾号 1234
+PUBLIC = "93.184.216.34"                  # 公网 IP：SSRF 校验（票 33）要解析域名，测试里注入它
+
+
+def _use_encrypted_store(rt):
+    """装上加密存储，并让 SSRF 的域名解析离线可控 —— 否则 PUT 会去真的查 DNS。"""
+    rt.user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    rt.url_resolver = lambda host: [PUBLIC]
+    return rt
 
 
 def _cfg(model="qwen-plus", key=KEY):
@@ -117,7 +125,7 @@ def test_the_api_response_body_contains_no_plaintext_key(client):
     from app.api.deps import get_runtime
 
     H, uid, kb = register_and_kb(client, "byok_api")
-    get_runtime().user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(get_runtime())
 
     put = client.put("/api/v1/llm/config", headers=H,
                      json={"base_url": "https://api.example.com/v1", "key": KEY, "model": "qwen-plus"})
@@ -134,7 +142,7 @@ def test_a_validation_error_does_not_echo_the_body_back(client):
     from app.api.deps import get_runtime
 
     H, uid, kb = register_and_kb(client, "byok_422")
-    get_runtime().user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(get_runtime())
 
     # 故意漏掉 model —— 触发 422
     r = client.put("/api/v1/llm/config", headers=H,
@@ -153,9 +161,10 @@ def test_the_view_says_whether_it_survives_a_restart(client):
     rt = get_runtime()
 
     rt.user_llm_config_store = InMemoryUserLLMConfigStore()
+    rt.url_resolver = lambda host: [PUBLIC]
     assert client.get("/api/v1/llm/config", headers=H).json()["persistent"] is False
 
-    rt.user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(rt)
     assert client.get("/api/v1/llm/config", headers=H).json()["persistent"] is True
 
 
@@ -163,7 +172,7 @@ def test_an_unconfigured_user_gets_an_empty_view(client):
     from app.api.deps import get_runtime
 
     H, uid, kb = register_and_kb(client, "byok_empty")
-    get_runtime().user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(get_runtime())
 
     body = client.get("/api/v1/llm/config", headers=H).json()
 
@@ -189,7 +198,7 @@ def test_a_configured_user_uses_their_own_model_and_rotation_takes_effect(client
 
     H, uid, kb = register_and_kb(client, "byok_rotate")
     rt = get_runtime()
-    rt.user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(rt)
     rt.llm_factory = StubFactory()
 
     client.put("/api/v1/llm/config", headers=H,
@@ -207,7 +216,7 @@ def test_deleting_falls_back_to_the_global_model(client):
 
     H, uid, kb = register_and_kb(client, "byok_delete")
     rt = get_runtime()
-    rt.user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(rt)
     rt.llm_factory = StubFactory()
 
     client.put("/api/v1/llm/config", headers=H,
@@ -226,7 +235,7 @@ def test_one_users_config_does_not_affect_another(client):
     H_a, uid_a, _ = register_and_kb(client, "byok_iso_a")
     H_b, uid_b, _ = register_and_kb(client, "byok_iso_b")
     rt = get_runtime()
-    rt.user_llm_config_store = DbUserLLMConfigStore(SECRET)
+    _use_encrypted_store(rt)
     rt.llm_factory = StubFactory()
 
     client.put("/api/v1/llm/config", headers=H_a,

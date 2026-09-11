@@ -55,3 +55,14 @@ def wait_until(pred, timeout: float = 5.0, interval: float = 0.05) -> bool:
             return True
         time.sleep(interval)
     return False
+
+
+PUBLIC_IP = "93.184.216.34"      # 一个公网 IP，测试里当作「域名解析到的地方」
+
+
+def offline_resolver(*ips: str):
+    """SSRF 复查（票 33）用的**离线**解析器：把域名都解析成给定 IP（默认一个公网 IP）。
+
+    测试不该真去查 DNS；而「域名指向哪里」正是 rebinding 那条用例要控制的东西。
+    """
+    return lambda host: list(ips) if ips else [PUBLIC_IP]

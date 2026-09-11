@@ -8,8 +8,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.api.deps import get_current_user, get_runtime
+from app.config import get_settings
 from app.core.byok import LLMConfig
 from app.core.container import Runtime
+from app.core.ssrf import check_base_url, parse_allowed_hosts
 from app.core.schemas import LLMConfigIn, LLMConfigOut
 from app.models.entities import User
 
@@ -26,7 +28,17 @@ def get_config(user: User = Depends(get_current_user),
 @router.put("/config", response_model=LLMConfigOut)
 def put_config(body: LLMConfigIn, user: User = Depends(get_current_user),
                rt: Runtime = Depends(get_runtime)) -> LLMConfigOut:
-    """填入或**轮换**：直接覆盖，旧凭据随即失效。"""
+    """填入或**轮换**：直接覆盖，旧凭据随即失效。
+
+    先过 **SSRF 防护**（票 33）：私网 / 回环 / 非 https 一律拒，拒绝原因写清楚是地址不合规 ——
+    而不是等真去连的时候报一个含糊的连接错误。
+    """
+    s = get_settings()
+    reason = check_base_url(body.base_url, allowed_hosts=parse_allowed_hosts(s.byok_allowed_hosts),
+                            allow_insecure=s.byok_allow_insecure, resolve=rt.url_resolver)
+    if reason:
+        from fastapi import HTTPException
+        raise HTTPException(400, reason)
     rt.user_llm_config_store.set(user.id, LLMConfig(base_url=body.base_url.strip(),
                                                     api_key=body.key, model=body.model.strip()))
     return _out(rt, user.id)

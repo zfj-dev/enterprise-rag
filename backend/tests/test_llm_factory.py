@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import time
 
-from tests.helpers import sse_events
+from tests.helpers import offline_resolver, sse_events
 
 from app.core.byok import InMemoryUserLLMConfigStore, LLMConfig
 from app.core.container import build_runtime
@@ -40,6 +40,7 @@ class RecordingFactory:
 
 def _runtime(factory=None, store=None):
     rt = build_runtime()
+    rt.url_resolver = offline_resolver()   # 票 33：用之前会复查 base_url，测试里不查真 DNS
     if factory is not None:
         rt.llm_factory = factory
     if store is not None:
