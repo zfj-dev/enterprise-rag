@@ -142,6 +142,7 @@
   .thinking-head .arrow{transition:transform .2s;font-size:11px}
   .thinking-head.open .arrow{transform:rotate(90deg)}
   .thinking-body{padding:0 12px 10px;font-size:13px;color:var(--text-quaternary);font-style:italic;line-height:1.7}
+  .agent-note{margin-top:10px;border-left:3px solid var(--warn,#d97706);background:var(--surface-muted);border-radius:8px;padding:8px 12px;font-size:13px;color:var(--text-muted,#6b7280);line-height:1.6}
   .src-card{margin-top:12px;border:1px solid var(--border);border-radius:12px;background:var(--surface-muted);padding:12px 14px}
   .src-card .src-title{font-size:13px;font-weight:500;margin-bottom:8px;color:var(--text-secondary);display:flex;align-items:center;gap:6px}
   .src-card .ref-wrap{display:flex;flex-wrap:wrap;gap:6px}
@@ -653,6 +654,7 @@ function renderChat(){
     else{div.innerHTML=`<div class="bubble"><div class="ai-head"><div class="logo">🤖</div><span class="ai-label">AI 助手</span></div><div class="ai-body" id="ai-${conv.id}-${idx}"></div><div class="msg-actions"><button class="act-btn" onclick="copyMsg(this)">复制</button><button class="act-btn" onclick="regenerate()">重新生成</button><button class="act-btn" onclick="fb(1)">👍 有用</button></div></div>`;
       const ab=div.querySelector('.ai-body');ab.innerHTML=m.content?renderMd(m.content):'';
       const srcs=m.sources||[];
+      if(m.note){const nt=document.createElement('div');nt.className='agent-note';nt.textContent='⚠️ '+m.note;ab.appendChild(nt);}
       if(srcs.length){const sc=document.createElement('div');sc.className='src-card';const wt=document.createElement('div');wt.className='src-title';wt.textContent='🔗 引用来源';const wr=document.createElement('div');wr.className='ref-wrap';srcs.forEach((sp,i)=>{const el=document.createElement('span');el.className='ref-tag';el.dataset.idx=i;el.title='点击查看原文并定位';el.textContent=(i+1)+'. '+(sp.doc_name||sp.doc)+' · 第'+sp.page+'页';wr.appendChild(el)});sc.appendChild(wt);sc.appendChild(wr);sc.onclick=(e)=>{const tag=(e.target&&e.target.closest)?e.target.closest('.ref-tag'):null;if(tag)showSource(srcs[+tag.dataset.idx])};ab.appendChild(sc);}
     }
     inner.appendChild(div);
@@ -726,7 +728,7 @@ async function streamToConv(conv, q, aiIdx){
     const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:conv.kbId||KB.id,question:q,session_id:cid,stream:true}),signal:ctrl.signal});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id}}catch(e){}}}
+    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;if(activeConversationId===cid)renderChat();}}}catch(e){}}}
   }catch(e){ conv._failed=true; }
   finally{
     conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');

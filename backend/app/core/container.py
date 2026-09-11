@@ -11,6 +11,8 @@ from app.core.bm25 import InMemoryBm25
 from app.core.byok import (DbUserLLMConfigStore, InMemoryUserLLMConfigStore, LLMFactory,
                            OpenAICompatLLMFactory, UserLLMConfigStore)
 from app.core.cache import SemanticCache
+from app.core.capability import (CapabilityProbe, CachedCapabilityProbe,
+                                 OpenAICompatCapabilityProbe)
 from app.core.context import (ApproxTokenCounter, LlmSummarizer, Summarizer,
                                TokenCounter)
 from app.core.chunker import ParentChildChunker
@@ -51,6 +53,9 @@ class Runtime:
     price_table: PriceTable = field(default_factory=PriceTable)
     # 自填 base_url 的域名解析器（票 33）：真实运行走系统 DNS，测试注入 stub
     url_resolver: Callable[[str], list] = default_resolver
+    # 自带模型的能力探测（票 34）：带缓存，不为每次问答都探一遍
+    capability_probe: CapabilityProbe = field(
+        default_factory=lambda: CachedCapabilityProbe(OpenAICompatCapabilityProbe()))
 
     def llm_for(self, user_id: str) -> LLM:
         """按发起用户解析 LLM：配了自带模型就用它，否则回落服务端全局（行为与今天一致）。"""

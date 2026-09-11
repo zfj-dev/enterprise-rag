@@ -12,6 +12,7 @@ from typing import Callable, Iterator
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.capability import capability_for
 from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
 from app.core.context import ContextPlan, assemble_context, plan_exempt
@@ -485,10 +486,15 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
     prep.trace["ttft_ms"] = None
 
     if allow_agent and get_settings().agent_enabled:
-        got = _run_agent_for(db, rt, prep)
-        if got is not None:
-            yield from _stream_agent(db, rt, prep, got, t_generate)
-            return
+        blocked = _agent_blocked_reason(rt, prep)
+        if blocked:
+            # 代理用不了（票 34）：**降级为单步回答**，不抛错，并把原因写进 trace / done
+            prep.trace["agent_skipped"] = blocked
+        else:
+            got = _run_agent_for(db, rt, prep)
+            if got is not None:
+                yield from _stream_agent(db, rt, prep, got, t_generate)
+                return
 
     yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
     # 精确编号引用（表3.1 vs 表3.3 只差数字）跳过语义缓存，避免返回相似问题的旧答案
@@ -530,6 +536,21 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
 
 
 # ---------- 代理链路（票 15 的开关；默认关）----------
+
+def _agent_blocked_reason(rt: Runtime, prep: Prep) -> str | None:
+    """自带模型用不了工具时，代理走不了 —— 返回原因（调用方降级为单步回答），能走就 None。
+
+    只有**配了自带模型**才需要探：没有配置就是走服务端全局（今天的行为），不做探测。
+    探测**失败**按保守默认处理（视为不支持工具），所以这里也会因此挡住 —— 原因一并写出来。
+    """
+    cfg = rt.user_llm_config_store.get(prep.user.id)
+    if cfg is None:
+        return None
+    cap = capability_for(rt.capability_probe, cfg.base_url, cfg.api_key, cfg.model)
+    if cap.supports_tools:
+        return None
+    return "自带模型 %s 不支持工具调用，本次降级为单步回答（%s）" % (cfg.model, cap.note)
+
 
 def _run_agent_for(db: Session, rt: Runtime, prep: Prep) -> dict | None:
     """开关打开时跑一次代理。任何意外都记日志、返回 None —— 调用方回退确定性链路，
@@ -616,6 +637,7 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
            "citation_coverage": prep.trace.get("citation_coverage"),
            "context": prep.trace.get("context_tokens"),   # 压缩前/后 token 与口径（票 19）
            "usage": prep.trace.get("usage"),              # 本次用量的 token 与口径来源（票 27）
+           "agent_skipped": prep.trace.get("agent_skipped"),   # 代理为何没用上（票 34）
            # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
            "latency": {k: prep.trace.get(k) for k in
                        ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}
