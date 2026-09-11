@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     docling_formula_enrichment: bool = False  # 锁定=关：Docling 能从文本层抽原始公式文本($$..$$)，企业文档公式少，不上 CodeFormulaV2 VLM
     docling_formula_ocr: bool = True  # 公式图片→LaTeX：用 pix2tex 裁图识别(轻量,CPU可跑)；未装 pix2tex 或识别失败自动跳过
     semantic_cache: bool = True
+    # 代理链路开关（票 15）。**默认关**：关着时问答走原确定性管线，行为与今天完全一致。
+    agent_enabled: bool = False
+    agent_max_steps: int = 4      # ReAct 循环步数上限（失控时能停下、不烧钱）
     memory_enabled: bool = True   # 跨会话记忆：问答后异步抽取"用户告知的事实"并按用户落库
     memory_extract_max_facts: int = 5  # 单轮最多抽取几条事实
     memory_recall_top_k: int = 3          # 每次问答最多注入几条记忆（有上限，不堆爆上下文）

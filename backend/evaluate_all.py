@@ -41,6 +41,7 @@ def _config_snapshot() -> list:
     keys = ("use_real", "llm_provider", "llm_model", "embedding_provider", "embedding_model",
             "embedding_device", "reranker_provider", "reranker_device", "vector_store",
             "redis_url", "parser_use_docling", "semantic_cache", "memory_enabled",
+            "agent_enabled", "agent_max_steps",
             "context_compress", "context_token_budget", "retrieval_top_k", "rerank_top_k",
             "rrf_k", "min_relevance", "chunk_child_size", "chunk_parent_size",
             "ragas_judge_model", "ragas_judge_temperature")

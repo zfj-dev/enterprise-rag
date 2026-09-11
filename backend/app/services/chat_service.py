@@ -402,10 +402,21 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     )
 
 
-def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
-    """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。"""
+def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
+                  allow_agent: bool = True) -> Iterator[dict]:
+    """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。
+
+    代理开关（票 15）**默认关**：关着时一行代理代码都不跑，行为与今天完全一致。
+    `allow_agent=False` 供**对比评测**用：基准链路不能被全局开关顺手换掉。
+    """
     t_generate = time.perf_counter()
     prep.trace["ttft_ms"] = None
+
+    if allow_agent and get_settings().agent_enabled:
+        got = _run_agent_for(db, rt, prep)
+        if got is not None:
+            yield from _stream_agent(db, rt, prep, got, t_generate)
+            return
 
     yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
     # 精确编号引用（表3.1 vs 表3.3 只差数字）跳过语义缓存，避免返回相似问题的旧答案
@@ -439,9 +450,65 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
         answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
 
+    yield from _finish(db, rt, prep, answer, cache_hit=cache_hit, t_generate=t_generate)
+
+
+# ---------- 代理链路（票 15 的开关；默认关）----------
+
+def _run_agent_for(db: Session, rt: Runtime, prep: Prep) -> dict | None:
+    """开关打开时跑一次代理。任何意外都记日志、返回 None —— 调用方回退确定性链路，
+    绝不因为旁路出问题就把问答打成 500。"""
+    try:
+        from app.core.agent import run_agent
+        from app.mcp.client import InProcessTransport
+        from app.mcp.registry import build_registry
+
+        # 工具集按**本次请求**的上下文造：kb / owner 服务端注入，不来自模型参数
+        transport = InProcessTransport(build_registry(db, rt, prep.user, prep.kb_id))
+        return run_agent(prep.question, llm=prep.llm, transport=transport,
+                         max_steps=get_settings().agent_max_steps)
+    except Exception as e:      # noqa: BLE001 —— 旁路失败绝不能影响问答本身
+        logger.warning("代理链路跑不动，回退确定性链路：%s", e)
+        return None
+
+
+def _stream_agent(db: Session, rt: Runtime, prep: Prep, got: dict,
+                  t_generate: float) -> Iterator[dict]:
+    """把代理的终答按**与确定性链路相同的**流式外观下发。
+
+    中间步骤（思考 / 工具调用）不推给前端 —— spec 明确划在范围外；但结论进 trace，坏了查得到。
+    代理链路不走语义缓存：它自己会调工具，缓存会把这个差别抹掉。
+    """
+    prep.sources = got.get("sources") or []   # 来源必须是**答案真正依据**的那一份
+    answer = got.get("answer") or ""
+    yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
+    for i in range(0, len(answer), 12):
+        if i == 0:
+            prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
+        yield {"type": "delta", "text": answer[i:i + 12]}
+
+    latency = got.get("latency") or {}
+    checked = got.get("trace") or {}
+    prep.trace.update({
+        "agent": True, "agent_stopped": got.get("stopped"),
+        "agent_steps": [{"tool": s.get("tool"), "ms": s.get("ms"), "ok": s.get("ok")}
+                        for s in got.get("steps") or []],
+        "agent_ms": latency.get("total_ms"),
+        # 检索/重排耗时来自 prepare 那次**没被采纳**的检索 —— 置空，免得污染延迟分桶
+        "retrieval_ms": None, "rerank_ms": None,
+        "self_check": checked.get("self_check"),
+        "citation_coverage": checked.get("citation_coverage"),
+    })
+    yield from _finish(db, rt, prep, answer, cache_hit=False, t_generate=t_generate)
+
+
+def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
+            cache_hit: bool, t_generate: float) -> Iterator[dict]:
+    """两条链路共用的收尾：分段耗时 → 引用覆盖率 → 落库 → 事实抽取 → done 事件。"""
     prep.trace["generate_ms"] = (time.perf_counter() - t_generate) * 1000
 
-    if not prep.llm.is_fake:  # 真实模型才逐句校验引用覆盖率
+    # 真实模型才逐句校验引用覆盖率；代理链路在自检（票 14）里已经算过，不重复调模型
+    if not prep.llm.is_fake and prep.trace.get("citation_coverage") is None:
         try:
             from app.core.citation import verify_claims
             cov = verify_claims(answer, prep.sources, prep.llm)
@@ -487,11 +554,14 @@ def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id:
 
 
 def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
-           session_id: str | None = None) -> dict:
-    """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id, trace}。"""
+           session_id: str | None = None, *, allow_agent: bool = True) -> dict:
+    """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id, trace}。
+
+    `allow_agent=False` 走**确定性链路**（对比评测的基准用），不受全局代理开关影响。
+    """
     prep = prepare(db, rt, user, kb_id, question, session_id)
     result: dict = {}
-    for ev in stream_answer(db, rt, prep):
+    for ev in stream_answer(db, rt, prep, allow_agent=allow_agent):
         result = ev
     return {
         "session_id": prep.session_id,

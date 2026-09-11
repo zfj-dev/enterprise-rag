@@ -30,16 +30,9 @@ _MISSING = ("请从 https://github.com/chen700564/RGB 的 data/ 取 zh.json / zh
 
 def _eval_user(db):
     """评测要在真实问答管线里跑，得有个发起人 —— 本地库建一个固定的评测用户。"""
-    from app.models.entities import User
-    from app.utils.security import hash_password
+    from app.eval_setup import eval_user
 
-    user = db.query(User).filter(User.username == "__rgb_eval__").first()
-    if not user:
-        user = User(username="__rgb_eval__", password_hash=hash_password("rgb-eval-only"), role="viewer")
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    return user
+    return eval_user(db, "__rgb_eval__")
 
 
 def _index_entry(rt, entry: dict, kb_id: str, tag: str) -> int:
