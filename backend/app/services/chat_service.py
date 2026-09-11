@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
-from app.core.context import ContextPlan, assemble_context
+from app.core.context import ContextPlan, assemble_context, plan_exempt
 from app.core.llm import LLM
 from app.core.memory import FactExtractor
 from app.core.prompt import (build_prompt, build_rewrite_prompt, format_context,
@@ -344,7 +344,10 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     # （Spec 0003 的上下文预算 × Spec 0004 的记忆注入；无记忆时预算一分不动）
     budget = (s.context_token_budget - rt.token_counter.count(memory_text)
               if memory_text else s.context_token_budget)
-    if s.context_compress:
+    # 枚举 / 具体编号：系统为「列全」刻意注入了大批块，压了就会漏项 —— 本问**整段豁免压缩**
+    # （票 20）。判据复用既有的意图检测（cat / refs），不另起一套。
+    exempt = bool(cat or refs)
+    if s.context_compress and not exempt:
         plan = assemble_context(history, budget=max(0, budget),
                                 keep_recent=s.context_keep_recent,
                                 count_tokens=rt.token_counter.count,
@@ -352,7 +355,11 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                                 # 会话上的滚动摘要（票 18）：只滚未覆盖的尾部，游标随之前进
                                 previous=sess.summary or None, previous_upto=sess.summary_upto)
         _save_rolling_summary(db, sess, plan)
-    else:   # 关闭压缩：直接透传全部已加载历史
+    elif exempt:
+        # 本问豁免压缩（票 20）：不新压，但已有摘要照带且按游标切掉重复轮次（见 plan_exempt）
+        plan = plan_exempt(history, previous=sess.summary, previous_upto=sess.summary_upto)
+    else:
+        # 关压缩：与今天一致 —— 不带摘要（开过关的会话里那份摘要也不在这条路上出现）
         plan = ContextPlan(summary=None, kept=history)
     timings: dict = {}
     candidates = retrieve_candidates(db, rt, kb_id=kb_id, owner_id=user.id, question=question,
@@ -400,7 +407,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         trace={"query": question, "rewrite": q2, "history_turns": len(plan.kept),
                "context_dropped": plan.dropped, "context_budget": budget,
                "summary_chars": len(plan.summary or ""), "summary_cursor": plan.cursor,
-               "context_tokens": _token_usage(rt, plan, history, budget),
+               "compress_exempt": exempt,
+               "context_tokens": _token_usage(rt, plan, history, budget, exempt=exempt),
                "enum_cat": cat, "candidates": len(candidates),
                "memory_recalled": len(memories),
                "memory_top_score": memories[0]["score"] if memories else None,
@@ -410,7 +418,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
     )
 
 
-def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int) -> dict:
+def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int,
+                 *, exempt: bool = False) -> dict:
     """压缩前 / 压缩后 token、预算与口径（票 19）。
 
     **只用真实分词器**报数：没有真实分词器时 token 一律 None（报告写「不可用」），
@@ -419,6 +428,10 @@ def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int) -> 
     """
     from app.core.prompt import format_turn
 
+    if exempt:
+        # 本问豁免压缩：没有"降了多少"可报 —— 报了只会是 0% 甚至负值，那是误导
+        return {"tokens_before": None, "tokens_after": None, "tokenizer": "", "budget": budget,
+                "note": "本问为枚举/编号查询，豁免压缩：没有降幅可报"}
     counter = rt.token_counter
     label = getattr(counter, "label", "")
     if not label:

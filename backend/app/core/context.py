@@ -119,6 +119,21 @@ def _with_previous(turns: Sequence[dict], previous: str) -> list[dict]:
     return [{"user": _PREVIOUS_LABEL, "assistant": previous}] + list(turns)
 
 
+def plan_exempt(history: Sequence[dict] | None, *, previous: str | None = None,
+                previous_upto: str | None = None) -> ContextPlan:
+    """本问豁免压缩（票 20）：历史原样透传，已有摘要照带 —— 但**按游标切掉已被摘要覆盖的轮次**。
+
+    为什么不整段塞进去：游标通常落在加载窗口内，不切的话同一轮会**既在摘要里、又在原文里**
+    出现两次（非豁免路径靠 `assemble_context` 的尾段切片避开了这件事，这里必须同样避开）。
+    窗口之外的更早对话只存在于摘要里，所以摘要必须照带 —— 丢掉它才是真的漏上下文。
+    """
+    hist = list(history or [])
+    if not previous:
+        return ContextPlan(summary=None, kept=hist)
+    return ContextPlan(summary=previous, kept=hist[_covered_turns(hist, previous_upto):],
+                       cursor=previous_upto or None)
+
+
 def assemble_context(
     history: Sequence[dict] | None,
     *,

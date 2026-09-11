@@ -250,8 +250,9 @@ class Report:
         if self.tokenizer_label:
             # 分词器好好的，只是这次没有可压的多轮历史 —— 别把原因写错
             return ["上下文压缩降幅(token) 不适用  (本次没有可压的多轮历史；%s)" % scope]
-        return ["上下文压缩降幅(token) 不可用  (没有真实分词器就用「不可用」说话，"
-                "不用字数估算顶替%s)" % ("：" + self.tokenizer_note if self.tokenizer_note else "")]
+        # 原因如实写：可能是没接分词器，也可能是本问豁免压缩 —— 别一律说成分词器的事
+        reason = self.tokenizer_note or "没有真实分词器（不拿字数估算顶替）"
+        return ["上下文压缩降幅(token) 不可用  (%s)" % reason]
 
     @property
     def page_rate(self) -> float | None:
