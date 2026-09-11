@@ -24,6 +24,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Sequence
 
+from app.utils.times import as_aware
+
 logger = logging.getLogger(__name__)
 
 WINDOWS = ("day", "month")
@@ -38,15 +40,6 @@ def window_start(now: datetime, window: str) -> datetime:
     return start.replace(day=1) if window == "month" else start
 
 
-def _as_aware(value: datetime) -> datetime:
-    """把时间戳补齐时区再比较。
-
-    sqlite 存 `DateTime(timezone=True)` 时**会把时区丢掉**，读回来是 naive —— 而窗口起点是
-    aware，两者直接比会抛 `TypeError`。我们写入的就是 UTC，所以 naive 一律按 UTC 解释。
-    """
-    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
-
-
 def spent_in_window(records: Sequence[dict], since: datetime) -> tuple[float, int]:
     """窗口内已累计的费用（元）+ **折不出费用的条数**。
 
@@ -57,7 +50,7 @@ def spent_in_window(records: Sequence[dict], since: datetime) -> tuple[float, in
     unknown = 0
     for r in records:
         created = r.get("created_at")
-        if created is not None and _as_aware(created) < _as_aware(since):
+        if created is not None and as_aware(created) < as_aware(since):
             continue
         cost = r.get("cost")
         if isinstance(cost, (int, float)) and not isinstance(cost, bool):

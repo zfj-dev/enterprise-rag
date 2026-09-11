@@ -17,7 +17,8 @@ from app.models.entities import UsageRecord
 
 SOURCE_PROVIDER = "provider"        # provider 返回的 usage —— 与账单一致
 SOURCE_LOCAL = "local"              # 本地分词器数的 —— 估算
-SOURCE_UNAVAILABLE = "unavailable"  # 两者皆无 —— 不记 0
+SOURCE_SIMULATED = "simulated"      # 演示假模型自报的模拟用量 —— 只为让 demo 能演示计量链路
+SOURCE_UNAVAILABLE = "unavailable"  # 拿不到 —— 不记 0
 
 
 def as_int(value):
@@ -38,7 +39,13 @@ def build_usage(*, prompt_text: str, answer_text: str, model: str,
     usage = provider_usage or {}
     p_in = as_int(usage.get("prompt_tokens"))
     p_out = as_int(usage.get("completion_tokens"))
-    if p_in is not None and p_out is not None:
+    if usage.get("simulated"):
+        # 演示假模型自报的数：**用途明确写在口径里**，绝不冒充账单（票 30 的 demo 要求）
+        if p_in is not None and p_out is not None:
+            return {"model": model, "input_tokens": p_in, "output_tokens": p_out,
+                    "source": SOURCE_SIMULATED,
+                    "source_note": "模拟口径：演示用假模型自报的用量（不是账单，仅供演示计量链路）"}
+    elif p_in is not None and p_out is not None:
         return {"model": model, "input_tokens": p_in, "output_tokens": p_out,
                 "source": SOURCE_PROVIDER,
                 "source_note": "账单口径：provider 返回的 usage"}
@@ -57,8 +64,18 @@ def build_usage(*, prompt_text: str, answer_text: str, model: str,
             "source_note": "不可用：%s，也没有真实分词器 —— 拿不到就不记 0" % why}
 
 
+def _row(r: UsageRecord) -> dict:
+    """ORM 行 -> 对外字典（两个读方法共用一份形状）。"""
+    return {"id": r.id, "user_id": r.user_id, "model": r.model,
+            "input_tokens": r.input_tokens, "output_tokens": r.output_tokens,
+            "source": r.source, "source_note": r.source_note,
+            "cost": r.cost, "price_note": r.price_note,
+            "session_id": r.source_session_id, "message_id": r.source_message_id,
+            "created_at": r.created_at}      # 额度按窗口累计、成本按天分桶都要用它
+
+
 class UsageStore(ABC):
-    """按用户存取用量记录。全部按 user 下推过滤，取不到他人的。"""
+    """按用户存取用量记录。按 user 下推过滤，取不到他人的。"""
 
     @abstractmethod
     def add(self, user_id: str, record: dict, *, session_id: str = "",
@@ -66,6 +83,14 @@ class UsageStore(ABC):
 
     @abstractmethod
     def list(self, user_id: str) -> list[dict]: ...
+
+    @abstractmethod
+    def list_all(self) -> list[dict]:
+        """**所有**用户的记录（管理端全局视图用）。
+
+        刻意做成两个方法而不是 `list(user_id=None)` —— 后者一个手滑就把全量数据当成了
+        「某个人的」，而这里的第一条纪律就是普通用户看不到别人的用量。
+        """
 
 
 class InMemoryUsageStore(UsageStore):
@@ -83,6 +108,9 @@ class InMemoryUsageStore(UsageStore):
 
     def list(self, user_id):
         return list(self._by_user.get(user_id, []))
+
+    def list_all(self):
+        return [r for rows in self._by_user.values() for r in rows]
 
 
 class DbUsageStore(UsageStore):
@@ -110,12 +138,14 @@ class DbUsageStore(UsageStore):
             # created_at 由 ORM 侧单调默认值保证严格递增；id 只是同秒旧行的确定性兜底
             rows = (db.query(UsageRecord).filter(UsageRecord.user_id == user_id)
                     .order_by(UsageRecord.created_at.asc(), UsageRecord.id.asc()).all())
-            return [{"id": r.id, "user_id": r.user_id, "model": r.model,
-                     "input_tokens": r.input_tokens, "output_tokens": r.output_tokens,
-                     "source": r.source, "source_note": r.source_note,
-                     "cost": r.cost, "price_note": r.price_note,
-                     "session_id": r.source_session_id, "message_id": r.source_message_id,
-                     "created_at": r.created_at}     # 预算按窗口累计要用它
-                    for r in rows]
+            return [_row(r) for r in rows]
+        finally:
+            db.close()
+
+    def list_all(self):
+        db = SessionLocal()
+        try:
+            rows = db.query(UsageRecord).order_by(UsageRecord.created_at.asc()).all()
+            return [_row(r) for r in rows]
         finally:
             db.close()

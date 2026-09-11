@@ -102,8 +102,9 @@ def cost_of(record: dict, table: PriceTable) -> dict:
                               "用 LLM_PRICE_OVERRIDES 补上再折" % (model or "（未标注）")}
 
     origin = "配置覆盖价" if price.origin == "override" else "内置价"
-    caliber = {"provider": "账单口径", "local": "估算口径"}.get(record.get("source"),
-                                                                record.get("source") or "口径未知")
+    caliber = {"provider": "账单口径", "local": "估算口径",
+               "simulated": "模拟口径"}.get(record.get("source"),
+                                           record.get("source") or "口径未知")
     # 留到 1e-8 元：再粗就会把「极小但非零」的费用抹成 0，而 0 看起来像「免费」
     cost = round(in_tok / 1000 * price.input + out_tok / 1000 * price.output, 8)
     return {"cost": cost,

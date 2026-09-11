@@ -68,7 +68,7 @@ def parse_tool_calls(raw) -> list["ToolCall"]:
 import time
 
 from app.config import get_settings
-from app.utils.text import extract_json
+from app.utils.text import approx_token_count, extract_json
 
 FAKE_ANSWER = (
     "（模拟回答）根据检索到的资料，这是一种基于检索增强生成（RAG）的问答：系统先对您的文档做解析、分块、向量化，"
@@ -100,6 +100,12 @@ class FakeLLM(LLM):
     is_fake = True
 
     def stream(self, messages: list[dict]) -> Iterator[str]:
+        # 演示用假模型**自报**一份「模拟用量」（票 30 要求 demo 下也能演示计量链路）——
+        # 打的标记是 simulated，记账那边据此标成**模拟口径**，绝不冒充 provider 账单。
+        prompt = "".join(str(m.get("content") or "") for m in messages)
+        self.last_usage = {"prompt_tokens": approx_token_count(prompt),
+                           "completion_tokens": approx_token_count(FAKE_ANSWER),
+                           "simulated": True}
         delay = get_settings().fake_llm_delay
         for piece in _chunk_text(FAKE_ANSWER, 20):
             if delay:

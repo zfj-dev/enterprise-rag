@@ -22,11 +22,10 @@ from typing import Callable, Collection, Sequence
 
 from app.core.llm import LLM
 from app.core.prompt import format_turn
-from app.utils.text import truncate
+from app.utils.text import approx_token_count, truncate
 
 logger = logging.getLogger(__name__)
 
-_CJK = re.compile(r"[㐀-䶿一-鿿]")
 
 
 class TokenCounter(ABC):
@@ -51,10 +50,7 @@ class ApproxTokenCounter(TokenCounter):
     """
 
     def count(self, text: str) -> int:
-        s = text or ""
-        cjk = len(_CJK.findall(s))
-        words = len([w for w in re.split(r"\s+", _CJK.sub(" ", s)) if w])
-        return cjk + words
+        return approx_token_count(text)
 
 
 class Summarizer(ABC):

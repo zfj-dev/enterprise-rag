@@ -103,6 +103,37 @@ class MetricsOut(BaseModel):
     total_answered: int = 0
 
 
+class CostBucketOut(BaseModel):
+    """一桶成本：按人（`user_id` / `username`）或按天（`date`）。"""
+
+    key: str = ""                              # 展示名：用户名 / 日期
+    user_id: str | None = None
+    date: str | None = None
+    cost: float | None = None                  # 折得出来的合计；**一笔都折不出就是 None**
+    priced: int = 0
+    unpriced: int = 0                          # 折不出费用的条数 —— 所以 cost 是下界
+    records: int = 0
+
+
+class CostSummaryOut(BaseModel):
+    """成本摘要：**管理员看全局，普通用户只看自己**（`group` 标明这次给的是哪一种）。"""
+
+    group: str = ""                            # global（管理员）/ self（普通用户）
+    window: str = ""                           # 自然窗口（day / month）或滚动范围
+    since: str = ""                            # 时间窗起点（本地时间）
+    days: int | None = None                    # 只在滚动范围时有值
+    records: int = 0
+    total_cost: float | None = None            # 同上：折不出就是 None，不是 0
+    unpriced: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    token_unavailable: int = 0
+    by_source: dict[str, int] = Field(default_factory=dict)   # 账单 / 估算 / 模拟 / 不可用 各几笔
+    by_user: list[CostBucketOut] = Field(default_factory=list)   # 只有管理员看得到
+    by_day: list[CostBucketOut] = Field(default_factory=list)
+    note: str = ""
+
+
 # ---- 跨会话记忆 ----
 class MemoryFactOut(BaseModel):
     id: str

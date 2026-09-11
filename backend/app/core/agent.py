@@ -110,6 +110,8 @@ def _accumulate_usage(llm, totals: dict) -> None:
     totals["input_tokens"] += p_in
     totals["output_tokens"] += p_out
     totals["calls"] += 1
+    # 只要有一轮不是模拟用量，合计就不能标成「模拟口径」
+    totals["simulated"] = totals["simulated"] and bool(usage.get("simulated"))
 
 
 def _self_check(answer: str, *, sources: list, retrieval_ran: bool,
@@ -179,7 +181,8 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
     stopped = "max_steps"
     trimmed = 0
     # 多步调用的用量合计（票 27）：provider 每轮给的 usage 累加，缺一次就整体标记不可信
-    usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0, "complete": True}
+    usage_totals = {"input_tokens": 0, "output_tokens": 0, "calls": 0, "complete": True,
+                    "simulated": True}
 
     for _ in range(max(1, max_steps)):
         try:
@@ -251,7 +254,8 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
     # 多步调用的用量合计（票 27）：缺过任何一轮就不报数 —— 记账宁可「不可用」也不低报。
     # 键名与 provider usage 一致，记账那边才能一视同仁地按「账单口径」处理。
     trace["llm_usage"] = ({"prompt_tokens": usage_totals["input_tokens"],
-                           "completion_tokens": usage_totals["output_tokens"]}
+                           "completion_tokens": usage_totals["output_tokens"],
+                           "simulated": usage_totals["simulated"]}
                           if usage_totals["complete"] and usage_totals["calls"] else None)
 
     return {

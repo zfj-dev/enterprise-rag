@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 
 def strip_list_marker(line: str) -> str:
@@ -55,3 +56,19 @@ def truncate(text, limit: int) -> str:
 def lines_of(text) -> list[str]:
     """按行拆开，去掉行首列表标记与空行 —— 模型爱把要点写成一行一条的列表。"""
     return [t for t in (strip_list_marker(ln) for ln in str(text or "").splitlines()) if t]
+
+
+_CJK_RE = re.compile(r"[㐀-䶿一-鿿]")
+
+
+def approx_token_count(text) -> int:
+    """粗略数一下 token：CJK 按字、其余按空白切词。
+
+    **这不是真实分词器**（真实分词器见 app/core/tokenizer.py）——它只用在两处明确标注口径的地方：
+    预算取舍的估算（票 17）、以及演示用假模型自报的「模拟用量」（票 30）。
+    口径与 0003 里的估算计数器**保持一致**，别让同一个数在两处算出不同的值。
+    """
+    s = str(text or "")
+    cjk = len(_CJK_RE.findall(s))
+    words = len([w for w in re.split(r"\s+", _CJK_RE.sub(" ", s)) if w])
+    return cjk + words
