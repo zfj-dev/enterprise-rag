@@ -4,13 +4,15 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
-from app.api.v1 import auth, chat, debug, documents, feedback, knowledge, memory, metrics
+from app.api.v1 import (auth, chat, debug, documents, feedback, knowledge, llm, memory,
+                        metrics)
 from app.config import get_settings
 from app.db.session import SessionLocal, engine
 from app.models.entities import Base, User
@@ -52,6 +54,18 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, version="1.1.0", lifespan=lifespan)
 
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_request: Request, exc: RequestValidationError):
+        """校验失败时**不回显请求体**。
+
+        FastAPI 默认会把 `input`（也就是整个 body）塞进 422 详情里 —— 而 BYOK 的 body 里带着
+        明文 key（票 32 的硬要求：任何响应都不含明文 key）。这里只留定位与原因。
+        """
+        return JSONResponse(status_code=422, content={"detail": [
+            {"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")}
+            for e in exc.errors()
+        ]})
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
@@ -68,6 +82,7 @@ def create_app() -> FastAPI:
     app.include_router(debug.router, prefix=settings.api_prefix)
     app.include_router(memory.router, prefix=settings.api_prefix)
     app.include_router(metrics.router, prefix=settings.api_prefix)
+    app.include_router(llm.router, prefix=settings.api_prefix)
 
     # 静态前端（前台直接托管，无需构建即可本地/LAN 使用）
     frontend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "frontend"))

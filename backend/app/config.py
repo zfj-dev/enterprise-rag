@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # 价格表覆盖（票 28）：JSON，形如 {"qwen-plus": {"input": 0.0008, "output": 0.002}}（元/1K token）。
     # 内置价只是**参考价**、会过期；表里没有的模型一律标「单价未知」而**不按 0 算**。
     llm_price_overrides: str = ""
+    # BYOK（票 32）：用户自带 Key。加密口令**没有默认值、也没有弱默认** —— 没配就不落库
+    # （凭据只存内存、重启即失），绝不退化成明文存储。
+    byok_secret_key: str = ""
     # 预算硬拦（票 29）。**默认关**：硬拦会挡住用户，先让人显式打开。
     quota_enabled: bool = False
     quota_window: Literal["day", "month"] = "day"   # 自然窗口（日 / 月）
@@ -118,6 +121,15 @@ class Settings(BaseSettings):
         """真实模式必须用强 SECRET_KEY，避免用默认 dev 值伪造 JWT。"""
         if self.use_real and self.secret_key == "dev-secret-change-me-0123456789abcdef":
             raise ValueError("真实模式(USE_REAL=true)必须设置强 SECRET_KEY 环境变量，不能使用默认值")
+        return self
+
+    @model_validator(mode="after")
+    def _warn_byok_without_an_encryption_key(self):
+        """没配加密口令时凭据只存内存（重启即失）—— 说出来，别让人以为已经落库了。"""
+        if self.byok_secret_key:
+            return self
+        logger.warning("未配置 BYOK_SECRET_KEY：自带 Key **不落库**（只存内存，重启即失）。"
+                       "要跨会话保存请设一个足够强的口令。")
         return self
 
     @model_validator(mode="after")

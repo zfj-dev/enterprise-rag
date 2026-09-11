@@ -146,6 +146,21 @@ class MemoryFact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_monotonic_utc_now, server_default=func.now())
 
 
+class UserLLMConfig(Base):
+    """用户自带的 LLM 配置（票 32）。**key 只存密文与尾号** —— 明文既不落库、也不回显。"""
+
+    __tablename__ = "user_llm_configs"
+
+    user_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    base_url: Mapped[str] = mapped_column(String(512), default="")
+    model: Mapped[str] = mapped_column(String(128), default="")
+    key_cipher: Mapped[str] = mapped_column(Text, default="")     # 密文（Fernet）
+    key_tail: Mapped[str] = mapped_column(String(8), default="")  # 回显只用它
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_monotonic_utc_now,
+        onupdate=_monotonic_utc_now, server_default=func.now())
+
+
 class UsageRecord(Base):
     """per-query 用量记录：输入/输出 token、模型、**口径来源**（票 27）。按 user 隔离。
 

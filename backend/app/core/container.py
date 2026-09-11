@@ -8,7 +8,7 @@ from typing import Callable
 
 from app.config import get_settings
 from app.core.bm25 import InMemoryBm25
-from app.core.byok import (InMemoryUserLLMConfigStore, LLMFactory,
+from app.core.byok import (DbUserLLMConfigStore, InMemoryUserLLMConfigStore, LLMFactory,
                            OpenAICompatLLMFactory, UserLLMConfigStore)
 from app.core.cache import SemanticCache
 from app.core.context import (ApproxTokenCounter, LlmSummarizer, Summarizer,
@@ -40,6 +40,7 @@ class Runtime:
     retriever: HybridRetriever
     semantic_cache: SemanticCache
     llm_factory: LLMFactory = field(default_factory=OpenAICompatLLMFactory)
+    # 默认内存实现（谁都没配过 → 全部回落全局）；配了 BYOK_SECRET_KEY 才换加密落库那一个
     user_llm_config_store: UserLLMConfigStore = field(default_factory=InMemoryUserLLMConfigStore)
     token_counter: TokenCounter = field(default_factory=ApproxTokenCounter)
     context_summarizer_factory: Callable[[LLM], Summarizer] = LlmSummarizer
@@ -81,7 +82,11 @@ def build_runtime() -> Runtime:
     for issue in price_table.warnings:
         # 启动时就说出来：静默回落内置价，会让人拿到一个看着正常的费用却不知道配置没生效
         logger.warning("价格表配置有问题：%s", issue)
+    # 凭据存储：**配了口令才加密落库**；没配就只存内存（重启即失），绝不退化成明文
+    byok_store = (DbUserLLMConfigStore(s.byok_secret_key) if s.byok_secret_key
+                  else InMemoryUserLLMConfigStore())
     return Runtime(embedding=embedding, vector_store=vector_store, bm25=bm25,
+                   user_llm_config_store=byok_store,
                    reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever,
                    semantic_cache=semantic_cache, token_counter=token_counter,
                    price_table=price_table)

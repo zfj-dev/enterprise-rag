@@ -134,6 +134,26 @@ class CostSummaryOut(BaseModel):
     note: str = ""
 
 
+# ---- 自带 Key（BYOK）----
+class LLMConfigIn(BaseModel):
+    """用户填进来的三样。**key 只在这一个方向出现** —— 出去的时候只剩尾号。"""
+
+    base_url: str = Field(min_length=1)
+    key: str = Field(min_length=1, repr=False)   # 不进 repr：日志里顺手打一下就泄漏了
+    model: str = Field(min_length=1)
+
+
+class LLMConfigOut(BaseModel):
+    """回显：**只有非敏感信息**。字段里压根没有 key 的位置。"""
+
+    configured: bool = False
+    base_url: str = ""
+    model: str = ""
+    key_tail: str = ""          # 尾号，排障够用，泄漏不了
+    updated_at: str = ""
+    persistent: bool = False    # 重启后还在不在 —— 只存内存时如实说「不在」，别让人以为存住了
+
+
 # ---- 跨会话记忆 ----
 class MemoryFactOut(BaseModel):
     id: str
