@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from datetime import datetime, timezone
+
 from app.db.session import SessionLocal
 from app.models.entities import UsageRecord
 
@@ -77,7 +79,7 @@ class InMemoryUsageStore(UsageStore):
         self._seq += 1
         self._by_user.setdefault(user_id, []).append(
             {"id": "u%d" % self._seq, "user_id": user_id, "session_id": session_id,
-             "message_id": message_id, **record})
+             "message_id": message_id, "created_at": datetime.now(timezone.utc), **record})
 
     def list(self, user_id):
         return list(self._by_user.get(user_id, []))
@@ -112,7 +114,8 @@ class DbUsageStore(UsageStore):
                      "input_tokens": r.input_tokens, "output_tokens": r.output_tokens,
                      "source": r.source, "source_note": r.source_note,
                      "cost": r.cost, "price_note": r.price_note,
-                     "session_id": r.source_session_id, "message_id": r.source_message_id}
+                     "session_id": r.source_session_id, "message_id": r.source_message_id,
+                     "created_at": r.created_at}     # 预算按窗口累计要用它
                     for r in rows]
         finally:
             db.close()

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db, get_runtime
 from app.config import get_settings
+from app.core.quota import check_quota
 from app.core.container import Runtime
 from app.core.schemas import ChatRequest
 from app.models.entities import ChatMessage, ChatSession, User
@@ -54,6 +55,17 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
         if s and s.user_id != user.id:
             from fastapi import HTTPException
             raise HTTPException(404, "会话不存在")
+
+    # 预算硬拦（票 29）：判定在**生成之前**、依据此前已累计的用量 —— 所以拦截只对**下一个**
+    # 请求生效，已在进行中的流不被打断；管理员豁免（用量照记）。
+    conf = get_settings()
+    reason = check_quota(rt.usage_store, user, enabled=conf.quota_enabled,
+                          window=conf.quota_window, limit=conf.quota_limit)
+    if reason:
+        from fastapi import HTTPException
+        # 402：额度用尽（既不是「请求太快」，也不是「没权限」）
+        raise HTTPException(402, reason)
+
     prep = prepare(db, rt, user, body.kb_id, body.question, body.session_id)
 
     if not _stream_guard.try_acquire(user.id):

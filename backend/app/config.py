@@ -5,11 +5,15 @@ USE_REAL=True  -> 真实模式：bge 嵌入/重排(本机 GPU) + 云端 API LLM�
 """
 from __future__ import annotations
 
+import logging
+
 from functools import lru_cache
 from typing import Literal
 
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -91,6 +95,10 @@ class Settings(BaseSettings):
     # 价格表覆盖（票 28）：JSON，形如 {"qwen-plus": {"input": 0.0008, "output": 0.002}}（元/1K token）。
     # 内置价只是**参考价**、会过期；表里没有的模型一律标「单价未知」而**不按 0 算**。
     llm_price_overrides: str = ""
+    # 预算硬拦（票 29）。**默认关**：硬拦会挡住用户，先让人显式打开。
+    quota_enabled: bool = False
+    quota_window: Literal["day", "month"] = "day"   # 自然窗口（日 / 月）
+    quota_limit: float = 0.0                        # 每个用户每窗口的费用上限（元）；<=0 = 未设上限
     memory_extract_max_facts: int = 5  # 单轮最多抽取几条事实
     memory_recall_top_k: int = 3          # 每次问答最多注入几条记忆（有上限，不堆爆上下文）
     memory_recall_min_score: float = 0.35  # 相似度低于此不注入：无相关记忆时零注入
@@ -110,6 +118,13 @@ class Settings(BaseSettings):
         """真实模式必须用强 SECRET_KEY，避免用默认 dev 值伪造 JWT。"""
         if self.use_real and self.secret_key == "dev-secret-change-me-0123456789abcdef":
             raise ValueError("真实模式(USE_REAL=true)必须设置强 SECRET_KEY 环境变量，不能使用默认值")
+        return self
+
+    @model_validator(mode="after")
+    def _warn_quota_without_a_limit(self):
+        """开了额度硬拦却没设上限 = 谁都不会被拦 —— 「开了等于没开」要说出来，别让人以为已经在管。"""
+        if self.quota_enabled and self.quota_limit <= 0:
+            logger.warning("QUOTA_ENABLED=true 但 QUOTA_LIMIT<=0：硬拦开着却拦不住任何人，请设上限")
         return self
 
     def all_llm_url(self) -> str:
