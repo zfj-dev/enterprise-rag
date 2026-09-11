@@ -17,9 +17,14 @@ from app.mcp.client import InProcessTransport
 from app.mcp.registry import build_registry
 
 
-def _as_answer(answer: str, sources: list, coverage) -> dict:
-    """两侧共用的出参形状 —— 少一个键，评测核心就少算一项。"""
-    return {"answer": answer or "", "sources": sources or [], "citation_coverage": coverage}
+def _as_answer(answer: str, sources: list, coverage, context=None) -> dict:
+    """两侧共用的出参形状 —— 少一个键，评测核心就少算一项。
+
+    `context` 是压缩前/后 token 与口径（票 19）：代理链路不装配 prepare 那份上下文，
+    所以它没有这个数（报告里会如实写「不可用」，不编）。
+    """
+    return {"answer": answer or "", "sources": sources or [],
+            "citation_coverage": coverage, "context": context}
 
 
 def agent_answer_fn(db, rt, user, kb_id: str, *, max_steps: int | None = None,
@@ -50,6 +55,7 @@ def deterministic_answer_fn(db, rt, user, kb_id: str, session_id: str | None = N
     def ask(question: str) -> dict:
         out = chat_service.answer(db, rt, user, kb_id, question, session_id, allow_agent=False)
         trace = out.get("trace") or {}
-        return _as_answer(out.get("answer"), out.get("sources"), trace.get("citation_coverage"))
+        return _as_answer(out.get("answer"), out.get("sources"), trace.get("citation_coverage"),
+                          trace.get("context_tokens"))
 
     return ask

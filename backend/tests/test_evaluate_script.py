@@ -53,13 +53,14 @@ def test_parse_sse_collects_answer_and_sources():
         "",
         'data: {"type": "done"}',
     ])
-    assert evaluate._parse_sse(body) == {"answer": "答案", "sources": [{"text": "甲", "page": 1}],
-                                        "citation_coverage": None}
+    got = evaluate._parse_sse(body)
+    assert got == {"answer": "答案", "sources": [{"text": "甲", "page": 1}],
+                   "citation_coverage": None, "context": None}
 
 
 def test_parse_sse_ignores_malformed_and_non_data_lines():
     assert evaluate._parse_sse("data: not-json\n\n: keep-alive\n") == {
-        "answer": "", "sources": [], "citation_coverage": None}
+        "answer": "", "sources": [], "citation_coverage": None, "context": None}
 
 
 def test_answer_fn_asks_the_running_service():
@@ -111,3 +112,22 @@ def test_main_runs_offline_and_judges_via_the_core(tmp_path, monkeypatch):
     assert "口径" in text                             # 报告带口径
     assert "上传: indexed" in text                     # 头部信息也在
     assert "=== RAGAS 四项 ===" in text                 # RAGAS 段无论有没有裁判都要出
+
+
+def test_the_multi_turn_run_keeps_every_question_in_one_session():
+    """多轮跑法才有历史可压 —— 所有问题必须落在同一个会话里（单轮则不带会话 id）。"""
+    class C:
+        def __init__(self):
+            self.calls = []
+
+        def post(self, url, headers=None, json=None):
+            self.calls.append(json)
+            return _Resp(text='data: {"type": "delta", "text": "甲"}')
+
+    c = C()
+    evaluate._answer_fn(c, "kb1", {}, "eval-multi-turn")("问")
+    assert c.calls[0]["session_id"] == "eval-multi-turn"
+
+    c2 = C()
+    evaluate._answer_fn(c2, "kb1", {})("问")
+    assert "session_id" not in c2.calls[0]

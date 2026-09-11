@@ -22,6 +22,11 @@ JudgeFn = Callable[[str, str, list, str], dict]
 RAGAS_METRICS = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
 
 
+def as_int(value) -> int | None:
+    """把外来的 token 数收成 int —— bool 也是 int，别把 True 当 1 个 token。"""
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def normalize(text) -> str:
     """判据口径：去空白 + 转小写。"""
     return "".join(str(text or "").split()).lower()
@@ -66,6 +71,11 @@ class ItemResult:
     group: str = ""             # 分组名（如 RGB 的四能力）；空则不参与「分能力」汇总
     negative: bool = False      # 负样本：答案不在文档里，期望拒答（黄金集写 "negative": true）
     citation_coverage: float | None = None  # 引用覆盖率（逐句核验）；问答实现没给就是 None
+    ctx_before: int | None = None           # 压缩前 token（**真实分词器**数的；没有就是 None）
+    ctx_after: int | None = None            # 压缩后 token
+    ctx_tokenizer: str = ""                 # token 口径（哪个分词器）；空 = 没有真实分词器
+    ctx_note: str = ""                      # 没有真实分词器时的原因
+    ctx_budget: int | None = None            # 当时的上下文预算（口径三件套之一）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
     judge_error: str | None = None  # 这条裁判挂了的原因（要明说，不能当没算过）
@@ -178,6 +188,72 @@ class Report:
         return self.refused_count / len(negs)
 
     @property
+    def token_pairs(self) -> list:
+        """可用于算降幅的 (压缩前, 压缩后) —— 压缩前为 0 的条目不算（降幅没有意义）。
+
+        三条口径（降幅 / 条数 / 报告里的求和）**共用这一处**，免得各筛各的、数字对不上。
+        """
+        return [(x.ctx_before, x.ctx_after) for x in self.positives
+                if as_int(x.ctx_before) and as_int(x.ctx_after) is not None and x.ctx_before > 0]
+
+    @property
+    def token_reduction_rate(self) -> float | None:
+        """上下文压缩降幅 = 1 - Σ压缩后/Σ压缩前；没有可算的条目就是 None。
+
+        **只用真实分词器报出来的数**：没有就返回 None，报告那边写「不可用」——
+        绝不拿字符估算顶替（spec 0003 的降级诚实性）。
+        """
+        pairs = self.token_pairs
+        if not pairs:
+            return None
+        before = sum(b for b, _ in pairs)
+        after = sum(a for _, a in pairs)
+        return 1 - after / before
+
+    @property
+    def token_reduction_count(self) -> int:
+        """有多少条真的算进了降幅。"""
+        return len(self.token_pairs)
+
+    @property
+    def tokenizer_label(self) -> str:
+        """token 口径（哪个分词器）—— 报告里必须写出来，数字脱离口径就不可信。"""
+        for x in self.items:
+            if x.ctx_tokenizer:
+                return x.ctx_tokenizer
+        return ""
+
+    @property
+    def tokenizer_note(self) -> str:
+        """没有真实分词器时的原因（取第一条说清楚就够）。"""
+        for x in self.items:
+            if x.ctx_note:
+                return x.ctx_note
+        return ""
+
+    def _token_lines(self) -> list:
+        """压缩降幅那一段 —— 三种情形分得清清楚楚，绝不把「没数据」说成「没分词器」。
+
+        口径三件套一起写：**分词器 / 预算 / 触发条件**（数字脱离口径就不可信）。
+        """
+        red = self.token_reduction_rate
+        budget = next((x.ctx_budget for x in self.positives if as_int(x.ctx_budget)), None)
+        scope = "触发条件: 超预算才压；口径: %s%s%s" % (
+            self.tokenizer_label or "（未接真实分词器）",
+            "；预算 %d tokens" % budget if budget else "",
+            "；只算历史那部分，记忆不计入")
+        if red is not None:
+            pairs = self.token_pairs
+            return ["上下文压缩降幅(token) %d%%  (压缩前 %d -> 压缩后 %d；%d 条计入；%s)"
+                    % (round(red * 100), sum(b for b, _ in pairs),
+                       sum(a for _, a in pairs), len(pairs), scope)]
+        if self.tokenizer_label:
+            # 分词器好好的，只是这次没有可压的多轮历史 —— 别把原因写错
+            return ["上下文压缩降幅(token) 不适用  (本次没有可压的多轮历史；%s)" % scope]
+        return ["上下文压缩降幅(token) 不可用  (没有真实分词器就用「不可用」说话，"
+                "不用字数估算顶替%s)" % ("：" + self.tokenizer_note if self.tokenizer_note else "")]
+
+    @property
     def page_rate(self) -> float | None:
         scored = [x for x in self.positives if x.has_page]
         if not scored:
@@ -207,7 +283,9 @@ class Report:
             "  page_hit  期望页码出现在随答案返回的来源页码里（声明了页码却没来源页码 = 未命中）",
             "  coverage  引用覆盖率：答案的论断里被来源支撑的占比（逐句核验；"
             "免 LLM 的跑法拿不到就不出这一行）",
-            "  黄金集条目缺期望事实 / 页码时：不跳过该条，而是按未命中计入或写明不计入",
+            "  黄金集条目缺期望事实 / 页码时：不跳过该条，而是按未命中计入或写明不计入"
+            "  token    压缩前 / 压缩后 token 与降幅，用真实分词器数；没有真实分词器就写「不可用」，"
+            "有分词器但这轮没有可压的多轮历史就写「不适用」——两种「没数字」不许混成一句",
             "  refuse    负样本（黄金集标 negative: true）期望拒答。判据：答案整段不超 %d 字"
             "且含「无法确定 / 未找到 / 不能提供」等拒答措辞 → 明确拒答；"
             "长篇里夹带一句拒答（先拒后硬答）与空答案都不算 —— 负样本不参与上面三项的分母"
@@ -236,6 +314,8 @@ class Report:
                      % (round(self.fact_rate * 100),
                         sum(1 for x in self.positives if x.fact_hit), len(self.positives),
                         miss, neg_note))
+        # 压缩降幅紧挨事实命中率 —— 只报降幅不报质量，等于奖励「把上下文砍掉」
+        lines.extend(self._token_lines())
         # 拒答率紧挨事实命中率并列 —— 免得「拒答率高是因为什么都不答」被误读
         if self.negatives:
             n_ref = self.refused_count
@@ -316,6 +396,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
         out = answer_fn(question) or {}
         answer = out.get("answer", "") or ""
         sources = [s for s in (out.get("sources") or []) if isinstance(s, dict)]
+        ctx = out.get("context") if isinstance(out.get("context"), dict) else {}
 
         want = normalize(expect)
         src_text = " ".join(str(s.get("text", "")) for s in sources)
@@ -331,6 +412,9 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             group=g.get("group", ""),
             negative=bool(g.get("negative")), refused=is_refusal(answer),
             citation_coverage=out.get("citation_coverage"),
+            ctx_before=as_int(ctx.get("tokens_before")), ctx_after=as_int(ctx.get("tokens_after")),
+            ctx_tokenizer=str(ctx.get("tokenizer") or ""), ctx_note=str(ctx.get("note") or ""),
+            ctx_budget=as_int(ctx.get("budget")),
         ))
         # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低
         if judge_fn is not None and not g.get("negative"):

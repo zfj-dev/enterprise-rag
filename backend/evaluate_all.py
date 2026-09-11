@@ -44,7 +44,7 @@ def _config_snapshot() -> list:
             "agent_enabled", "agent_max_steps",
             "context_compress", "context_token_budget", "retrieval_top_k", "rerank_top_k",
             "rrf_k", "min_relevance", "chunk_child_size", "chunk_parent_size",
-            "ragas_judge_model", "ragas_judge_temperature")
+            "ragas_judge_model", "ragas_judge_temperature", "tokenizer_model")
     marker = object()
     out, absent = [], []
     for k in keys:
@@ -58,11 +58,30 @@ def _config_snapshot() -> list:
     return out
 
 
+def _reduction_line(report) -> str:
+    """压缩降幅 —— **紧贴在事实命中下面**。
+
+    只报降幅不报质量，等于奖励「把上下文砍掉」；两份数字挨着放，读者才会一起看。
+    """
+    if report is None:
+        return "  %-18s    （本次没跑生成层）" % "上下文压缩降幅(token)"
+    rate = report.token_reduction_rate
+    if rate is None:
+        return ("  %-18s    不可用（%s）"
+                % ("上下文压缩降幅(token)", report.tokenizer_note or "没有真实分词器"))
+    return ("  %-18s    实际 %.0f%%  (口径 %s；%d 条计入)"
+            % ("上下文压缩降幅(token)", rate * 100, report.tokenizer_label,
+               report.token_reduction_count))
+
+
 def _target_lines(report) -> list:
-    out = ["  数字取自本页「生成层指标」；不达标只是标注，不影响任何流程"]
+    out = ["  数字取自本页「生成层指标」；不达标只是标注，不影响任何流程",
+           "  压缩降幅紧跟在事实命中下面 —— 降 token 降出错误答案不算数，两份数字一起看"]
     for _key, name, threshold, get in TARGETS:
         if report is None:
             out.append("  %-18s ≥ %.0f%%   （本次没跑生成层）" % (name, threshold * 100))
+            if _key == "fact":
+                out.append(_reduction_line(None))
             continue
         value = get(report)
         if value is None:
@@ -71,6 +90,8 @@ def _target_lines(report) -> list:
             mark = "[达标]" if value >= threshold else "[未达标]"
             out.append("  %-18s ≥ %.0f%%   实际 %.0f%%  %s"
                        % (name, threshold * 100, value * 100, mark))
+        if _key == "fact":
+            out.append(_reduction_line(report))
     return out
 
 

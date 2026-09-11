@@ -93,7 +93,7 @@ def test_deterministic_answer_fn_is_shaped_for_the_eval_core(client):
     finally:
         db.close()
 
-    assert set(out) == {"answer", "sources", "citation_coverage"}
+    assert set(out) == {"answer", "sources", "citation_coverage", "context"}
     assert out["answer"]
     assert out["sources"] and out["sources"][0]["page"] == 1
 

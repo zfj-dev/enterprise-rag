@@ -5,6 +5,8 @@
 
 用法: 先启动 run_real.ps1，再  python backend/evaluate.py
 可配环境变量:  EVAL_DOC=backend/paper.pdf  EVAL_GOLDEN=backend/data/golden_set_paper.json
+              EVAL_MULTI_TURN=1  多轮跑法（同一会话连着问）—— 只有多轮才有历史可压，
+                                 压缩降幅也才拿得到数字；默认单轮，与历史报告可比
 报告写到 logs/eval-report.log（助手可读）。
 
 黄金集条目（JSON 数组，每条一个对象）：
@@ -34,8 +36,8 @@ DOC = os.environ.get("EVAL_DOC", os.path.join(BACKEND, "paper.pdf"))
 
 
 def _parse_sse(body: str) -> dict:
-    """把 /chat/stream 的 SSE 响应体拼成核心要的 {answer, sources, citation_coverage}。"""
-    answer, sources, coverage = "", [], None
+    """把 /chat/stream 的 SSE 响应体拼成核心要的 {answer, sources, citation_coverage, context}。"""
+    answer, sources, coverage, context = "", [], None, None
     for line in body.splitlines():
         if not line.startswith("data:"):
             continue
@@ -49,14 +51,22 @@ def _parse_sse(body: str) -> dict:
             sources = ev.get("data", [])
         elif ev.get("type") == "done":
             coverage = ev.get("citation_coverage")     # 逐句核验的引用覆盖率（真实模式才有）
-    return {"answer": answer, "sources": sources, "citation_coverage": coverage}
+            context = ev.get("context")                # 压缩前/后 token（真实分词器才有）
+    return {"answer": answer, "sources": sources, "citation_coverage": coverage,
+            "context": context}
 
 
-def _answer_fn(client: httpx.Client, kb_id: str, headers: dict):
-    """把运行中的服务包成评测核心要的 answer_fn（问题 -> 答案 + 来源）。"""
+def _answer_fn(client: httpx.Client, kb_id: str, headers: dict, session_id: str | None = None):
+    """把运行中的服务包成评测核心要的 answer_fn（问题 -> 答案 + 来源）。
+
+    给了 `session_id` 就是**多轮**跑法：所有问题落在同一个会话里，历史累积、压缩才可能触发 ——
+    压缩降幅这个指标只在多轮语境下才有意义（单轮每题新会话，压根没有可压的历史）。
+    """
     def ask(question: str) -> dict:
-        r = client.post("/api/v1/chat/stream", headers=headers,
-                        json={"kb_id": kb_id, "question": question, "stream": True})
+        payload = {"kb_id": kb_id, "question": question, "stream": True}
+        if session_id:
+            payload["session_id"] = session_id
+        r = client.post("/api/v1/chat/stream", headers=headers, json=payload)
         return _parse_sse(r.text)
     return ask
 
@@ -92,6 +102,10 @@ def _upload_line(upload: dict) -> str:
                                            upload.get("page_count"))
 
 
+def _truthy(raw) -> bool:
+    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def run_online(base=None, golden_path=None, doc_path=None):
     """对运行中的服务跑一遍：登录 → 建库 → 上传 → 逐问 → 返回 (报告对象, 上传信息)。
 
@@ -111,8 +125,11 @@ def run_online(base=None, golden_path=None, doc_path=None):
                 headers=H).json()["id"]
     upload = upload_and_wait(c, kb, H, doc_path)
 
+    # EVAL_MULTI_TURN=1：同一个会话里连着问 —— 历史累积后压缩才会触发，降幅才有数
+    multi = _truthy(os.environ.get("EVAL_MULTI_TURN"))
+    session_id = "eval-multi-turn" if multi else None
     judge, judge_note = _build_judge()
-    report = run_eval(golden, _answer_fn(c, kb, H),
+    report = run_eval(golden, _answer_fn(c, kb, H, session_id),
                       judge_fn=judge, judge_label=judge.label if judge else None)
     if judge_note:
         report.judge_error = report.judge_error or judge_note
@@ -123,7 +140,10 @@ def run_online(base=None, golden_path=None, doc_path=None):
 def main() -> None:
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     head = ["=== RAG 黄金集评估报告 ===",
-            "黄金集: %s" % GOLDEN, "被评文档: %s" % DOC]
+            "黄金集: %s" % GOLDEN, "被评文档: %s" % DOC,
+            "跑法: %s" % ("多轮（同一会话，历史累积 —— 压缩降幅可用）"
+                          if _truthy(os.environ.get("EVAL_MULTI_TURN")) else
+                          "单轮（每题新会话；压缩降幅此行只是不适用，不是 0）")]
     try:
         report, upload = run_online()
         head.append(_upload_line(upload))

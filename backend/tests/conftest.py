@@ -4,6 +4,8 @@ import tempfile
 
 _D = tempfile.mkdtemp(prefix="rag_test_")
 os.environ["DATABASE_URL"] = f"sqlite:///{_D}/test_rag.db"
+# 测试不接真实分词器：既不联网下载 Qwen tokenizer，也让「token 指标不可用」成为确定行为
+os.environ["TOKENIZER_MODEL"] = ""
 os.environ["SECRET_KEY"] = "test-secret"
 
 import pytest  # noqa: E402

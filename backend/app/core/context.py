@@ -25,7 +25,15 @@ _CJK = re.compile(r"[㐀-䶿一-鿿]")
 
 
 class TokenCounter(ABC):
-    """token 计数能力（从外部注入；真实分词器见票据 19）。"""
+    """token 计数能力（从外部注入；真实分词器见票据 19）。
+
+    `label` 是**对外报数的口径名**：空串表示「这不是真实分词器」—— 此时任何 token
+    指标都必须报「不可用」，绝不许拿估算值顶替（spec 0003 的降级诚实性）。
+    `note` 写清为什么没有真实分词器。
+    """
+
+    label: str = ""
+    note: str = ""
 
     @abstractmethod
     def count(self, text: str) -> int: ...
@@ -34,7 +42,7 @@ class TokenCounter(ABC):
 class ApproxTokenCounter(TokenCounter):
     """确定性近似：CJK 按字、其余按空白切词。
 
-    **不是**真实分词器，只用于预算装配的取舍判断；对外报数一律用真实分词器。
+    **不是**真实分词器（`label` 为空），只用于预算装配的取舍判断；对外报数一律用真实分词器。
     """
 
     def count(self, text: str) -> int:

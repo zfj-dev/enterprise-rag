@@ -66,6 +66,9 @@ def build_runtime() -> Runtime:
     parser = ParserRouter()
     retriever = HybridRetriever(vector_store=vector_store, bm25=bm25, embedding=embedding, reranker=reranker)
     semantic_cache = SemanticCache(embedding=embedding, backend="redis" if s.redis_url else "memory")
+    from app.core.tokenizer import setup_token_counter
+
+    token_counter, _ = setup_token_counter(s.tokenizer_model)   # 拿不到就回落估算（只是预算用）
     return Runtime(embedding=embedding, vector_store=vector_store, bm25=bm25,
                    reranker=reranker, llm=llm, chunker=chunker, parser=parser, retriever=retriever,
-                   semantic_cache=semantic_cache)
+                   semantic_cache=semantic_cache, token_counter=token_counter)

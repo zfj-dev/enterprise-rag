@@ -145,3 +145,33 @@ def test_an_existing_db_gains_the_new_columns(tmp_path):
     have = {c["name"] for c in inspect(engine).get_columns("chat_sessions")}
     assert {"summary", "summary_upto"} <= have
     assert set(added) == {"chat_sessions.summary", "chat_sessions.summary_upto"}
+
+
+class LabeledCounter:
+    """带口径的计数器 —— 只有 `label` 非空，token 数字才允许对外报（票 19）。"""
+
+    label = "Qwen/test"
+
+    def count(self, text: str) -> int:
+        return len(text or "")
+
+
+def test_the_trace_reports_tokens_only_with_a_real_tokenizer(client, monkeypatch):
+    """有真实分词器：报压缩前/后 token 与口径；没有：只报「不可用」，不拿估算顶替。"""
+    user, kb, db, rt, s = _setup(client, "sum_tokens")
+    rt.token_counter = LabeledCounter()           # 真实分词器的口径（label 非空）
+    monkeypatch.setattr(chat_service.get_settings(), "context_token_budget", 3)
+    monkeypatch.setattr(chat_service.get_settings(), "context_keep_recent", 1)
+    try:
+        for i in range(1, 6):
+            out = chat_service.answer(db, rt, user, kb, "第%d个问题" % i, "sum-session-tokens")
+        usage = out["trace"]["context_tokens"]
+        assert usage["tokenizer"] == "Qwen/test"
+        assert usage["tokens_before"] > usage["tokens_after"]     # 确实省了
+
+        rt.token_counter = TurnCounter()          # 换回无口径的计数器
+        out2 = chat_service.answer(db, rt, user, kb, "接着问", "sum-session-tokens")
+        usage2 = out2["trace"]["context_tokens"]
+        assert usage2["tokens_before"] is None and usage2["tokenizer"] == ""
+    finally:
+        db.close()

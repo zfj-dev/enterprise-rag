@@ -178,3 +178,24 @@ def test_citation_coverage_shows_when_the_qa_implementation_provides_it():
 def test_citation_coverage_is_absent_when_not_available():
     text = "\n".join(Report(items=[_item(True)]).to_lines())
     assert "引用覆盖率(论断被来源支撑)" not in text     # 拿不到就不出这一行，不拿 0 顶替
+
+
+# ---------- 压缩降幅（票 19）----------
+
+def test_the_compression_reduction_sits_next_to_the_fact_row():
+    """降幅紧挨事实命中 —— 只报降幅不报质量，等于奖励「把上下文砍掉」。"""
+    item = _item(True)
+    item.ctx_before, item.ctx_after, item.ctx_tokenizer = 100, 40, "Qwen/x"
+
+    lines = evaluate_all._target_lines(Report(items=[item]))
+    i = next(k for k, ln in enumerate(lines) if "答案含期望事实" in ln and "实际" in ln)
+
+    assert lines[i + 1].startswith("  上下文压缩降幅(token)")
+    assert "60%" in lines[i + 1] and "Qwen/x" in lines[i + 1]      # 口径跟着数字
+
+
+def test_the_reduction_row_says_unavailable_without_a_real_tokenizer():
+    row = next(ln for ln in evaluate_all._target_lines(Report(items=[_item(True)]))
+               if "上下文压缩降幅" in ln)
+
+    assert "不可用" in row and "%" not in row

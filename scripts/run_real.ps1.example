@@ -22,6 +22,8 @@ $env:HF_HUB_DISABLE_XET = "1"
 
 $env:USE_REAL="true"
 $env:EMBEDDING_PROVIDER="bge"
+# real tokenizer for the same model family (Qwen link); empty = token metric reported unavailable
+$env:TOKENIZER_MODEL="Qwen/Qwen2.5-7B-Instruct"
 $env:RERANKER_PROVIDER="bge"
 $env:LLM_PROVIDER="dashscope"
 $env:EMBEDDING_DEVICE="cuda"

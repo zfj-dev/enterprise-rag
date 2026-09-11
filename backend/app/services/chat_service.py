@@ -400,6 +400,7 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         trace={"query": question, "rewrite": q2, "history_turns": len(plan.kept),
                "context_dropped": plan.dropped, "context_budget": budget,
                "summary_chars": len(plan.summary or ""), "summary_cursor": plan.cursor,
+               "context_tokens": _token_usage(rt, plan, history, budget),
                "enum_cat": cat, "candidates": len(candidates),
                "memory_recalled": len(memories),
                "memory_top_score": memories[0]["score"] if memories else None,
@@ -407,6 +408,27 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                "rerank_ms": timings.get("rerank_ms"),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
+
+
+def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int) -> dict:
+    """压缩前 / 压缩后 token、预算与口径（票 19）。
+
+    **只用真实分词器**报数：没有真实分词器时 token 一律 None（报告写「不可用」），
+    绝不拿字符估算的数字顶替 —— 预算判定可以用估算，对外报的数字不行。
+    只算**历史**那部分（全量历史 -> 摘要 + 保留轮）：记忆两侧都在，算进来只会稀释降幅。
+    """
+    from app.core.prompt import format_turn
+
+    counter = rt.token_counter
+    label = getattr(counter, "label", "")
+    if not label:
+        return {"tokens_before": None, "tokens_after": None, "tokenizer": "", "budget": budget,
+                "note": getattr(counter, "note", "")}
+    count = counter.count
+    before = sum(count(format_turn(t)) for t in history)
+    after = count(plan.summary or "") + sum(count(format_turn(t)) for t in plan.kept)
+    return {"tokens_before": before, "tokens_after": after, "tokenizer": label, "budget": budget,
+            "note": ""}
 
 
 def _save_rolling_summary(db: Session, sess: ChatSession, plan: ContextPlan) -> None:
@@ -522,6 +544,8 @@ def _stream_agent(db: Session, rt: Runtime, prep: Prep, got: dict,
         "retrieval_ms": None, "rerank_ms": None,
         "self_check": checked.get("self_check"),
         "citation_coverage": checked.get("citation_coverage"),
+        # 代理链路不用 prepare 装配的那份上下文 —— 别把它的 token 数字算到代理头上
+        "context_tokens": None,
     })
     yield from _finish(db, rt, prep, answer, cache_hit=False, t_generate=t_generate)
 
@@ -551,6 +575,7 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
     yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
            "answer": answer, "cache_hit": cache_hit,
            "citation_coverage": prep.trace.get("citation_coverage"),
+           "context": prep.trace.get("context_tokens"),   # 压缩前/后 token 与口径（票 19）
            # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
            "latency": {k: prep.trace.get(k) for k in
                        ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}

@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     context_token_budget: int = 3000
     context_compress: bool = True    # 关闭则不做压缩，退回只带最近若干轮原文
     context_keep_recent: int = 3        # 压缩时保留的最近轮数（原文）
+    # 真实分词器（票 19）：填**与生成模型同族**的模型名（Qwen 链路如 Qwen2.5-7B-Instruct）。
+    # 默认**留空** = 不接：演示模式没有"同族"可言，也免得每次启动都去打网下载；
+    # 真实模式由 run_real.ps1 设好。留空/拿不到时分词器指标一律报「不可用」，绝不回退成字数估算。
+    tokenizer_model: str = ""
     context_history_messages: int = 20  # 每次问答从库里加载的历史**消息**条数上限（一轮=2 条）
     # 票 18 已知边界：加载窗口外的轮次压根不进装配，也就不会被滚进摘要 —— 对话涨得比
     # 预算快时，窗口外更早的轮次恢复不了（要更早的历史就只能调大这个窗口）
