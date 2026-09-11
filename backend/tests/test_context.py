@@ -229,10 +229,9 @@ def test_load_history_pairs_turns_written_in_the_same_second(client):
             db.add(ChatMessage(session_id=sess.id, role="assistant", content=f"答{i}"))
         db.commit()
 
-        assert _load_history(db, sess.id) == [
-            {"user": "问0", "assistant": "答0"},
-            {"user": "问1", "assistant": "答1"},
-            {"user": "问2", "assistant": "答2"},
-        ]
+        got = _load_history(db, sess.id)
+        assert [(t["user"], t["assistant"]) for t in got] == [
+            ("问0", "答0"), ("问1", "答1"), ("问2", "答2")]
+        assert all(len(t["ids"]) == 2 for t in got)      # 每轮带上它那两条消息的 id（票 18 的游标）
     finally:
         db.close()

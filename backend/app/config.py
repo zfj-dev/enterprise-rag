@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     context_compress: bool = True    # 关闭则不做压缩，退回只带最近若干轮原文
     context_keep_recent: int = 3        # 压缩时保留的最近轮数（原文）
     context_history_messages: int = 20  # 每次问答从库里加载的历史**消息**条数上限（一轮=2 条）
+    # 票 18 已知边界：加载窗口外的轮次压根不进装配，也就不会被滚进摘要 —— 对话涨得比
+    # 预算快时，窗口外更早的轮次恢复不了（要更早的历史就只能调大这个窗口）
     fake_llm_delay: float = 0.0  # FakeLLM 每块延时(秒)，默认0不延时；设>0 便于演示/测试肉眼观察流式与"停止"
 
     chunk_parent_size: int = 512

@@ -41,6 +41,9 @@ _root.setLevel(logging.WARNING)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
+    from app.db.migrate import ensure_sqlite_columns
+
+    ensure_sqlite_columns(engine)     # 已有库补上新增列（create_all 只会建表）
     _seed_admin()
     _reindex()
     yield

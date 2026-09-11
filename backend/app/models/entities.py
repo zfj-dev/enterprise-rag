@@ -114,6 +114,10 @@ class ChatSession(Base):
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     kb_id: Mapped[str] = mapped_column(String(32), index=True)
     title: Mapped[str] = mapped_column(String(256), default="")
+    # 滚动摘要（票 18）：更早的对话压成一段，随会话推进增量更新。
+    # summary_upto = 已摘要到的最后一条消息 id（游标）—— 刷新/重启后靠它接着滚，不从头再来。
+    summary: Mapped[str] = mapped_column(Text, default="")
+    summary_upto: Mapped[str | None] = mapped_column(String(32), nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_monotonic_utc_now, server_default=func.now())
 
 

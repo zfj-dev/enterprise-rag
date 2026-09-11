@@ -78,7 +78,9 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
 
 
 def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
-    """取最近几轮的 {user, assistant} 对，用于多轮指代消解与上下文。
+    """取最近几轮的 {user, assistant, ids} 对，用于多轮指代消解与上下文。
+
+    `ids` 是这一轮包含的消息 id —— 滚动摘要的游标按「最后一条已摘要消息的 id」记（票 18）。
 
     依赖 created_at 严格递增（entities._monotonic_utc_now）：sqlite 对相等的排序键
     ASC/DESC 都按 rowid 返回、DESC 并不翻转，同秒消息曾在此整体错位、配对张冠李戴。
@@ -93,9 +95,10 @@ def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
         if m.role == "user":
             if cur:
                 pairs.append(cur)
-            cur = {"user": m.content, "assistant": ""}
+            cur = {"user": m.content, "assistant": "", "ids": [m.id]}
         elif m.role == "assistant" and cur is not None:
             cur["assistant"] = m.content
+            cur["ids"].append(m.id)
     if cur:
         pairs.append(cur)
     return pairs
@@ -345,7 +348,10 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         plan = assemble_context(history, budget=max(0, budget),
                                 keep_recent=s.context_keep_recent,
                                 count_tokens=rt.token_counter.count,
-                                summarize=rt.context_summarizer_factory(llm).summarize)
+                                summarize=rt.context_summarizer_factory(llm).summarize,
+                                # 会话上的滚动摘要（票 18）：只滚未覆盖的尾部，游标随之前进
+                                previous=sess.summary or None, previous_upto=sess.summary_upto)
+        _save_rolling_summary(db, sess, plan)
     else:   # 关闭压缩：直接透传全部已加载历史
         plan = ContextPlan(summary=None, kept=history)
     timings: dict = {}
@@ -393,6 +399,7 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         candidates=candidates, sources=to_sources(candidates), prompt=prompt, llm=llm, _ccit=ccit,
         trace={"query": question, "rewrite": q2, "history_turns": len(plan.kept),
                "context_dropped": plan.dropped, "context_budget": budget,
+               "summary_chars": len(plan.summary or ""), "summary_cursor": plan.cursor,
                "enum_cat": cat, "candidates": len(candidates),
                "memory_recalled": len(memories),
                "memory_top_score": memories[0]["score"] if memories else None,
@@ -400,6 +407,23 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                "rerank_ms": timings.get("rerank_ms"),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
+
+
+def _save_rolling_summary(db: Session, sess: ChatSession, plan: ContextPlan) -> None:
+    """把这次的摘要与游标写回会话（票 18）—— 下次请求（哪怕换了进程）从这儿接着滚。
+
+    只在**真的变了**时写：复用旧摘要的那次不该产生写操作。
+
+    同一会话的两次并发请求会各自读到同一份旧摘要、各滚一次 —— 后写的那个游标可能更旧，
+    代价是多花一次摘要调用（不丢内容：新轮次仍在窗口里，下次会带着旧摘要再并入一遍）。
+    会话级串行是更根本的解法，留给需要时再做。
+    """
+    summary = plan.summary or ""
+    if summary == (sess.summary or "") and plan.cursor == sess.summary_upto:
+        return
+    sess.summary = summary
+    sess.summary_upto = plan.cursor
+    db.commit()
 
 
 def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
