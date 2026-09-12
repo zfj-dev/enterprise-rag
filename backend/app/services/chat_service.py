@@ -428,6 +428,11 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
                "memory_top_score": memories[0]["score"] if memories else None,
                "retrieval_ms": timings.get("retrieval_ms"),
                "rerank_ms": timings.get("rerank_ms"),
+               # 重排是否降级（#48）：报告要靠它说清这次数字是不是在 RRF 原顺序上跑出来的
+               # 没有重排时这里是 None（**不知道**），不是 False（**已断定没降级**）
+               "rerank_degraded": timings.get("rerank_degraded"),
+               "rerank_note": timings.get("rerank_note"),
+               "rerank_unscored": timings.get("rerank_unscored"),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
 
@@ -601,6 +606,8 @@ def _stream_agent(db: Session, rt: Runtime, prep: Prep, got: dict,
         "agent_ms": latency.get("total_ms"),
         # 检索/重排耗时来自 prepare 那次**没被采纳**的检索 —— 置空，免得污染延迟分桶
         "retrieval_ms": None, "rerank_ms": None,
+        # 那次检索没被采纳，它的重排结论同样不该留着（否则报告会把没用的降级算进来）
+        "rerank_degraded": None, "rerank_note": None, "rerank_unscored": None,
         "self_check": checked.get("self_check"),
         "citation_coverage": checked.get("citation_coverage"),
         # 代理循环里收掉了几条已经用过的工具结果（票 21）
@@ -643,6 +650,11 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
            "usage": prep.trace.get("usage"),              # 本次用量的 token 与口径来源（票 27）
            "agent_skipped": prep.trace.get("agent_skipped"),   # 代理为何没用上（票 34）
            "agent": bool(prep.trace.get("agent")),          # 这次是否真的走了代理（票 37）
+           # 这次的重排是否降级成了 RRF 原顺序（票 39）—— 不要把降级说成「重排已跑」
+           # degraded 可能是 None = 不知道（这次压根没重排）—— 不要写成 false 冒充「没降级」
+           "rerank": {"degraded": prep.trace.get("rerank_degraded"),
+                      "note": prep.trace.get("rerank_note") or "",
+                      "unscored": prep.trace.get("rerank_unscored") or 0},
            # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
            "latency": {k: prep.trace.get(k) for k in
                        ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}

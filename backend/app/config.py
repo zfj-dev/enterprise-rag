@@ -53,6 +53,10 @@ class Settings(BaseSettings):
 
     reranker_model: str = "BAAI/bge-reranker-large"
     reranker_enabled: bool = True
+    # 严格模式（**评测用**）：重排不可达时**直接抛**，不降级为 RRF 原顺序。
+    # 线上保持默认 false —— 重排挂掉不该把问答也打断；但评测要的是「这段没跑成」，
+    # 不是把 RRF 顺序的数字说成「重排已跑」（票 39 / #48）。
+    rerank_strict: bool = False
     reranker_provider: Literal["fake", "bge", "api", "siliconflow"] = "fake"
     reranker_device: str = "cuda"
     # 重排走外部服务时的站点，同上

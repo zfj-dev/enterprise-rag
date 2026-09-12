@@ -18,13 +18,20 @@ def _item(fact: bool) -> ItemResult:
 
 
 def _stub_sections(monkeypatch, tmp_path):
-    """把三段独立脚本换成写死的小报告，只验拼装。"""
+    """把三段独立脚本换成写死的小报告，只验拼装。
+
+    报告由**这段自己的 `main()` 写**（真脚本就是这样）—— 一页报告开跑前会先清掉上一轮的
+    旧报告（票 39 / #48），所以夹具不能靠预先放一个文件。
+    """
     for mod, name in ((evaluate_retrieval, "retrieval"), (evaluate_rgb, "rgb"),
                       (evaluate_latency, "latency")):
         path = tmp_path / ("%s.log" % name)
-        path.write_text("子报告 %s 的数字与口径\n" % name, encoding="utf-8")
         monkeypatch.setattr(mod, "REPORT", str(path))
-        monkeypatch.setattr(mod, "main", lambda: None)
+
+        def main(p=path, n=name):
+            p.write_text("子报告 %s 的数字与口径\n" % n, encoding="utf-8")
+
+        monkeypatch.setattr(mod, "main", main)
 
 
 def _run(monkeypatch, tmp_path, out_name="summary.log"):
@@ -211,3 +218,23 @@ def test_a_working_tokenizer_with_nothing_to_compress_is_not_called_missing():
 
     assert "不适用" in row and "Qwen/x" in row
     assert "没有真实分词器" not in row
+
+
+def test_a_stale_report_from_a_previous_run_is_not_left_behind(tmp_path, monkeypatch):
+    """某段跑不动时，摘要会写「未跑」—— 但磁盘上**上一轮**的报告也必须清掉。
+
+    否则打开那个文件看到的是一批正常数字，读者根本不会知道这一段这次没跑成（票 39 / #48）。
+    """
+    stale = tmp_path / "rgb.log"
+    stale.write_text("上一轮的正常数字\n", encoding="utf-8")
+    monkeypatch.setattr(evaluate_rgb, "REPORT", str(stale))
+
+    def boom():
+        raise RuntimeError("数据没在本地")
+
+    monkeypatch.setattr(evaluate_rgb, "main", boom)
+
+    out = evaluate_all._section("RGB 中文四能力（离线）", evaluate_rgb, str(stale))
+
+    assert any("未跑" in line for line in out)
+    assert not stale.exists()          # 旧的那份不许留着骗人

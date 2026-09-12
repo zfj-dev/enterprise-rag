@@ -55,12 +55,15 @@ def test_parse_sse_collects_answer_and_sources():
     ])
     got = evaluate._parse_sse(body)
     assert got == {"answer": "答案", "sources": [{"text": "甲", "page": 1}],
-                   "citation_coverage": None, "context": None}
+                   "citation_coverage": None, "context": None,
+                   # 服务端没给 rerank 字段 = **不知道**，不是「没降级」
+                   "rerank_degraded": None, "rerank_unscored": 0}
 
 
 def test_parse_sse_ignores_malformed_and_non_data_lines():
     assert evaluate._parse_sse("data: not-json\n\n: keep-alive\n") == {
-        "answer": "", "sources": [], "citation_coverage": None, "context": None}
+        "answer": "", "sources": [], "citation_coverage": None, "context": None,
+        "rerank_degraded": None, "rerank_unscored": 0}
 
 
 def test_answer_fn_asks_the_running_service():
@@ -131,3 +134,22 @@ def test_the_multi_turn_run_keeps_every_question_in_one_session():
     c2 = C()
     evaluate._answer_fn(c2, "kb1", {})("问")
     assert "session_id" not in c2.calls[0]
+
+
+def test_parse_sse_notices_a_degraded_rerank():
+    """降级不打断回答（对），但报告要知道这次没重排 —— 别把 RRF 顺序的数字说成「重排已跑」（#48）。"""
+    body = "\n".join([
+        'data: {"type": "delta", "text": "答"}',
+        "",
+        'data: {"type": "done", "rerank": {"degraded": true, "note": "不可达"}}',
+    ])
+    assert evaluate._parse_sse(body)["rerank_degraded"] is True
+
+
+def test_parse_sse_treats_a_healthy_rerank_as_not_degraded():
+    body = "\n".join([
+        'data: {"type": "delta", "text": "答"}',
+        "",
+        'data: {"type": "done", "rerank": {"degraded": false, "note": ""}}',
+    ])
+    assert evaluate._parse_sse(body)["rerank_degraded"] is False

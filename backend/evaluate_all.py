@@ -41,7 +41,7 @@ def _config_snapshot() -> list:
     keys = ("use_real", "llm_provider", "llm_model", "embedding_provider", "embedding_model",
             "embedding_device", "reranker_provider", "reranker_device", "vector_store",
             "redis_url", "parser_use_docling", "semantic_cache", "memory_enabled",
-            "agent_enabled", "agent_max_steps",
+            "agent_enabled", "agent_max_steps", "rerank_strict",
             "context_compress", "context_token_budget", "retrieval_top_k", "rerank_top_k",
             "rrf_k", "min_relevance", "chunk_child_size", "chunk_parent_size",
             "ragas_judge_model", "ragas_judge_temperature", "tokenizer_model")
@@ -98,6 +98,13 @@ def _target_lines(report) -> list:
 def _section(name: str, module, log_path: str) -> list:
     """跑的是一段独立脚本，收的是它自己落盘的报告 —— 口径只在那一处。"""
     out = ["", "=== %s ===" % name]
+    # 先清掉上一次的报告：这段万一抛错，摘要会写「未跑」，但磁盘上旧的那份还在 ——
+    # 读起来跟正常结果一样。宁可没有，也不要留一份会骗人的（票 39 / #48）。
+    try:
+        if os.path.isfile(log_path):
+            os.remove(log_path)
+    except OSError:
+        pass
     try:
         module.main()
     except Exception as e:   # noqa: BLE001 —— 这段没跑成要明说，不能当没这回事
@@ -133,7 +140,9 @@ def main() -> None:
             gen = ["", "=== 生成层指标 ===",
                    "黄金集: %s" % evaluate.GOLDEN, "被评文档: %s" % evaluate.DOC,
                    evaluate._upload_line(upload),      # 同一份格式只在 evaluate.py 里写
-                   ""]
+                   ]
+            gen.extend(evaluate._rerank_line(report))   # 同一份文案只在 evaluate.py 里写
+            gen.append("")
             gen.extend(report.to_lines())
         except Exception as e:   # noqa: BLE001 —— 服务没起也不该让整页报告消失
             gen = ["", "=== 生成层指标 ===",

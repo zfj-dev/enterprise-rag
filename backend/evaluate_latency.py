@@ -49,6 +49,7 @@ def _one(client: httpx.Client, headers: dict, kb_id: str, question: str) -> dict
     t0 = time.perf_counter()
     ttft = None
     latency: dict = {}
+    rerank: dict = {}       # 这次的重排降级没降级（票 39 / #48）
     status = 200
     with client.stream("POST", "/api/v1/chat/stream", headers=headers,
                        json={"kb_id": kb_id, "question": question, "stream": True}) as r:
@@ -69,9 +70,12 @@ def _one(client: httpx.Client, headers: dict, kb_id: str, question: str) -> dict
                 ttft = (time.perf_counter() - t0) * 1000
             elif ev.get("type") == "done":
                 latency = ev.get("latency") or {}
+                rerank = ev.get("rerank") or {}
     # 分段名只认核心的 LATENCY_STAGES（线上字段名统一是 <段名>_ms），别在这里再抄一份
     sample = {stage: latency.get(stage + "_ms") for stage in LATENCY_STAGES}
     sample["ttft"] = ttft if ttft is not None else latency.get("ttft_ms")
+    # 降级时下面那个「重排」耗时是**因为没重排**才有的数字 —— 要能标出来（票 39 / #48）
+    sample["rerank_degraded"] = rerank.get("degraded")
     sample["status"] = status
     return sample
 
@@ -131,6 +135,11 @@ def main() -> None:
     if blocked:
         lines += ["被每用户并发上限挡住了 %d 条（HTTP 429）—— 本次数字不完整。" % len(blocked),
                   "请把服务端 max_concurrent_streams_per_user 调高（如 8）后重启再跑。", ""]
+
+    degraded = [s for s in ok if s.get("rerank_degraded") is True]
+    if degraded:
+        lines += ["**有 %d/%d 条请求的重排降级为 RRF 原顺序** —— 下面那一行「重排」耗时"
+                  "是没重排时的数字，不能当成重排性能看。" % (len(degraded), len(ok)), ""]
 
     metrics = LatencyMetrics(concurrent=CONCURRENCY, rounds=ROUNDS, samples=ok, note=NOTE)
     lines.extend(metrics.to_lines())
