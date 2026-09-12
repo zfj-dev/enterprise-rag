@@ -176,9 +176,6 @@
   textarea#question{width:100%;border:none;background:transparent;resize:none;max-height:144px;padding:4px 0;font-size:15px;line-height:1.6;outline:none}
   .input-toolbar{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
   .tool-left,.tool-right{display:flex;align-items:center;gap:6px}
-  .tool-btn{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;background:var(--surface-muted);color:var(--text-tertiary);font-size:12px}
-  .tool-btn:hover{background:var(--surface-hover);color:var(--text-primary)}
-  .tool-btn svg{width:15px;height:15px}
   .plus-btn{width:34px;height:34px;border-radius:50%;background:var(--surface-muted);color:var(--text-tertiary);display:flex;align-items:center;justify-content:center;font-size:18px}
   .plus-btn:hover{background:var(--surface-hover)}
   .send-btn{width:34px;height:34px;border-radius:10px;background:var(--text-primary);color:var(--surface);display:flex;align-items:center;justify-content:center}
@@ -351,8 +348,6 @@
     <div class="side-nav">
       <div class="nav-item" onclick="openDocLib()">📚 文档库</div>
       <div class="nav-item" onclick="openByok()">🔑 自带模型</div>
-      <div class="nav-item">🗂 知识库设置</div>
-      <div class="nav-item">📝 提示词模板</div>
     </div>
     <div class="side-divider"></div>
     <div style="padding:4px 16px 2px"><input id="sessionSearch" placeholder="搜索对话…" oninput="renderSessions()" style="width:100%;font-size:12px;padding:6px 10px"></div>
@@ -398,13 +393,8 @@
           <div class="input-toolbar">
             <div class="tool-left">
               <button class="plus-btn" id="plusBtn" onclick="togglePlusMenu()">＋</button>
-              <button class="tool-btn" id="deepBtn" onclick="toggleDeep()">⚡ 深度思考</button>
-              <button class="tool-btn" id="searchBtn" onclick="toggleSearch()">🔍 联网搜索</button>
             </div>
             <div class="tool-right">
-              <select id="modelSel" style="width:auto;font-size:12px;padding:4px 8px;border-radius:8px" title="模型">
-                <option>qwen-plus</option><option>deepseek-chat</option><option>演示模式</option>
-              </select>
               <button class="send-btn" id="stopBtn" onclick="stopCurrent()" style="display:none;background:var(--danger);color:#fff" title="停止当前输出">■</button>
               <button class="send-btn" id="sendBtn" onclick="ask()" disabled>↑</button>
             </div>
@@ -443,7 +433,7 @@ window.onerror=function(msg,src,line,col,err){
   return false;
 };
 let TOKEN=localStorage.getItem('_rag_tok')||'';
-let KBS=[],DOCS=[],SESSIONS=[],KB=null,SESSION=null,STREAMING=false,DEEP=false,SEARCH=false,ACTIVE_STREAMS=new Map(),STREAM_KEY=0,conversations=new Map(),activeConversationId=null;
+let KBS=[],DOCS=[],SESSIONS=[],KB=null,SESSION=null,STREAMING=false,ACTIVE_STREAMS=new Map(),STREAM_KEY=0,conversations=new Map(),activeConversationId=null;
 let ATTACHED=null,PLUS_MENU=null,MENU=null,lastMsgId=null,MULTI=false,MULTI_SEL={},SEL_DOC=null;
 let AUTH_BUSY=false;
 function setAuthBusy(busy){AUTH_BUSY=busy;const lb=document.querySelector('#loginCard .btn-primary');const rb=document.querySelector('#loginCard .btn-ghost');if(lb){lb.disabled=busy;lb.textContent=busy?'登录中…':'登录'}if(rb){rb.disabled=busy;rb.textContent=busy?'注册中…':'注册'}}
@@ -544,9 +534,6 @@ function initTheme(){const t=localStorage.getItem('_rag_theme')||'light';documen
 function toggleSidebar(open){const sb=document.getElementById('sidebar'),mask=document.getElementById('mask');const narrow=window.innerWidth<=1279;let want;if(typeof open==='boolean')want=open;else want=!(narrow?sb.classList.contains('open'):!sb.classList.contains('closed'));if(narrow){sb.classList.toggle('open',want);mask.classList.toggle('show',want)}else{sb.classList.toggle('closed',!want)}}
 function updateRpFab(){const f=document.getElementById('rpFab');if(f)f.style.display=document.getElementById('rightPanel').classList.contains('closed')?'flex':'none'}
 function togglePanel(open){const rp=document.getElementById('rightPanel');rp.classList.toggle('open',open);rp.classList.toggle('closed',!open);updateRpFab();positionRpResize()}
-function toggleDeep(){DEEP=!DEEP;document.getElementById('deepBtn').style.background=DEEP?'var(--accent-weak)':'';document.getElementById('deepBtn').style.color=DEEP?'var(--accent)':''}
-function toggleSearch(){SEARCH=!SEARCH;document.getElementById('searchBtn').style.background=SEARCH?'var(--accent-weak)':'';document.getElementById('searchBtn').style.color=SEARCH?'var(--accent)':''}
-function toggleMode(){const l=document.getElementById('modeLabel');l.textContent=l.textContent==='/ 进阶'?'/ 快速':'/ 进阶'}
 
 /* 自定义滑块 */
 function initSliders(){
@@ -999,7 +986,7 @@ function togglePlusMenu(){
   const b=document.getElementById('plusBtn');const r=b.getBoundingClientRect();
   const m=document.createElement('div');m.className='menu';
   m.style.bottom=(window.innerHeight-r.top+6)+'px';m.style.left=Math.max(8,r.left)+'px';
-  m.innerHTML=`<div class="menu-item">📎 文件和图片 <span style="margin-left:auto">›</span><div class="submenu"><div class="menu-item" onclick="pickFile();closePlus()">⬆ 上传本地文件</div><div class="menu-item" onclick="togglePanel(true);closePlus()">📚 从文档库选择</div></div></div><div class="menu-item" onclick="toggleSearch();closePlus()">🌐 联网搜索</div><div class="menu-item" onclick="closePlus()">× 关闭</div>`;
+  m.innerHTML=`<div class="menu-item">📎 文件和图片 <span style="margin-left:auto">›</span><div class="submenu"><div class="menu-item" onclick="pickFile();closePlus()">⬆ 上传本地文件</div><div class="menu-item" onclick="togglePanel(true);closePlus()">📚 从文档库选择</div></div></div><div class="menu-item" onclick="closePlus()">× 关闭</div>`;
   document.body.appendChild(m);PLUS_MENU=m;
 }
 document.addEventListener('click',e=>{
