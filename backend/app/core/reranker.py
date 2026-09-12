@@ -2,6 +2,8 @@
 
 - FakeReranker: 词重叠分数（演示/测试）。
 - BgeReranker:  真实 bge-reranker-large（本地 GPU，需 torch + transformers；宿主跑）。
+- ApiReranker:  自建推理节点（协议自研，需要自己有 GPU 机器）。
+- SiliconFlowReranker: 托管重排（Cohere 兼容，**无 GPU 也能跑**）。
 """
 from __future__ import annotations
 
@@ -9,11 +11,26 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Sequence
 
-from app.config import get_settings
+from app.config import SILICONFLOW_BASE, get_settings
 
 logger = logging.getLogger(__name__)
 
 _RELEVANCE_OFFSET = 0.15
+
+
+def _apply_scores(candidates: Sequence[dict], results: Sequence[dict]) -> list[dict]:
+    """把 `{index, relevance_score}` 的结果落回候选并排序 —— 自建节点与托管服务共用一份。
+
+    没被评分的候选记 **0 分**（不猜它其实相关），与「拿不到就不报数」一致。
+    """
+    score = {res["index"]: float(res["relevance_score"]) for res in results if "index" in res}
+    out = []
+    for i, c in enumerate(candidates):
+        cc = dict(c)
+        cc["rank_score"] = score.get(i, 0.0)
+        out.append(cc)
+    out.sort(key=lambda x: x["rank_score"], reverse=True)
+    return out
 
 
 class Reranker(ABC):
@@ -102,14 +119,44 @@ class ApiReranker(Reranker):
         except Exception as e:
             logger.warning("rerank 节点不可达,降级 RRF 顺序: %s", e)
             return list(candidates)  # 已按 RRF 融合排序
-        score = {res["index"]: float(res["relevance_score"]) for res in results if "index" in res}
-        out = []
-        for i, c in enumerate(candidates):
-            cc = dict(c)
-            cc["rank_score"] = score.get(i, 0.0)
-            out.append(cc)
-        out.sort(key=lambda x: x["rank_score"], reverse=True)
-        return out
+        return _apply_scores(candidates, results)
+
+
+class SiliconFlowReranker(Reranker):
+    """托管重排（SiliconFlow；Cohere 兼容的扁平 `POST {base}/rerank`）。
+
+    比 `api` 多了两样：请求体带 `model`，鉴权走 `Authorization: Bearer`。
+    **失败降级为 RRF 原顺序**（与 `api` 一致）—— 重排挂掉不该把回答也打断。
+    """
+
+    def __init__(self, base: str | None = None, api_key: str | None = None,
+                 model: str | None = None):
+        import httpx
+
+        s = get_settings()
+        self._httpx = httpx
+        self.base = (base or s.rerank_api_base or SILICONFLOW_BASE).rstrip("/")
+        self.api_key = api_key or s.rerank_api_key or ""
+        self.model = model or s.reranker_model
+
+    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
+        if not candidates:
+            return list(candidates)
+        docs = [str(c.get("content", "")) for c in candidates]
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = "Bearer %s" % self.api_key
+        try:
+            with self._httpx.Client(timeout=60) as client:
+                r = client.post("%s/rerank" % self.base,
+                                json={"model": self.model, "query": query,
+                                      "documents": docs, "top_n": len(docs)}, headers=headers)
+                r.raise_for_status()
+                results = r.json().get("results", [])
+        except Exception as e:
+            logger.warning("托管重排不可达，降级 RRF 顺序：%s", e)
+            return list(candidates)          # 已按 RRF 融合排序
+        return _apply_scores(candidates, results)
 
 
 def get_reranker(provider: str | None = None) -> Reranker:
@@ -118,4 +165,6 @@ def get_reranker(provider: str | None = None) -> Reranker:
         return BgeReranker()
     if provider == "api":
         return ApiReranker()
+    if provider == "siliconflow":
+        return SiliconFlowReranker()
     return FakeReranker()

@@ -16,6 +16,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 
+# 托管嵌入/重排的默认站点（SiliconFlow）。两者共用一份，改一家只需改这里；
+# 要接别家 OpenAI 兼容的托管服务，用 EMBEDDING_API_BASE / RERANK_API_BASE 覆盖即可。
+SILICONFLOW_BASE = "https://api.siliconflow.cn/v1"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -38,17 +43,19 @@ class Settings(BaseSettings):
 
     embedding_model: str = "BAAI/bge-large-zh-v1.5"
     embedding_dim: int = 1024
-    embedding_provider: Literal["fake", "bge", "api"] = "fake"
+    embedding_provider: Literal["fake", "bge", "api", "siliconflow"] = "fake"
     embedding_device: str = "cuda"  # bge 用；无 GPU 会自动回落 cpu
-    # embed via 推理节点(私有云 GPU), 替代本地 bge
+    # 嵌入走外部服务时的站点：自建推理节点(api) 与托管(siliconflow) 都用它；
+    # 留空则用托管默认站点
     embedding_api_base: str | None = None
     embedding_api_key: str | None = None
     embedding_batch_size: int = 64
 
     reranker_model: str = "BAAI/bge-reranker-large"
     reranker_enabled: bool = True
-    reranker_provider: Literal["fake", "bge", "api"] = "fake"
+    reranker_provider: Literal["fake", "bge", "api", "siliconflow"] = "fake"
     reranker_device: str = "cuda"
+    # 重排走外部服务时的站点，同上
     rerank_api_base: str | None = None
     rerank_api_key: str | None = None
 
@@ -150,7 +157,7 @@ class Settings(BaseSettings):
         if self.llm_provider == "deepseek":
             return self.llm_base_url or "https://api.deepseek.com/v1"
         if self.llm_provider == "siliconflow":
-            return self.llm_base_url or "https://api.siliconflow.cn/v1"
+            return self.llm_base_url or SILICONFLOW_BASE
         if self.llm_provider == "dashscope":
             return self.llm_base_url or "https://dashscope.aliyuncs.com/compatible-mode/v1"
         return self.llm_base_url or "https://api.openai.com/v1"
