@@ -48,7 +48,11 @@ python -m uvicorn app.main:app --reload --port 8000
 形态之间只切环境变量（见 [.env.example](.env.example)）：
 `USE_REAL` / `EMBEDDING_PROVIDER` / `RERANKER_PROVIDER` / `LLM_PROVIDER` / `VECTOR_STORE`。
 
-Provider 取值：`EMBEDDING_PROVIDER` = `fake` | `bge` | `api`；`LLM_PROVIDER` = `fake` | `deepseek` | `siliconflow` | `dashscope` | `openai`；`VECTOR_STORE` = `inmemory` | `pgvector`。
+Provider 取值：`EMBEDDING_PROVIDER` / `RERANKER_PROVIDER` = `fake` | `bge`（本地 GPU）| `api`（自建推理节点）| `siliconflow`（托管，**无 GPU 也能跑真实检索**）；`LLM_PROVIDER` = `fake` | `deepseek` | `siliconflow` | `dashscope` | `openai`；`VECTOR_STORE` = `inmemory` | `pgvector`。
+
+> **换嵌入模型 = 换口径**：托管那档默认配 `BAAI/bge-m3` + `BAAI/bge-reranker-v2-m3`（1024 维，与 `EMBEDDING_DIM` 默认值一致）。
+> 换了模型之后，**历史报告的检索数字不能直接比**（报告里的配置快照会记下用的哪个），且**已入库的文档向量空间变了、需要重传**。
+> 嵌入返回空向量或维度与 `EMBEDDING_DIM` 不符时**直接报错**，不会静默降级 —— 那会让内容悄悄检索不到。
 
 ---
 
