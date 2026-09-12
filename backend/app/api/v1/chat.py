@@ -79,7 +79,9 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
 
     def gen():
         try:
-            for ev in stream_answer(db, rt, prep):
+            # 「深度思考」按次生效：allow_agent 的语义不变（「这次要不要代理」），
+            # 只是默认值从 True 挪到了 HTTP 层由用户的 deep 决定（票 37 / #45）。
+            for ev in stream_answer(db, rt, prep, allow_agent=body.deep):
                 # 事件里可能含 date 之外字段，直接序列化整条
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"

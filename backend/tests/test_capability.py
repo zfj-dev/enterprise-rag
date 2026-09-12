@@ -229,7 +229,7 @@ def test_an_unsupported_model_degrades_to_a_single_step_answer(client, monkeypat
         monkeypatch.setattr(conf, "agent_enabled", True)
         _stub_agent(monkeypatch, called)
 
-        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？")
+        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？", allow_agent=True)
     finally:
         db.close()
 
@@ -250,7 +250,7 @@ def test_a_supported_model_still_runs_the_agent(client, monkeypatch):
         monkeypatch.setattr(conf, "agent_enabled", True)
         _stub_agent(monkeypatch, called)
 
-        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？")
+        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？", allow_agent=True)
     finally:
         db.close()
 
@@ -271,7 +271,7 @@ def test_a_user_without_their_own_model_is_not_probed(client, monkeypatch):
         monkeypatch.setattr(conf, "agent_enabled", True)
         _stub_agent(monkeypatch, called)
 
-        chat_service.answer(db, rt, user, kb, "文档里写了什么？")
+        chat_service.answer(db, rt, user, kb, "文档里写了什么？", allow_agent=True)
     finally:
         db.close()
 
@@ -284,7 +284,7 @@ def test_the_done_event_says_why_the_agent_was_skipped(client, monkeypatch):
     monkeypatch.setattr(conf, "agent_enabled", True)
 
     r = client.post("/api/v1/chat/stream", headers=H,
-                    json={"kb_id": kb, "question": "问", "stream": True})
+                    json={"kb_id": kb, "question": "问", "stream": True, "deep": True})
     done = sse_events(r.text)[-1]
 
     assert done["type"] == "done"

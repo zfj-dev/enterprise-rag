@@ -35,7 +35,7 @@ module.exports = defineConfig({
     // 已登录场景：会话 / token / BYOK（用 setup 产出的 storageState 作为起始登录态）
     {
       name: 'auth',
-      testMatch: /session\.spec\.js|byok\.spec\.js/,
+      testMatch: /session\.spec\.js|byok\.spec\.js|deep-thinking\.spec\.js/,
       dependencies: ['setup'],
       use: {
         ...devices['Desktop Chrome'],

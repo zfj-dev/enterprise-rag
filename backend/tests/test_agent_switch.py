@@ -2,39 +2,11 @@
 from __future__ import annotations
 
 from app.services import chat_service
-from tests.helpers import register_and_kb, sse_events, wait_until
-
-DOC_TEXT = "比亚迪2025年营业收入为803.96亿元。"
-
-_AGENT_RESULT = {
-    "answer": "代理给的答案：803.96 亿元。",
-    "sources": [{"chunk_id": "c1", "doc_name": "年报.pdf", "page": 2, "text": "营收803.96亿元"}],
-    "steps": [{"tool": "KbRetrieve", "arguments": {"query": "营收"}, "summary": "{}", "ms": 1.0,
-               "ok": True}],
-    "latency": {"total_ms": 12.0, "steps_ms": [1.0]},
-    "stopped": "answered",
-    "trace": {"self_check": "passed_with_citation", "citation_coverage": 1.0},
-}
-
-
-def _seeded(client, name: str):
-    """注册 + 建库 + 传文档并等入库，返回 (H, kb_id, user, db, rt)。"""
-    from app.api.deps import get_runtime
-    from app.db.session import SessionLocal
-    from app.models.entities import User
-
-    H, uid, kb = register_and_kb(client, name)
-    up = client.post("/api/v1/documents?kb_id=%s" % kb, headers=H,
-                     files={"file": ("annual.txt", DOC_TEXT, "text/plain")}).json()
-    assert wait_until(lambda: client.get("/api/v1/documents/%s" % up["id"], headers=H)
-                      .json().get("status") in ("indexed", "failed")), "文档未入库"
-    db = SessionLocal()
-    user = db.query(User).filter(User.id == uid).first()
-    return H, kb, user, db, get_runtime()
+from tests.helpers import AGENT_RESULT as _AGENT_RESULT, seed_chat_doc as _seeded, sse_events
 
 
 def test_switch_is_off_by_default_and_the_agent_is_never_built(client, monkeypatch):
-    """默认关：代理那套一行都不跑 —— 既有行为与既有测试都不受影响。"""
+    """默认关：不主动要代理（`allow_agent` 默认 False），代理那套一行都不跑。"""
     called = []
     H, kb, user, db, rt = _seeded(client, "switch_off")
     try:
@@ -54,7 +26,8 @@ def test_switch_on_routes_the_answer_through_the_agent(client, monkeypatch):
     try:
         monkeypatch.setattr(chat_service.get_settings(), "agent_enabled", True)
         monkeypatch.setattr(chat_service, "_run_agent_for", lambda *a, **k: dict(_AGENT_RESULT))
-        out = chat_service.answer(db, rt, user, kb, "营收多少？")
+        # 显式要代理：默认已经是 False（票 37 起「默认关」在服务层同样成立）
+        out = chat_service.answer(db, rt, user, kb, "营收多少？", allow_agent=True)
     finally:
         db.close()
 
@@ -67,14 +40,17 @@ def test_switch_on_routes_the_answer_through_the_agent(client, monkeypatch):
 
 
 def test_the_sse_event_contract_is_unchanged_on_the_agent_path(client, monkeypatch):
-    """前端不用改：仍是 sources -> delta -> done，字段一个不少。"""
+    """前端不用改：仍是 sources -> delta -> done，字段一个不少。
+
+    票 37 起走代理要**按次**勾选（`deep: true`）：全局开关只表示这个部署允许用代理。
+    """
     H, kb, user, db, rt = _seeded(client, "switch_sse")
     db.close()
     monkeypatch.setattr(chat_service.get_settings(), "agent_enabled", True)
     monkeypatch.setattr(chat_service, "_run_agent_for", lambda *a, **k: dict(_AGENT_RESULT))
 
     r = client.post("/api/v1/chat/stream", headers=H,
-                    json={"kb_id": kb, "question": "营收多少？", "stream": True})
+                    json={"kb_id": kb, "question": "营收多少？", "stream": True, "deep": True})
     events = sse_events(r.text)
     kinds = [e["type"] for e in events]
 
@@ -93,7 +69,7 @@ def test_an_agent_failure_falls_back_instead_of_breaking_the_answer(client, monk
         monkeypatch.setattr(chat_service.get_settings(), "agent_enabled", True)
         monkeypatch.setattr(registry, "build_registry",
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("工具集炸了")))
-        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？")
+        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？", allow_agent=True)
     finally:
         db.close()
 
@@ -122,7 +98,7 @@ def test_the_agent_path_does_not_re_verify_the_coverage(client, monkeypatch):
         monkeypatch.setattr(rt, "llm", _NonFakeLLM())
         monkeypatch.setattr(citation, "verify_claims",
                             lambda *a, **k: calls.append(1) or {"coverage": 0.0})
-        out = chat_service.answer(db, rt, user, kb, "营收多少？")
+        out = chat_service.answer(db, rt, user, kb, "营收多少？", allow_agent=True)
     finally:
         db.close()
 

@@ -56,6 +56,9 @@ class ChatRequest(BaseModel):
     question: str
     session_id: str | None = None
     stream: bool = True
+    # 「深度思考」= 这一次走代理链路（票 37）。**默认 False**：不发就是原来的确定性链路，
+    # 既有前端与集成不用改（spec 0002 故事 24）。仅当部署方开了 AGENT_ENABLED 才生效。
+    deep: bool = False
 
 
 class SourceOut(BaseModel):
