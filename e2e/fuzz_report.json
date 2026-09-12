@@ -1,0 +1,13 @@
+{
+  "anomalies": [
+    {
+      "round": 3,
+      "step": "op=input",
+      "desc": "执行异常: TimeoutError: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"#sendBtn\")\n    - locator resolved to <button disabled id=\"sendBtn\" onclick=\"ask()\" class=\"send-btn\">↑</button>\n  - attempting click action\n    2 × waiting for element to be visible, enabled and stable\n      - element is not enabled\n    - retrying click action\n    - waiting 20ms\n    2 × waiting for element to be visible, enabled and stable\n      - element is not enabled\n    - retrying click action\n      - waiting 100ms\n    58 × waiting for element to be visible, enabled and stable\n       - element is not enabled\n     - retrying click action\n       - waiting 500ms\n"
+    }
+  ],
+  "console_errors": [
+    "console.error: Failed to load resource: net::ERR_INTERNET_DISCONNECTED",
+    "pageerror: Failed to fetch"
+  ]
+}

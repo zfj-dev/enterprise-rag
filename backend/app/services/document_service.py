@@ -5,6 +5,7 @@ reindex_all: 容器重启后内存向量/BM25 索引清空，从数据库的已�
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from sqlalchemy.orm import Session
@@ -13,6 +14,8 @@ from app.core.container import Runtime
 from app.core.source_docs import make_meta
 from app.core.vector_store import VectorItem
 from app.models.entities import Chunk, Document
+
+logger = logging.getLogger(__name__)
 
 # 上传处理进度（0-100，内存态；重启后按 DB status 判断）
 _PROGRESS: dict[str, int] = {}
@@ -94,8 +97,8 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
         print(f"[doc] {doc.filename} FAILED: {e}")
         try:
             db.rollback()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("process_document 回滚失败: %s", e)
         _set_progress(doc.id, 0)
         try:
             d2 = db.get(Document, doc.id)
@@ -103,8 +106,8 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
                 d2.status = "failed"
                 d2.error = str(e)
                 db.commit()
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.warning("process_document 标记失败状态异常: %s", e2)
     return doc
 
 

@@ -1,0 +1,22 @@
+# 生产依赖(容器镜像用):核心 + PostgreSQL(psycopg/pgvector) + Redis
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.6
+pydantic-settings>=2.2
+sqlalchemy>=2.0
+httpx>=0.27
+PyJWT>=2.8
+cryptography>=42  # BYOK：凭据加密落库（票 32）
+rank-bm25>=0.2.2
+python-multipart>=0.0.9
+
+# 文档解析(常见格式,无 GPU 依赖)
+pymupdf>=1.24
+python-docx>=1.1
+openpyxl>=3.1
+python-pptx>=1.0
+
+# 生产存储:Postgres + pgvector + Redis
+psycopg[binary]>=3.1
+pgvector>=0.3
+redis>=5.0

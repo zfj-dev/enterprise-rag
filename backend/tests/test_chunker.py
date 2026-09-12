@@ -56,3 +56,23 @@ def test_table_caption_merged_with_blank_line():
     assert tbl_child, "表格 chunk 应存在"
     assert "表 3 . 1" in tbl_child[0]["content"], "标题应并入表格 chunk"
     assert "PyCharm" in tbl_child[0]["content"], "表格正文应完整"
+
+
+def test_formula_not_cut_by_split():
+    """超过 child_size 的 $$..$$ 公式不能被 _split_window 拦腰截断（历史 bug：枚举加载到残缺公式）。
+
+    校验：任何 child 里 $$ 的个数不能为奇数——奇数说明公式被切开（只留了开头）。
+    """
+    ch = ParentChildChunker(parent_size=512, child_size=128, overlap=20)
+    formula = r"$$\begin{array} { c } { { \cal L } _ { C E } = - \sum _ { i = 1 } ^ { n } y _ { i } \operatorname { l o g } \left( \hat { y } _ { i } \right) } \\ \end{array} \qquad \qquad \qquad \qquad \qquad \qquad \qquad \qquad \qquad ( 2. 1 )$$"
+    assert len(formula) > 128, "测试公式应超过 child_size 才可能触发截断"
+    text = "前文介绍。\n" + formula + "\n后续一段文字补充说明，用于把公式夹在段落中间。"
+    chunks = ch.chunk(text, doc_id="d1", page_num=1)
+    children = [c for c in chunks if c["chunk_type"] == "child"]
+    assert children, "应产生 child chunk"
+    for c in children:
+        n = c["content"].count("$$")
+        if n % 2 == 1:
+            raise AssertionError(f"child 公式被截断（$$个数为奇数）: {c['content'][:90]}")
+    # 至少一个 child 完整包含整条公式
+    assert any("\cal L" in c["content"] and "( 2. 1 )" in c["content"] for c in children), "应有一个 child 完整包含整条公式"

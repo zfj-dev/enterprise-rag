@@ -14,18 +14,30 @@ htmlcov/
 .env.local
 *.key
 
-# Data / models / vector dbs
-models/
-data/
+# 下载的模型权重 / 运行时产物
+# ⚠️ 必须锚定到仓库根(前置 /)，否则会连源码一起忽略：
+#    - 无锚定的 models/ 会忽略 backend/app/models/（ORM 实体），克隆下来 import app.models 直接失败
+#    - 无锚定的 data/   会忽略 backend/data/（黄金集）
+#    模型权重实际走 HuggingFace 缓存，不落仓库。
+/models/
+/data/
 *.db
 *.sqlite3
 uploaded_files/
 logs/
 
+# 生成式样本文档（backend/scripts/gen_sample_docs.py 产出，不随仓库分发）
+/backend/data/samples/
+
 # Node (frontend)
 node_modules/
 dist/
 build/
+
+# Playwright E2E 产物
+test-results/
+playwright-report/
+frontend/e2e/.auth/
 
 # OS / editor
 .DS_Store
@@ -39,3 +51,7 @@ backend/verify_paper.pdf
 
 # 本地运行脚本（含真实 API Key，复制自 run_real.ps1.example）
 scripts/run_real.ps1
+scripts/run_cloud.ps1
+
+# 生产环境密钥（复制自 deploy/.env.example 后填真值）
+deploy/.env

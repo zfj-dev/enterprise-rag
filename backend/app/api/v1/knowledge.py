@@ -33,6 +33,21 @@ def create_kb(body: KnowledgeBaseCreate, user: User = Depends(get_current_user),
     return _to_out(kb, db)
 
 
+@router.patch("/{kb_id}", response_model=KnowledgeBaseOut)
+def rename_kb(kb_id: str, body: KnowledgeBaseCreate, user: User = Depends(get_current_user),
+              db: Session = Depends(get_db)):
+    kb = db.get(KnowledgeBase, kb_id)
+    if not kb or kb.owner_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "知识库不存在")
+    if body.name and body.name.strip():
+        kb.name = body.name.strip()
+    if body.description is not None:
+        kb.description = body.description
+    db.commit()
+    db.refresh(kb)
+    return _to_out(kb, db)
+
+
 @router.delete("/{kb_id}")
 def delete_kb(kb_id: str, user: User = Depends(get_current_user),
               db: Session = Depends(get_db), rt: Runtime = Depends(get_runtime)):

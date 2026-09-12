@@ -1,0 +1,12 @@
+[
+  {"question": "表3.1的内容是什么", "expect": "PyCharm", "page": 29},
+  {"question": "表3.1的实验环境GPU是什么", "expect": "RTX 3060", "page": 29},
+  {"question": "表3.2的内容是什么", "expect": "Focal Loss", "page": 30},
+  {"question": "表3.3的内容是什么", "expect": "apple", "page": 33},
+  {"question": "表3.4的内容是什么", "expect": "Baseline", "page": 35},
+  {"question": "给出所有表格内容", "expect": "表4.1"},
+  {"question": "有哪些图片", "expect": "CBAM"},
+  {"question": "论文的研究对象是什么", "expect": "YOLOv8"},
+  {"question": "数据集包含多少种果蔬", "expect": "21", "page": 29},
+  {"question": "实验环境操作系统是什么", "expect": "Windows11", "page": 29}
+]

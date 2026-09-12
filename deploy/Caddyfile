@@ -1,0 +1,20 @@
+# Caddy reverse proxy for the RAG API.
+# CADDY_DOMAIN empty  -> LAN HTTP (site address :80)
+# CADDY_DOMAIN set    -> auto HTTPS (needs ports 80/443 + DNS)
+{$CADDY_DOMAIN::80} {
+	encode zstd gzip
+	reverse_proxy api:8000
+
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy no-referrer
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+
+	# SSE(chat stream) needs no buffering
+	@stream path /api/v1/chat/stream
+	reverse_proxy @stream api:8000 {
+		flush_interval -1
+	}
+}

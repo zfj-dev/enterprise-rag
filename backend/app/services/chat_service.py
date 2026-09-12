@@ -1,7 +1,10 @@
 """问答管线：问题优化 → 混合检索 → 引用校验 → Prompt → LLM 生成 → 持久化会话/消息/反馈。"""
 from __future__ import annotations
 
+import logging
 import re
+import threading
+import time
 
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
@@ -9,10 +12,19 @@ from typing import Callable, Iterator
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.core.capability import capability_for
 from app.core.citation import apply_no_source_no_claim, validate_sources
 from app.core.container import Runtime
-from app.core.prompt import build_prompt, build_rewrite_prompt, format_context
+from app.core.context import ContextPlan, assemble_context, plan_exempt
+from app.core.llm import LLM
+from app.core.memory import FactExtractor
+from app.core.pricing import cost_of
+from app.core.usage import build_usage
+from app.core.prompt import (build_prompt, build_rewrite_prompt, format_context,
+                             format_memory)
 from app.models.entities import ChatMessage, ChatSession, User
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,16 +37,28 @@ class Prep:
     candidates: list[dict]
     sources: list[dict]
     prompt: str
+    llm: LLM
     _ccit: object = None
 
     trace: dict = field(default_factory=dict)
 
 
-def _maybe_rewrite(rt: Runtime, question: str, history: list[dict]) -> str:
-    if get_settings().llm_provider == "fake":
-        return question  # 演示/测试不真调 LLM，保持确定性；真实模式才做"问题优化"
+def _recall_memories(rt: Runtime, s, user: User, query: str) -> list[dict]:
+    """召回该用户的相关记忆。开关关闭或召回失败一律当「无记忆」—— 旁路，不拖垮回答。"""
+    if not s.memory_enabled:
+        return []
+    try:
+        return rt.recall_memory(user.id, query)
+    except Exception as e:   # noqa: BLE001 —— 旁路：记忆是辅助层
+        logger.warning("记忆召回失败（已旁路）：%s", e)
+        return []
+
+
+def _maybe_rewrite(llm: LLM, question: str, history: list[dict]) -> str:
+    if llm.is_fake:
+        return question  # 演示/测试不真调 LLM，保持确定性；真实模型才做"问题优化"
     messages = [{"role": "user", "content": build_rewrite_prompt(question, history)}]
-    rewritten = "".join(rt.llm.stream(messages)).strip()
+    rewritten = "".join(llm.stream(messages)).strip()
     return rewritten or question
 
 
@@ -43,6 +67,12 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
         sess = db.get(ChatSession, session_id)
         if sess:
             return sess
+        # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上
+        sess = ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title="")
+        db.add(sess)
+        db.commit()
+        db.refresh(sess)
+        return sess
     sess = ChatSession(user_id=user.id, kb_id=kb_id, title="")
     db.add(sess)
     db.commit()
@@ -51,7 +81,13 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
 
 
 def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
-    """取最近几轮的 {user, assistant} 对，用于多轮指代消解与上下文。"""
+    """取最近几轮的 {user, assistant, ids} 对，用于多轮指代消解与上下文。
+
+    `ids` 是这一轮包含的消息 id —— 滚动摘要的游标按「最后一条已摘要消息的 id」记（票 18）。
+
+    依赖 created_at 严格递增（entities._monotonic_utc_now）：sqlite 对相等的排序键
+    ASC/DESC 都按 rowid 返回、DESC 并不翻转，同秒消息曾在此整体错位、配对张冠李戴。
+    """
     msgs = (db.query(ChatMessage)
             .filter(ChatMessage.session_id == session_id)
             .order_by(ChatMessage.created_at.desc()).limit(limit).all())
@@ -62,9 +98,10 @@ def _load_history(db: Session, session_id: str, limit: int = 6) -> list[dict]:
         if m.role == "user":
             if cur:
                 pairs.append(cur)
-            cur = {"user": m.content, "assistant": ""}
+            cur = {"user": m.content, "assistant": "", "ids": [m.id]}
         elif m.role == "assistant" and cur is not None:
             cur["assistant"] = m.content
+            cur["ids"].append(m.id)
     if cur:
         pairs.append(cur)
     return pairs
@@ -93,7 +130,7 @@ def _looks_like_formula(content: str) -> bool:
     c = content or ""
     if "formula" in c.lower() and "<!--" in c:
         return True
-    return bool(re.search(r"\$|\\begin\{|\\(", c))
+    return bool(re.search(r"\$|\\begin\{|\\\(", c))
 
 
 def _looks_like_code(content: str) -> bool:
@@ -163,7 +200,8 @@ def _load_typed_chunks(db: Session, kb_id: str, owner_id: str, classifier: Calla
             "content": r.content,
             "parent_content": r.parent_content,
             "metadata": {
-                "kb_id": kb_id, "owner_id": owner_id, "doc_name": doc_name or "未知文档",
+                "kb_id": kb_id, "owner_id": owner_id, "doc_id": r.doc_id,
+                "doc_name": doc_name or "未知文档",
                 "page_num": r.page_num, "content": r.content,
             },
             "rank_score": 1.0,
@@ -183,12 +221,27 @@ def _merge_typed_candidates(base: list[dict], typed: list[dict], max_total: int 
     return merged[:max_total]
 
 
+# 会被当作「具体编号引用」来特殊处理的前缀（枚举/编号逻辑与工具共用）
+NAMED_REF_PREFIXES = ("表", "表格", "图", "公式")
+
+
 def _named_ref_intent(question: str) -> list[tuple[str, str, str | None]]:
     """检测具体编号引用（表3.2 / 图 3 . 1 / 公式1），返回 [(前缀, 主号, 副号)]。"""
     out = []
     for m in re.finditer(r"(表|表格|图|公式)\s*(\d+)\s*(?:[.\-]\s*(\d+))?", question or ""):
         out.append((m.group(1), m.group(2), m.group(3)))
     return out
+
+
+def compress_exempt(question: str) -> bool:
+    """本问是否豁免压缩（票 20/21）：枚举某类内容、或点名具体编号。
+
+    这类问题系统会**刻意注入大批块**以便列全，压了就会漏项 —— 所以确定性链路的上下文装配
+    与代理链路的工具结果清理**共用这一个判据**，两条链路的口径才不会分叉。
+    """
+    if _enum_intent(question):
+        return True
+    return any(r[0] in NAMED_REF_PREFIXES for r in _named_ref_intent(question))
 
 
 def _load_named_chunks(db: Session, kb_id: str, owner_id: str, prefix: str, n1: str, n2: str | None, limit: int = 3) -> list[dict]:
@@ -207,7 +260,8 @@ def _load_named_chunks(db: Session, kb_id: str, owner_id: str, prefix: str, n1: 
             continue
         entry = {
             "chunk_id": r.id, "content": r.content, "parent_content": r.parent_content,
-            "metadata": {"kb_id": kb_id, "owner_id": owner_id, "doc_name": doc_name or "未知文档",
+            "metadata": {"kb_id": kb_id, "owner_id": owner_id, "doc_id": r.doc_id,
+                         "doc_name": doc_name or "未知文档",
                          "page_num": r.page_num, "content": r.content},
             "rank_score": 2.0,
         }
@@ -226,56 +280,132 @@ def _prepend_named(base: list[dict], named: list[dict], max_total: int = 20) -> 
     return merged[:max_total]
 
 
-def _to_sources(candidates: list[dict]) -> list[dict]:
+def _strip_ctx(text: str) -> str:
+    """去掉 chunk 内容前冗余的『[文档概要]…』上下文前缀，便于前端按原文子串定位引用。"""
+    s = text or ""
+    if s.startswith("[文档概要]"):
+        nl = s.find(chr(10))
+        if nl >= 0:
+            return s[nl + 1:]
+    return s
+
+
+def to_sources(candidates: list[dict]) -> list[dict]:
+    """候选块 -> 对外的 sources（问答与代理共用这一份，两边给的东西才真的同质）。"""
+
     out = []
     for c in candidates:
         md = c.get("metadata", {}) or {}
         out.append({
             "chunk_id": c["chunk_id"],
+            "doc_id": md.get("doc_id"),
             "doc_name": md.get("doc_name", "未知文档"),
             "page": md.get("page_num", 0),
-            "text": c.get("content", ""),
+            "text": _strip_ctx(c.get("content", "")),
             "score": float(c.get("rank_score", c.get("rrf_score", 0.0))),
         })
     return out
 
 
-def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
-            session_id: str | None = None) -> Prep:
-    sess = _get_or_create_session(db, user, kb_id, session_id)
-    history = _load_history(db, sess.id, limit=6)
+def retrieve_candidates(db: Session, rt: Runtime, kb_id: str, owner_id: str,
+                        question: str, query: str | None = None,
+                        timings: dict | None = None) -> list[dict]:
+    """检索一步：混合检索 + 重排，外加「枚举意图 / 具体编号」的同款处理。
+
+    普通问答与代理的 KbRetrieve 共用这一份 —— 两边拿到的候选是同质的。
+    **kb_id / owner_id 由调用方（服务端）注入**，不来自模型参数。
+    `question` 用来识别意图，`query`（默认同 question）用来实际检索。
+    """
+    q2 = query if query is not None else question
     cat = _enum_intent(question)
-    refs = [r for r in _named_ref_intent(question) if r[0] in ("表", "表格", "图", "公式")]
-    # 枚举/具体编号类问题本身完整清晰：跳过 LLM 改写，避免历史污染查询
-    q2 = question if (cat or refs) else _maybe_rewrite(rt, question, history)
-    candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=user.id)
-    enum_hint = None
+    refs = [r for r in _named_ref_intent(question) if r[0] in NAMED_REF_PREFIXES]
+
+    candidates = rt.retriever.retrieve(q2, kb_id=kb_id, owner_id=owner_id, timings=timings)
     if cat:
-        typed = _load_typed_chunks(db, kb_id, user.id, _classifier_for(cat))
+        typed = _load_typed_chunks(db, kb_id, owner_id, _classifier_for(cat))
         if typed:
-            candidates = _merge_typed_candidates(candidates, typed)
-        cat_names = {"table": "表格", "figure": "图片/图", "formula": "公式", "code": "代码"}
-        enum_hint = (f"当前问题要求枚举/列出所有【{cat_names.get(cat, cat)}】。"
-                     f"请严格依据【参考资料】中对应类型的块，逐一列出其编号（如 表3.1、表3.2、表4.1 等）、标题和完整内容，"
-                     f"凡是以'表'+数字编号的都要包含，不要因任何理由遗漏；"
-                     f"若提到数量，数量必须与列出的条目一一对应，不确定时不要输出数量；"
-                     f"历史对话中的列表仅作上下文参考，不要重复其中的其他类型内容。")
-    # 具体编号引用（表3.2/图3.1）：强制注入含该编号的 chunk 并前置，避免"如表3.3所示"等句子抢位
+            # 枚举：typed 块按文档顺序(页码, 块内id)前置，其余检索候选缀后，引导 LLM 按"出现顺序"列
+            typed_sorted = sorted(typed, key=lambda c: (c["metadata"].get("page_num", 0),
+                                                        str(c.get("chunk_id", ""))))
+            in_typed = {t["chunk_id"] for t in typed}
+            candidates = typed_sorted + [c for c in candidates if c.get("chunk_id") not in in_typed]
     if refs:
+        # 具体编号引用（表3.2/图3.1）：强制注入含该编号的 chunk 并前置，再**只留含该编号的候选**
         for prefix, n1, n2 in refs:
-            named = _load_named_chunks(db, kb_id, user.id, prefix, n1, n2)
+            named = _load_named_chunks(db, kb_id, owner_id, prefix, n1, n2)
             if named:
                 candidates = _prepend_named(candidates, named)
-        # 只保留含该编号的候选，避免 LLM 被其他表格/段落带偏（选错表）
         keys = [f"{r[0]}{r[1]}{'.' + r[2] if r[2] else ''}" for r in refs]
         candidates = [c for c in candidates
                       if any(k in re.sub(r"\s+", "", c.get("content", "") or "") for k in keys)]
+    return candidates
+
+
+def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
+            session_id: str | None = None) -> Prep:
+    sess = _get_or_create_session(db, user, kb_id, session_id)
+    s = get_settings()
+    history = _load_history(db, sess.id, limit=s.context_history_messages)
+    cat = _enum_intent(question)
+    refs = [r for r in _named_ref_intent(question) if r[0] in NAMED_REF_PREFIXES]
+    # 枚举/具体编号类问题本身完整清晰：跳过 LLM 改写，避免历史污染查询
+    llm = rt.llm_for(user.id)   # 按发起用户解析：自带模型 / 回落服务端全局
+    q2 = question if (cat or refs) else _maybe_rewrite(llm, question, history)
+    # 跨会话记忆：召回该用户的相关事实，作为独立的【已知信息】注入。
+    memories = _recall_memories(rt, s, user, q2)
+    memory_text = format_memory(memories)
+    # 记忆也吃预算：先扣掉它，历史在剩余额度内装配，两块的合计才不会超预算
+    # （Spec 0003 的上下文预算 × Spec 0004 的记忆注入；无记忆时预算一分不动）
+    budget = (s.context_token_budget - rt.token_counter.count(memory_text)
+              if memory_text else s.context_token_budget)
+    # 枚举 / 具体编号：系统为「列全」刻意注入了大批块，压了就会漏项 —— 本问**整段豁免压缩**
+    # （票 20）。判据复用既有的意图检测（cat / refs），不另起一套。
+    exempt = compress_exempt(question)
+    if s.context_compress and not exempt:
+        plan = assemble_context(history, budget=max(0, budget),
+                                keep_recent=s.context_keep_recent,
+                                count_tokens=rt.token_counter.count,
+                                summarize=rt.context_summarizer_factory(llm).summarize,
+                                # 会话上的滚动摘要（票 18）：只滚未覆盖的尾部，游标随之前进
+                                previous=sess.summary or None, previous_upto=sess.summary_upto)
+        _save_rolling_summary(db, sess, plan)
+    elif exempt:
+        # 本问豁免压缩（票 20）：不新压，但已有摘要照带且按游标切掉重复轮次（见 plan_exempt）
+        plan = plan_exempt(history, previous=sess.summary, previous_upto=sess.summary_upto)
+    else:
+        # 关压缩：与今天一致 —— 不带摘要（开过关的会话里那份摘要也不在这条路上出现）
+        plan = ContextPlan(summary=None, kept=history)
+    timings: dict = {}
+    candidates = retrieve_candidates(db, rt, kb_id=kb_id, owner_id=user.id, question=question,
+                                     query=q2, timings=timings)
+    enum_hint = None
+    if cat:
+        cat_names = {"table": "表格", "figure": "图片/图", "formula": "公式", "code": "代码"}
+        if cat == "formula":
+            enum_hint = ("当前问题要求枚举/列出所有【公式】。"
+                         "请严格按照【参考资料】中公式出现的先后顺序（第X页从小到大、同页按块顺序）从前往后逐一列出，每条标注所在【第X页】；"
+                         "凡资料中出现的公式都要列出，不要遗漏，也不要因为某条公式看起来被截断/不完整就跳过——把它当作公式候选并标注页码；"
+                         "每条公式请输出为**规范、紧凑的标准 LaTeX**：去掉多余空格、把字母间距合并（如 `S m o o t h`→`Smooth`、`\\frac { 1 } { N }`→`\\frac{1}{N}`）、"
+                         "修正明显可辨的 OCR 误读（如通道注意力应写 `M_c` 而非 `L_c`、空间注意力应写 `M_s` 而非 `O_s`、`\\textcircled{=}0.5`→`@0.5`、`\\frac{1}{c}`→`\\frac{1}{C}`）；公式内不要用 Markdown 链接/mailto 语法，直接写符号（如写 `mAP@0.5`，不要 `[mAP@0.5](mailto:...)`）；"
+                         "但**不得改变数学含义、不得臆造公式**：对确被截断的公式只保留能读到的部分、绝不补全下半截；不过若识别结果与上下文/标准定义明显不符（如漏了 `L_{IoU}`、`L_{CE}` 这类左侧标识符，或中间环节如 `= 1 - IoU =` 缺失），可依据上下文与标准数学定义把**残缺处修正为标准写法**；"
+                         "若个别字符前后文不足以确定，宁可保留原样也不要编造；"
+                         "数量与列出条目一一对应，不确定不要输出数量；历史对话中的公式列表仅作上下文参考，不要重复其中的非公式内容。"
+                         "每条公式后用 [来源: 文档名, 第X页] 标注来源（文档名用【参考资料】里的文件名，如 [来源: 毕设论文.pdf, 第18页]），不要只写 [第X页]。")
+        else:
+            enum_hint = (f"当前问题要求枚举/列出所有【{cat_names.get(cat, cat)}】。"
+                         f"请严格依据【参考资料】中对应类型的块，按出现顺序（第X页从小到大）逐一列出其编号（如 表3.1、表3.2、表4.1 等）、标题和完整内容，"
+                         f"凡是以'表'+数字编号的都要包含，不要因任何理由遗漏；"
+                         f"若提到数量，数量必须与列出的条目一一对应，不确定时不要输出数量；"
+                         f"历史对话中的列表仅作上下文参考，不要重复其中的其他类型内容。")
+    if refs:
+        keys = [f"{r[0]}{r[1]}{'.' + r[2] if r[2] else ''}" for r in refs]
         ref_str = ", ".join(keys)
         enum_hint = (f"当前问题要求的是【{ref_str}】的具体内容。"
                      f"请严格依据【参考资料】中该编号对应的块回答，不要引用历史对话中的其他表格/图片/内容。")
     ccit = validate_sources(candidates)
     context = format_context(candidates)
-    prompt = build_prompt(question, context, history=history, enum_hint=enum_hint)
+    prompt = build_prompt(question, context, history=plan.kept, enum_hint=enum_hint,
+                          summary=plan.summary, memory=memory_text)
 
     user_msg = ChatMessage(session_id=sess.id, role="user", content=question)
     db.add(user_msg)
@@ -287,42 +417,211 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
 
     return Prep(
         session_id=sess.id, user=user, kb_id=kb_id, question=question, rewrite=q2,
-        candidates=candidates, sources=_to_sources(candidates), prompt=prompt, _ccit=ccit,
-        trace={"query": question, "rewrite": q2, "history_turns": len(history),
+        candidates=candidates, sources=to_sources(candidates), prompt=prompt, llm=llm, _ccit=ccit,
+        trace={"query": question, "rewrite": q2, "history_turns": len(plan.kept),
+               "context_dropped": plan.dropped, "context_budget": budget,
+               "summary_chars": len(plan.summary or ""), "summary_cursor": plan.cursor,
+               "compress_exempt": exempt,
+               "context_tokens": _token_usage(rt, plan, history, budget, exempt=exempt),
                "enum_cat": cat, "candidates": len(candidates),
+               "memory_recalled": len(memories),
+               "memory_top_score": memories[0]["score"] if memories else None,
+               "retrieval_ms": timings.get("retrieval_ms"),
+               "rerank_ms": timings.get("rerank_ms"),
                "retrieval_top": candidates[:5], "sources_usable": ccit.has_sources},
     )
 
 
-def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
-    """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。"""
+def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int,
+                 *, exempt: bool = False) -> dict:
+    """压缩前 / 压缩后 token、预算与口径（票 19）。
+
+    **只用真实分词器**报数：没有真实分词器时 token 一律 None（报告写「不可用」），
+    绝不拿字符估算的数字顶替 —— 预算判定可以用估算，对外报的数字不行。
+    只算**历史**那部分（全量历史 -> 摘要 + 保留轮）：记忆两侧都在，算进来只会稀释降幅。
+    """
+    from app.core.prompt import format_turn
+
+    if exempt:
+        # 本问豁免压缩：没有"降了多少"可报 —— 报了只会是 0% 甚至负值，那是误导
+        return {"tokens_before": None, "tokens_after": None, "tokenizer": "", "budget": budget,
+                "note": "本问为枚举/编号查询，豁免压缩：没有降幅可报"}
+    counter = rt.token_counter
+    label = getattr(counter, "label", "")
+    if not label:
+        return {"tokens_before": None, "tokens_after": None, "tokenizer": "", "budget": budget,
+                "note": getattr(counter, "note", "")}
+    count = counter.count
+    before = sum(count(format_turn(t)) for t in history)
+    after = count(plan.summary or "") + sum(count(format_turn(t)) for t in plan.kept)
+    return {"tokens_before": before, "tokens_after": after, "tokenizer": label, "budget": budget,
+            "note": ""}
+
+
+def _save_rolling_summary(db: Session, sess: ChatSession, plan: ContextPlan) -> None:
+    """把这次的摘要与游标写回会话（票 18）—— 下次请求（哪怕换了进程）从这儿接着滚。
+
+    只在**真的变了**时写：复用旧摘要的那次不该产生写操作。
+
+    同一会话的两次并发请求会各自读到同一份旧摘要、各滚一次 —— 后写的那个游标可能更旧，
+    代价是多花一次摘要调用（不丢内容：新轮次仍在窗口里，下次会带着旧摘要再并入一遍）。
+    会话级串行是更根本的解法，留给需要时再做。
+    """
+    summary = plan.summary or ""
+    if summary == (sess.summary or "") and plan.cursor == sess.summary_upto:
+        return
+    sess.summary = summary
+    sess.summary_upto = plan.cursor
+    db.commit()
+
+
+def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
+                  allow_agent: bool = True) -> Iterator[dict]:
+    """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。
+
+    代理开关（票 15）**默认关**：关着时一行代理代码都不跑，行为与今天完全一致。
+    `allow_agent=False` 供**对比评测**用：基准链路不能被全局开关顺手换掉。
+    """
+    t_generate = time.perf_counter()
+    prep.trace["ttft_ms"] = None
+
+    if allow_agent and get_settings().agent_enabled:
+        blocked = _agent_blocked_reason(rt, prep)
+        if blocked:
+            # 代理用不了（票 34）：**降级为单步回答**，不抛错，并把原因写进 trace / done
+            prep.trace["agent_skipped"] = blocked
+        else:
+            got = _run_agent_for(db, rt, prep)
+            if got is not None:
+                yield from _stream_agent(db, rt, prep, got, t_generate)
+                return
+
     yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
     # 精确编号引用（表3.1 vs 表3.3 只差数字）跳过语义缓存，避免返回相似问题的旧答案
     precise = bool(_named_ref_intent(prep.question))
-    use_cache = get_settings().semantic_cache and not precise
+    # 语义缓存按 (问题, 知识库) 共享。自带模型的用户必须绕开它，
+    # 否则可能命中由服务端全局模型生成的旧答案。
+    use_cache = get_settings().semantic_cache and not precise and prep.llm is rt.llm
     cache_hit = False
+    hit = None
     if use_cache:
         hit = rt.semantic_cache.get(prep.question, prep.kb_id)
         if hit:
             cache_hit = True
-            yield {"type": "delta", "text": hit["answer"]}
-    if not cache_hit:
+    if cache_hit:
+        # 缓存命中：仍走"流式外观"——把答案切成小块逐条下发，前端逐段追加；禁止整块一次性插入
+        answer = apply_no_source_no_claim(hit["answer"], prep._ccit)
+        for i in range(0, len(answer), 12):
+            if i == 0:
+                prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
+            yield {"type": "delta", "text": answer[i:i + 12]}
+            time.sleep(0.01)
+    else:
         chunks: list[str] = []
-        for piece in rt.llm.stream([{"role": "user", "content": prep.prompt}]):
+        for piece in prep.llm.stream([{"role": "user", "content": prep.prompt}]):
+            if prep.trace["ttft_ms"] is None:
+                # 首字延迟：从开始生成到吐出第一个增量
+                prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
             chunks.append(piece)
             yield {"type": "delta", "text": piece}
         if use_cache:
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
-    answer = "".join(chunks) if not cache_hit else hit["answer"]
-    answer = apply_no_source_no_claim(answer, prep._ccit)
+        answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
 
-    if get_settings().llm_provider != "fake":  # 真实模式：逐句校验引用覆盖率
+    # 把**本次生成**的 provider usage 立刻快照下来（票 27）：后面的引用校验与事实抽取都会调同一个
+    # 模型实例，`last_usage` 会被它们覆盖（甚至被后台线程清掉）—— 那时再读，记的就是别人的账了。
+    prep.trace["llm_usage"] = None if cache_hit else getattr(prep.llm, "last_usage", None)
+
+    yield from _finish(db, rt, prep, answer, cache_hit=cache_hit, t_generate=t_generate)
+
+
+# ---------- 代理链路（票 15 的开关；默认关）----------
+
+def _agent_blocked_reason(rt: Runtime, prep: Prep) -> str | None:
+    """自带模型用不了工具时，代理走不了 —— 返回原因（调用方降级为单步回答），能走就 None。
+
+    只有**配了自带模型**才需要探：没有配置就是走服务端全局（今天的行为），不做探测。
+    探测**失败**按保守默认处理（视为不支持工具），所以这里也会因此挡住 —— 原因一并写出来。
+    """
+    cfg = rt.user_llm_config_store.get(prep.user.id)
+    if cfg is None:
+        return None
+    cap = capability_for(rt.capability_probe, cfg.base_url, cfg.api_key, cfg.model)
+    if cap.supports_tools:
+        return None
+    return "自带模型 %s 不支持工具调用，本次降级为单步回答（%s）" % (cfg.model, cap.note)
+
+
+def _run_agent_for(db: Session, rt: Runtime, prep: Prep) -> dict | None:
+    """开关打开时跑一次代理。任何意外都记日志、返回 None —— 调用方回退确定性链路，
+    绝不因为旁路出问题就把问答打成 500。"""
+    try:
+        from app.core.agent import run_agent
+        from app.mcp.client import InProcessTransport
+        from app.mcp.registry import build_registry
+
+        # 工具集按**本次请求**的上下文造：kb / owner 服务端注入，不来自模型参数
+        transport = InProcessTransport(build_registry(db, rt, prep.user, prep.kb_id))
+        # 工具结果清理（票 21）：与确定性链路同一个压缩开关；枚举/编号查询走同一条豁免
+        # （spec 0003 红线：这类查询刻意注入的大批块不参与压缩，否则列全会漏项）
+        trim = get_settings().context_compress and not prep.trace.get("compress_exempt")
+        return run_agent(prep.question, llm=prep.llm, transport=transport,
+                         max_steps=get_settings().agent_max_steps,
+                         trim_tool_results=bool(trim))
+    except Exception as e:      # noqa: BLE001 —— 旁路失败绝不能影响问答本身
+        logger.warning("代理链路跑不动，回退确定性链路：%s", e)
+        return None
+
+
+def _stream_agent(db: Session, rt: Runtime, prep: Prep, got: dict,
+                  t_generate: float) -> Iterator[dict]:
+    """把代理的终答按**与确定性链路相同的**流式外观下发。
+
+    中间步骤（思考 / 工具调用）不推给前端 —— spec 明确划在范围外；但结论进 trace，坏了查得到。
+    代理链路不走语义缓存：它自己会调工具，缓存会把这个差别抹掉。
+    """
+    prep.sources = got.get("sources") or []   # 来源必须是**答案真正依据**的那一份
+    answer = got.get("answer") or ""
+    yield {"type": "sources", "session_id": prep.session_id, "data": prep.sources}
+    for i in range(0, len(answer), 12):
+        if i == 0:
+            prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
+        yield {"type": "delta", "text": answer[i:i + 12]}
+
+    latency = got.get("latency") or {}
+    checked = got.get("trace") or {}
+    prep.trace.update({
+        "agent": True, "agent_stopped": got.get("stopped"),
+        "agent_steps": [{"tool": s.get("tool"), "ms": s.get("ms"), "ok": s.get("ok")}
+                        for s in got.get("steps") or []],
+        "agent_ms": latency.get("total_ms"),
+        # 检索/重排耗时来自 prepare 那次**没被采纳**的检索 —— 置空，免得污染延迟分桶
+        "retrieval_ms": None, "rerank_ms": None,
+        "self_check": checked.get("self_check"),
+        "citation_coverage": checked.get("citation_coverage"),
+        # 代理循环里收掉了几条已经用过的工具结果（票 21）
+        "tool_results_trimmed": checked.get("tool_results_trimmed"),
+        # 多步调用的 provider 用量合计（票 27）；代理没拿到就是 None，记账那边自会写「不可用」
+        "llm_usage": checked.get("llm_usage"),
+        # 代理链路不用 prepare 装配的那份上下文 —— 别把它的 token 数字算到代理头上
+        "context_tokens": None,
+    })
+    yield from _finish(db, rt, prep, answer, cache_hit=False, t_generate=t_generate)
+
+
+def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
+            cache_hit: bool, t_generate: float) -> Iterator[dict]:
+    """两条链路共用的收尾：分段耗时 → 引用覆盖率 → 落库 → 事实抽取 → done 事件。"""
+    prep.trace["generate_ms"] = (time.perf_counter() - t_generate) * 1000
+
+    # 真实模型才逐句校验引用覆盖率；代理链路在自检（票 14）里已经算过，不重复调模型
+    if not prep.llm.is_fake and prep.trace.get("citation_coverage") is None:
         try:
             from app.core.citation import verify_claims
-            cov = verify_claims(answer, prep.sources, rt.llm)
+            cov = verify_claims(answer, prep.sources, prep.llm)
             prep.trace["citation_coverage"] = cov.get("coverage")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("引用覆盖率校验失败: %s", e)
 
     asst = ChatMessage(session_id=prep.session_id, role="assistant", content=answer)
     db.add(asst)
@@ -330,18 +629,83 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep) -> Iterator[dict]:
     db.refresh(asst)
 
     prep.trace["message_id"] = asst.id
+    _launch_fact_extraction(rt, prep, answer=answer, message_id=asst.id)
+    prep.trace["usage"] = _record_usage(rt, prep, answer, cache_hit=cache_hit, message_id=asst.id)
     prep.trace["cache_hit"] = cache_hit
     yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
            "answer": answer, "cache_hit": cache_hit,
-           "citation_coverage": prep.trace.get("citation_coverage")}
+           "citation_coverage": prep.trace.get("citation_coverage"),
+           "context": prep.trace.get("context_tokens"),   # 压缩前/后 token 与口径（票 19）
+           "usage": prep.trace.get("usage"),              # 本次用量的 token 与口径来源（票 27）
+           "agent_skipped": prep.trace.get("agent_skipped"),   # 代理为何没用上（票 34）
+           # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
+           "latency": {k: prep.trace.get(k) for k in
+                       ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}
+
+
+def _model_name(llm) -> str:
+    """记录里写清是哪个模型 —— 换模型之后这些数字才有可比性。"""
+    return getattr(llm, "model", "") or ("fake" if getattr(llm, "is_fake", False) else "unknown")
+
+
+def _record_usage(rt: Runtime, prep: Prep, answer: str, *, cache_hit: bool,
+                  message_id: str) -> dict | None:
+    """生成完成后记一条用量（票 27）：**provider usage 优先**，否则本地分词器，都没有记「不可用」。
+
+    口径来源写进记录（账单 vs 估算），并挂在 per-query trace 上（不新开观测通道）。
+    开关关闭时不记账、也不往 trace 上挂 —— 行为与今天完全一致。记账失败一律旁路。
+
+    两处刻意不记：
+    - **缓存命中**没有生成调用 —— 谈不上这次用量。拿 `prep.prompt` 估一个数就等于给一次
+      没发生的调用记账。
+    - 代理链路的多步用量由它自己合计（`trace["llm_usage"]`）——只记最后一轮会把成本低报；
+      它没合计出来就是 None，这里自会写「不可用」。
+    """
+    if not get_settings().cost_enabled or cache_hit:
+        return None
+
+    record = build_usage(prompt_text=prep.prompt, answer_text=answer, model=_model_name(prep.llm),
+                         provider_usage=prep.trace.get("llm_usage"),
+                         token_counter=rt.token_counter)
+    # 折算费用（票 28）：未知单价 / token 量不到都记 None 并写明原因 —— 不按 0 算
+    record.update(cost_of(record, rt.price_table))
+    try:
+        rt.usage_store.add(prep.user.id, record, session_id=prep.session_id, message_id=message_id)
+    except Exception as e:      # noqa: BLE001 —— 旁路：计量不该把问答打崩
+        logger.warning("用量记账失败（已旁路）：%s", e)
+    return record
+
+
+def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id: str) -> None:
+    """问答完成后**异步**抽取"用户告知的事实"并按用户落库。
+
+    抽取失败/变慢一律旁路：调用点此刻已回答完毕，抽取既不阻塞回答、也不阻塞下一问。
+    演示/测试用的假模型不抽（其输出不是真实用户陈述，抽了只会污染记忆）。
+    """
+    if not get_settings().memory_enabled or prep.llm.is_fake:
+        return
+    user_id, session_id, llm = prep.user.id, prep.session_id, prep.llm
+
+    def _run() -> None:
+        try:
+            facts = rt.fact_extractor_factory(llm).extract(prep.question, answer)
+            if facts:
+                rt.memory_store.add(user_id, facts, session_id=session_id, message_id=message_id)
+        except Exception as e:   # noqa: BLE001 —— 旁路：任何失败都不该冒泡到问答
+            logger.warning("事实抽取失败（已旁路）：%s", e)
+
+    threading.Thread(target=_run, daemon=True).start()
 
 
 def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
-           session_id: str | None = None) -> dict:
-    """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id, trace}。"""
+           session_id: str | None = None, *, allow_agent: bool = True) -> dict:
+    """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id, trace}。
+
+    `allow_agent=False` 走**确定性链路**（对比评测的基准用），不受全局代理开关影响。
+    """
     prep = prepare(db, rt, user, kb_id, question, session_id)
     result: dict = {}
-    for ev in stream_answer(db, rt, prep):
+    for ev in stream_answer(db, rt, prep, allow_agent=allow_agent):
         result = ev
     return {
         "session_id": prep.session_id,

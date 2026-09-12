@@ -1,6 +1,8 @@
 """混合检索引擎：向量(pgvector/内存) + BM25 + RRF 融合 + （可选）重排。"""
 from __future__ import annotations
 
+import time
+
 from typing import Sequence
 
 from app.config import get_settings
@@ -60,7 +62,9 @@ class HybridRetriever:
         kb_id: str | None = None,
         owner_id: str | None = None,
         top_k: int | None = None,
+        timings: dict | None = None,
     ) -> list[dict]:
+        """检索 + 重排。传 timings 时把两段耗时（毫秒）填进去 —— 只为评测分桶，不改行为。"""
         s = get_settings()
         filter_meta: dict = {}
         if kb_id is not None:
@@ -68,6 +72,7 @@ class HybridRetriever:
         if owner_id is not None:
             filter_meta["owner_id"] = owner_id
 
+        t_retrieval = time.perf_counter()
         qvec = self.embedding.encode([query])[0]
         v_hits = []
         for hit in self.vector_store.search(qvec, top_k=self.retrieval_top_k, filter_meta=filter_meta or None):
@@ -78,8 +83,14 @@ class HybridRetriever:
 
         merged = rrf_fuse(v_hits, b_hits, k=self.rrf_k, top_k=top_k or s.rerank_top_k * 4)
 
+        if timings is not None:
+            timings["retrieval_ms"] = (time.perf_counter() - t_retrieval) * 1000
+
+        t_rerank = time.perf_counter()
         if self.reranker:
             merged = self.reranker.rerank(query, merged)
+        if timings is not None:
+            timings["rerank_ms"] = (time.perf_counter() - t_rerank) * 1000
 
         final_top = top_k or s.rerank_top_k
         return merged[:final_top]

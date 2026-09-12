@@ -1,6 +1,8 @@
 """端到端 API 集成测试：注册→登录→建库→上传文档→入库→流式问答→反馈→调试。"""
 from __future__ import annotations
 
+from tests.helpers import sse_events
+
 
 def _token(client, username: str) -> str:
     r = client.post("/api/v1/auth/register", json={"username": username, "password": "pw123456"})
@@ -19,7 +21,7 @@ def test_auth_flow(client):
     assert tok
     ok = client.post("/api/v1/auth/login", json={"username": "alice", "password": "pw123456"})
     assert ok.status_code == 200
-    bad = client.post("/api/v1/auth/login", json={"username": "alice", "password": "bad"})
+    bad = client.post("/api/v1/auth/login", json={"username": "alice", "password": "wrong091"})
     assert bad.status_code == 401
 
 
@@ -52,16 +54,8 @@ def test_kb_upload_chat_feedback_debug(client):
 
     # 反馈
     # 先解析出 message_id（取最后一个 done 事件）
-    import json
-    msg_id = None
-    for line in cr.text.splitlines():
-        if line.startswith("data:"):
-            try:
-                data = json.loads(line[5:].strip())
-            except Exception:
-                continue
-            if data.get("type") == "done":
-                msg_id = data.get("message_id")
+    dones = [e for e in sse_events(cr.text) if e.get("type") == "done"]
+    msg_id = dones[-1].get("message_id") if dones else None
     assert msg_id
     fr = client.post("/api/v1/feedback", headers=H, json={"message_id": msg_id, "rating": 1})
     assert fr.status_code == 200, fr.text
@@ -107,7 +101,6 @@ def _wait_indexed(client, H, doc_id, timeout=20):
 
 
 def test_multi_turn_session(client):
-    import json as _json
     tok = _token(client, "dave")
     H = {"Authorization": f"Bearer {tok}"}
     kb = client.post("/api/v1/knowledge", json={"name": "mt", "description": ""}, headers=H).json()["id"]
@@ -119,15 +112,7 @@ def test_multi_turn_session(client):
     r1 = client.post("/api/v1/chat/stream", headers=H,
                      json={"kb_id": kb, "question": "比亚迪2025年营收多少", "stream": True})
     assert r1.status_code == 200
-    sess = None
-    for line in r1.text.splitlines():
-        if line.startswith("data:"):
-            try:
-                ev = _json.loads(line[5:].strip())
-            except Exception:
-                continue
-            if ev.get("type") == "sources":
-                sess = ev.get("session_id")
+    sess = next((e.get("session_id") for e in sse_events(r1.text) if e.get("type") == "sources"), None)
     assert sess, "sources 事件应带 session_id"
 
     r2 = client.post("/api/v1/chat/stream", headers=H,
@@ -137,7 +122,6 @@ def test_multi_turn_session(client):
 
 
 def test_semantic_cache(client):
-    import json as _json
     tok = _token(client, "erin")
     H = {"Authorization": f"Bearer {tok}"}
     kb = client.post("/api/v1/knowledge", json={"name": "cache", "description": ""}, headers=H).json()["id"]
@@ -148,16 +132,8 @@ def test_semantic_cache(client):
 
     def ask(q):
         r = client.post("/api/v1/chat/stream", headers=H, json={"kb_id": kb, "question": q, "stream": True})
-        hit = None
-        for line in r.text.splitlines():
-            if line.startswith("data:"):
-                try:
-                    ev = _json.loads(line[5:].strip())
-                except Exception:
-                    continue
-                if ev.get("type") == "done":
-                    hit = ev.get("cache_hit")
-        return r.status_code, hit
+        hits = [e.get("cache_hit") for e in sse_events(r.text) if e.get("type") == "done"]
+        return r.status_code, (hits[-1] if hits else None)
 
     s1, hit1 = ask("比亚迪营收")
     s2, hit2 = ask("比亚迪营收")  # 完全相同 → 应命中缓存

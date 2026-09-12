@@ -1,12 +1,17 @@
 """文档解析路由：按文件类型分派，统一输出文本 + 分页文本（用于按页分块/标注页码）。"""
 from __future__ import annotations
 
+import logging
 import os
+import re
 import threading
+import traceback
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -29,6 +34,8 @@ def detect_kind(filename: str) -> str:
         return "md"
     if ext == "txt":
         return "txt"
+    if ext in ("pptx", "ppt"):
+        return "pptx"
     if ext in ("png", "jpg", "jpeg", "gif", "bmp"):
         return "image"
     return "unknown"
@@ -36,6 +43,159 @@ def detect_kind(filename: str) -> str:
 
 _docling_converter = None
 _docling_lock = threading.Lock()
+
+
+
+# ---------- 公式图片 → LaTeX（pix2text-mfr，TrOCR/optimum-onnx，走 HF/hf-mirror） ----------
+_formula_ocr = None
+_formula_ocr_lock = threading.Lock()
+
+
+def _clean_formula_latex(latex: str) -> str:
+    """规整 pix2text 输出的 LaTeX：压缩连续对齐间距宏（\qquad/\quad/\hspace）为单个空格，去多余空白。
+
+    pix2text 常给公式尾部填一堆 \qquad 对齐（如 `... \qquad \qquad ... ( 2. 1 )`），会撑大 chunk 且占 token，
+    这里只压缩间距、不动结构（保留 \\, \\begin, \\left/\right 等）。
+    """
+    s = latex or ""
+    s = re.sub(r"(?:\\qquad|\\quad|\\hspace\*?\{[^}]*\})[ \t]*", " ", s)  # 压缩对齐间距宏
+    s = re.sub(r"\\textcircled\s*\{\s*=\s*\}\s*", "@", s)                    # mAP@0.5 的 \textcircled{=}
+    s = re.sub(r"\s*\{\s*", "{", s)                                            # { 前后去空格
+    s = re.sub(r"\s*\}\s*", "}", s)                                            # } 前后去空格
+    s = re.sub(r"[ \t]{2,}", " ", s)
+    return s.strip()
+
+
+def _get_formula_ocr():
+    """惰性加载公式识别模型（首次会从 HF 下载一次，后常驻内存）。未安装/加载失败由调用方兜底。
+
+    用 breezedeus/pix2text-mfr（TrOCR 架构，optimum-onnx 版）：pix2tex 模型从 GitHub 下载国内连不上，
+    texify(VisionEncoderDecoder) 在 transformers 4.5x 报 .to_dict 错；这个 TrOCR 模型走 HF(hf-mirror) 且兼容当前 transformers。
+    """
+    global _formula_ocr
+    if _formula_ocr is None:
+        with _formula_ocr_lock:
+            if _formula_ocr is None:
+                from transformers import TrOCRProcessor
+                from optimum.onnxruntime import ORTModelForVision2Seq
+
+                processor = TrOCRProcessor.from_pretrained("breezedeus/pix2text-mfr")
+                model = ORTModelForVision2Seq.from_pretrained("breezedeus/pix2text-mfr", use_cache=False)
+
+                def ocr(img):  # 保持 ocr(img)->latex 接口不变
+                    pixel_values = processor(images=img, return_tensors="pt").pixel_values
+                    gen = model.generate(pixel_values)
+                    return processor.tokenizer.batch_decode(gen, skip_special_tokens=True)[0]
+
+                _formula_ocr = ocr
+    return _formula_ocr
+
+
+def _crop_formula_image(res, item, pdf, padding: int = 4, pad_left: int = 30):
+    """裁剪公式区域为 PIL 图。优先 docling 自带 get_image（需 generate_page_images），否则 PyMuPDF 按 bbox 裁。
+
+    pad_left 单独加大：docling 的公式 bbox 常漏掉公式最左侧的标识符（如 `L_{IoU}`/`L_{CE}`、`F^\prime`），
+    而显示公式是居中排版、左侧是空白，多往左截些不会引入正文文字，能把标识符框进图里给 pix2text 识别。
+    """
+    from PIL import Image
+
+    try:
+        img = item.get_image(res.document)  # docling 内部已处理坐标系；需 page.image 非空
+        if img is not None:
+            return img
+    except Exception as e:
+        logger.warning("docling 取公式图片失败,回退裁剪: %s", e)
+
+    provs = getattr(item, "prov", None) or []
+    if not provs:
+        return None
+    prov = provs[0]
+    pgno = getattr(prov, "page_no", None)
+    page = res.document.pages.get(pgno) if pgno is not None else None
+    if page is None or page.size is None:
+        return None
+    box = prov.bbox.to_top_left_origin(page_height=page.size.height)
+    try:
+        pdf_page = pdf[pgno - 1]  # docling page_no 为 1-based
+    except Exception as e:
+        logger.warning("docling 页码越界/取页失败: %s", e)
+        return None
+    # docling 页尺寸与 pymupdf 若有细微差异，按比例缩放
+    sx = pdf_page.rect.width / page.size.width if page.size.width else 1.0
+    sy = pdf_page.rect.height / page.size.height if page.size.height else 1.0
+    l = max(0.0, box.l * sx - pad_left)
+    t = max(0.0, box.t * sy - padding)
+    r = min(pdf_page.rect.width, box.r * sx + padding)
+    b = min(pdf_page.rect.height, box.b * sy + padding)
+    if r <= l or b <= t:
+        return None
+    import fitz
+    pix = pdf_page.get_pixmap(dpi=300, clip=fitz.Rect(l, t, r, b), colorspace=fitz.csRGB, alpha=False)
+    return Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+
+
+def _enrich_formulas_with_ocr(res, pdf_path):
+    """对 docling 标为公式但 text 为空的（not-decoded）公式，用公式识别模型(pix2text-mfr) 裁图识别为 LaTeX 注入 item.text。
+
+    仅当 docling_formula_ocr 开启；公式识别模型缺装、加载失败或单条识别失败一律跳过（保留占位符），不影响主流程。
+    带诊断日志（print 会被 verify_formula.py 捕获进报告），便于真机定位是"没下模型"还是"裁图坐标错"。
+    """
+    if not get_settings().docling_formula_ocr:
+        return res
+    try:
+        from docling_core.types.doc.labels import DocItemLabel
+    except Exception as e:
+        print(f"[formula] docling label import 失败: {type(e).__name__}: {e}")
+        return res
+    items = []
+    try:
+        for item, _lvl in res.document.iterate_items():
+            if item.label == DocItemLabel.FORMULA and not getattr(item, "text", ""):
+                items.append(item)
+    except Exception as e:
+        print(f"[formula] iterate_items 遍历失败: {type(e).__name__}: {e}")
+        return res
+    if not items:
+        print("[formula] 未找到 not-decoded 公式 item（无待识别）")
+        return res
+    print(f"[formula] 找到 {len(items)} 个 not-decoded 公式 item")
+    try:
+        ocr = _get_formula_ocr()
+    except Exception as e:
+        print(f"[formula] 公式识别模型加载失败: {type(e).__name__}: {e}")
+        print("[formula] 加载异常回溯:\n" + traceback.format_exc())
+        return res  # 识别模型缺装 / 模型下载/加载失败 → 跳过，保留占位符
+    if ocr is None:
+        return res
+    print("[formula] 公式识别模型加载成功")
+    import fitz
+    try:
+        pdf = fitz.open(os.path.abspath(pdf_path))
+    except Exception as e:
+        print(f"[formula] fitz 打开 PDF 失败: {type(e).__name__}: {e}")
+        return res
+    try:
+        for i, item in enumerate(items):
+            pgno = (item.prov[0].page_no if getattr(item, "prov", None) else "?")
+            img = _crop_formula_image(res, item, pdf)
+            if img is None:
+                print(f"[formula]  #{i+1} p{pgno} 裁剪失败(bbox 不可用)")
+                continue
+            print(f"[formula]  #{i+1} p{pgno} 裁剪 OK 图像 {img.size[0]}x{img.size[1]}")
+            try:
+                latex = ocr(img)
+            except Exception as e:
+                print(f"[formula]  #{i+1} p{pgno} 识别异常: {type(e).__name__}: {e}")
+                continue
+            latex = _clean_formula_latex((latex or "").strip().strip("$").strip())  # 去定界符 + 规整间距
+            if latex:
+                item.text = latex
+                print(f"[formula]  #{i+1} p{pgno} -> {latex[:50]}")
+            else:
+                print(f"[formula]  #{i+1} p{pgno} 识别为空")
+    finally:
+        pdf.close()
+    return res
 
 
 def _build_docling_converter():
@@ -99,6 +259,8 @@ def _parse_pdf_docling(path: str):
     with _docling_lock:
         res = converter.convert(os.path.abspath(path))  # 绝对路径更稳
 
+    _enrich_formulas_with_ocr(res, path)  # 公式图片→LaTeX（pix2text-mfr，可选，失败回退占位符）
+
     pages_map = getattr(res.document, "pages", None) or {}
     page_objs = list(pages_map.values()) if isinstance(pages_map, dict) else list(pages_map)
     page_count = len(page_objs) or 1
@@ -154,6 +316,29 @@ def _parse_xlsx(path: str):
     return "\n".join(parts), len(wb.sheetnames)
 
 
+def _parse_pptx(path: str):
+    """PPT 提取文本（python-pptx）：逐页取文本框/表格内容。"""
+    from pptx import Presentation
+    prs = Presentation(path)
+    page_texts = []
+    for slide in prs.slides:
+        parts = []
+        for shape in slide.shapes:
+            if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    t = "".join(r.text for r in para.runs).strip()
+                    if t:
+                        parts.append(t)
+            if getattr(shape, "has_table", False) and shape.has_table:
+                for row in shape.table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+        page_texts.append(chr(10).join(parts))
+    text = (chr(10) + chr(10)).join(page_texts)
+    return text, len(page_texts), page_texts
+
+
 def _parse_text(path: str):
     raw = open(path, encoding="utf-8", errors="ignore").read()
     return raw, raw.count("\n")
@@ -184,6 +369,9 @@ class ParserRouter:
             if kind == "xlsx":
                 text, count = _parse_xlsx(path)
                 return ParsedDocument(text=text, page_count=count, pages=[text], metadata={"kind": "xlsx"})
+            if kind == "pptx":
+                text, count, pages = _parse_pptx(path)
+                return ParsedDocument(text=text, page_count=count, pages=pages, metadata={"kind": "pptx"})
             if kind in ("md", "txt"):
                 text, count = _parse_text(path)
                 return ParsedDocument(text=text, page_count=count, pages=[text], metadata={"kind": kind})

@@ -1,0 +1,8 @@
+#!/bin/sh
+# 提交前跑全量测试（单元 + API + 回归契约），失败则阻止提交
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$DIR/backend" || exit 1
+PY="$DIR/backend/.venv/Scripts/python.exe"
+echo "[pre-commit] 运行测试..."
+"$PY" -B -m pytest tests/ -q || { echo "[pre-commit] 测试失败，阻止提交"; exit 1; }
+echo "[pre-commit] 测试通过"

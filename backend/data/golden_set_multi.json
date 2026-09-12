@@ -1,0 +1,19 @@
+[
+  {"doc": "员工手册.docx", "question": "员工每年有多少天年假", "expect": "7天"},
+  {"doc": "员工手册.docx", "question": "病假3天以上由谁审批", "expect": "部门总监"},
+  {"doc": "员工手册.docx", "question": "列出所有假期类型", "expect": "事假"},
+  {"doc": "员工手册.docx", "question": "公司核心工作时间是什么时候", "expect": "10:00-16:00"},
+  {"doc": "员工手册.docx", "question": "公司的考勤打卡截止时间是几点", "negative": true},
+
+  {"doc": "销售数据.xlsx", "question": "2025年一季度营业总收入是多少", "expect": "1200"},
+  {"doc": "销售数据.xlsx", "question": "哪个区域一季度营收最高", "expect": "华东"},
+  {"doc": "销售数据.xlsx", "question": "列出所有销售区域", "expect": "华北"},
+  {"doc": "销售数据.xlsx", "question": "华南区一季度营收是多少", "expect": "430"},
+  {"doc": "销售数据.xlsx", "question": "公司产品的出厂价是多少", "negative": true},
+
+  {"doc": "产品说明.md", "question": "单次最多导入多少个文件", "expect": "1000"},
+  {"doc": "产品说明.md", "question": "支持哪些角色权限", "expect": "uploader"},
+  {"doc": "产品说明.md", "question": "系统支持哪些检索方式", "expect": "语义"},
+  {"doc": "产品说明.md", "question": "问答结果提供什么", "expect": "来源引用"},
+  {"doc": "产品说明.md", "question": "软件著作权登记号是多少", "negative": true}
+]
