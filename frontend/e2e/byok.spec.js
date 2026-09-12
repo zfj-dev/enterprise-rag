@@ -6,14 +6,24 @@ const { installApiMock, fillAppBoot, json, expect } = require('./helpers');
 const NAV = '.side-nav .nav-item:has-text("自带模型")';
 const MODAL = '#byokModal';
 
-// 启动所需的最小接口 + BYOK 两件套；返回 routes 供各用例改写
-async function boot(page, { config, balance } = {}) {
+// 启动所需的最小接口 + BYOK 三件套；返回 routes 供各用例改写
+async function boot(page, opt = {}) {
+  const cfg = opt.config || unconfigured();
   const routes = await installApiMock(page);
   fillAppBoot(routes);
-  routes['GET /llm/config'] = (r) => json(r, config || unconfigured());
-  routes['GET /llm/balance'] = (r) => json(r, balance || BALANCE);
+  routes['GET /llm/config'] = (r) => json(r, cfg);
+  routes['GET /llm/balance'] = (r) => json(r, opt.balance || BALANCE);
+  routes['GET /llm/capability'] = (r) => json(r, opt.cap || (cfg.configured ? capUnknown() : capUnconfigured()));
   return routes;
 }
+
+// 后端 CapabilityOut 的三种典型形态
+const capUnconfigured = () => ({ configured: false, checked: false, reachable: null,
+  supports_tools: null, source: '', note: '未配置自带模型 —— 走服务端全局模型，无需探测' });
+const capUnknown = () => ({ configured: true, checked: false, reachable: null,
+  supports_tools: null, source: '', note: '暂无结论 —— 点「测试连通性」探一次' });
+const capProbedOk = () => ({ configured: true, checked: true, reachable: true,
+  supports_tools: true, source: 'probed', note: '探到 provider 接受了带 tools 的请求' });
 
 // 后端 LLMConfigOut 的两种典型形态
 const unconfigured = () => ({
@@ -265,4 +275,106 @@ test('用例43 保存后，面板内的余额块也要刷新（不再显示旧�
 
   await expect(page.locator('#byokBal')).toContainText('42.5');           // 已切换到真实厂商余额
   await expect(page.locator('#byokBal')).not.toContainText('未配置自带模型');
+});
+
+test('用例47 未配置时能力块说明「未配置」，且不给测试按钮', async ({ page }) => {
+  await boot(page, { config: unconfigured() });
+  await page.goto('/');
+  await openPanel(page);
+
+  await expect(page.locator('#byokCap')).toContainText('未配置自带模型');
+  await expect(page.locator('#byokTest')).toHaveCount(0);
+});
+
+test('用例48 没有结论时显示「? 未探到 / ? 未知」—— 不谎报「不通 / 不支持」', async ({ page }) => {
+  await boot(page, { config: configured(), cap: capUnknown() });
+  await page.goto('/');
+  await openPanel(page);
+
+  await expect(page.locator('#byokCap')).toContainText('未探到');
+  await expect(page.locator('#byokCap')).toContainText('未知');
+  await expect(page.locator('#byokCap')).not.toContainText('不支持');
+  await expect(page.locator('#byokTest')).toBeVisible();
+});
+
+test('用例49 点「测试连通性」触发 POST 探测，并把结论显示出来', async ({ page }) => {
+  const routes = await boot(page, { config: configured(), cap: capUnknown() });
+  let probed = 0;
+  routes['POST /llm/capability/probe'] = (r) => { probed += 1; return json(r, capProbedOk()); };
+  await page.goto('/');
+  await openPanel(page);
+
+  await expect(page.locator('#byokCap')).toContainText('未探到');
+  await page.locator('#byokTest').click();
+
+  await expect.poll(() => probed).toBe(1);
+  await expect(page.locator('#byokCap')).toContainText('✓ 支持');
+  await expect(page.locator('#byokCap')).toContainText('✓ 通');
+});
+
+test('用例50 探测失败时如实说原因，仍**不**显示「不支持」', async ({ page }) => {
+  const routes = await boot(page, { config: configured(), cap: capUnknown() });
+  routes['POST /llm/capability/probe'] = (r) => json(r, {
+    configured: true, checked: true, reachable: null, supports_tools: null, source: '',
+    note: '连不上（ConnectError）—— 请检查地址与网络',
+  });
+  await page.goto('/');
+  await openPanel(page);
+
+  await page.locator('#byokTest').click();
+
+  await expect(page.locator('#byokCap')).toContainText('ConnectError');   // 原因要透出来
+  await expect(page.locator('#byokCap')).toContainText('未知');
+  await expect(page.locator('#byokCap')).not.toContainText('不支持');
+});
+
+test('用例51 保存后旧的能力结论作废，重新拉一次', async ({ page }) => {
+  const routes = await boot(page, { config: unconfigured(), cap: capUnconfigured() });
+  let capCalls = 0;
+  routes['GET /llm/capability'] = (r) => {
+    capCalls += 1;
+    return json(r, capCalls > 1 ? capUnknown() : capUnconfigured());
+  };
+  routes['PUT /llm/config'] = (r) => json(r, configured());
+  await page.goto('/');
+  await openPanel(page);
+  await expect(page.locator('#byokCap')).toContainText('未配置自带模型');
+
+  await page.locator('#byokBaseUrl').fill('https://api.deepseek.com/v1');
+  await page.locator('#byokKey').fill('sk-secret-xyz');
+  await page.locator('#byokModel').fill('deepseek-chat');
+  await page.locator('#byokSave').click();
+
+  await expect.poll(() => capCalls).toBeGreaterThan(1);       // 配置变了 → 能力重拉
+  await expect(page.locator('#byokCap')).toContainText('未探到');
+});
+
+test('用例52 打开面板不发探测请求（只看缓存）', async ({ page }) => {
+  const routes = await boot(page, { config: configured(), cap: capUnknown() });
+  let probed = 0;
+  routes['POST /llm/capability/probe'] = (r) => { probed += 1; return json(r, capProbedOk()); };
+  await page.goto('/');
+  await openPanel(page);
+
+  await expect(page.locator('#byokCap')).toBeVisible();
+  await page.waitForTimeout(300);
+  expect(probed).toBe(0);                                     // 打开面板不该打一次外网
+});
+
+test('用例53 「无法据此确认」时显示「? 未知（保守默认）」，**不**显示「✗ 不支持」', async ({ page }) => {
+  // 后端被 4xx 拒时的形态：supports_tools=false 是**内部保守默认**，不是探测结论。
+  // 照它写「✗ 不支持」会和同一块里的 note 自相矛盾 —— 那正是本仓库禁止的「拿不知道当结论」。
+  const routes = await boot(page, { config: configured(), cap: capUnknown() });
+  routes['POST /llm/capability/probe'] = (r) => json(r, {
+    configured: true, checked: true, reachable: true, supports_tools: false,
+    source: 'conservative',
+    note: '探测被拒（HTTP 400）—— 无法据此确认工具支持，按保守默认处理',
+  });
+  await page.goto('/');
+  await openPanel(page);
+  await page.locator('#byokTest').click();
+
+  await expect(page.locator('#byokCap')).toContainText('未知（保守默认）');
+  await expect(page.locator('#byokCap')).toContainText('✓ 通');       // 对端答话了，连通性为真
+  await expect(page.locator('#byokCap')).not.toContainText('✗ 不支持');
 });

@@ -278,6 +278,12 @@
   .byok-msg.ok{color:#16a34a}
   .byok-btns{display:flex;gap:8px;align-items:center;margin-top:14px}
   .byok-btns button:disabled{opacity:.5;cursor:not-allowed}
+  .byok-cap{background:var(--surface-muted);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--text-secondary);line-height:1.9;margin-top:16px}
+  .byok-cap-t{display:flex;align-items:center;justify-content:space-between;font-weight:600;color:var(--text-primary);margin-bottom:4px}
+  .byok-cap-line b.ok{color:#16a34a}
+  .byok-cap-line b.no{color:var(--danger)}
+  .byok-cap-line b.unk{color:#d97706}
+  .byok-test{padding:3px 10px;font-size:11px;border-radius:6px}
   .byok-bal{background:var(--surface-muted);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--text-secondary);line-height:1.9;margin-top:16px}
 
   /* 删除确认弹窗 */
@@ -619,6 +625,7 @@ function openByok(){
     +'<div class="byok-hint">地址须为 <code>https</code>、且不得指向私网 / 回环（SSRF 防护；部署方可在服务端显式放宽）。明文 Key 只提交这一次，不回显、不进日志。</div>'
     +'<div class="byok-btns"><button type="submit" class="btn-primary" id="byokSave">保存</button><button type="button" class="btn-danger" id="byokDelete" onclick="deleteByok()" style="display:none">删除</button><button type="button" class="btn-cancel" id="byokClose" onclick="closeByok()">关闭</button></div>'
     +'<div class="byok-msg" id="byokMsg"></div></form>'
+    +'<div class="byok-cap" id="byokCap">加载中…</div>'
     +'<div class="byok-bal" id="byokBal">加载中…</div></div>';
   m.onclick=e=>{if(e.target===m)closeByok()};
   document.body.appendChild(m);
@@ -630,9 +637,54 @@ function byokBusy(on){const s=document.getElementById('byokSave'),d=document.get
 function setInput(id,v){const e=document.getElementById(id);if(e)e.value=v}
 // 拉不到配置 **不等于** 未配置：失败时如实说失败，不假装「回落服务端全局」。
 async function loadByok(){
-  const c=await api('/llm/config');
-  renderByokConfig(c.ok?c.data:null,c.ok?null:c);
+  const rs=await Promise.all([api('/llm/config'),api('/llm/capability')]);
+  renderByokConfig(rs[0].ok?rs[0].data:null,rs[0].ok?null:rs[0]);
+  renderByokCap(rs[1].ok?rs[1].data:null,rs[1].ok?null:rs[1]);
   loadBalance();
+}
+async function loadByokCap(){
+  const r=await api('/llm/capability');
+  renderByokCap(r.ok?r.data:null,r.ok?null:r);
+}
+// 连通性 / 工具调用：**没探到就写「未探到 / 未知」**，不写「不通 / 不支持」——
+// 后者是在不知道的时候替用户下了结论（票 34 的保守默认只在内部生效，不该拿来当结论展示）。
+function renderByokCap(cap,err){
+  const el=document.getElementById('byokCap');if(!el)return;
+  if(err){
+    el.innerHTML='<div class="byok-cap-t">能力</div><div class="byok-cap-line">取能力失败：'
+      +esc(fmtErr(err.data&&err.data.detail||'请求失败'))+'</div>';
+    return;
+  }
+  if(!cap||!cap.configured){
+    el.innerHTML='<div class="byok-cap-t">能力</div><div class="byok-cap-line">'
+      +esc((cap&&cap.note)||'未配置自带模型')+'</div>';
+    return;
+  }
+  // 只有**探到时**才敢写「支持 / 不支持」。
+  // source=conservative（如被 4xx 拒）时后端按保守默认给了 supports_tools=false，但那是
+  // **内部降级用的默认值，不是探测结论** —— 照它渲染成「✗ 不支持」会和自己下面那行
+  // note（「无法据此确认工具支持」）自相矛盾。连通性同理：没探到就写「未探到」，不写「不通」。
+  const tools=cap.source==='conservative'?'<b class="unk">? 未知（保守默认）</b>'
+    :(cap.supports_tools===true?'<b class="ok">✓ 支持</b>':'<b class="unk">? 未知</b>');
+  const reach=cap.reachable===true?'<b class="ok">✓ 通</b>':'<b class="unk">? 未探到</b>';
+  el.innerHTML='<div class="byok-cap-t"><span>能力</span>'
+    +'<button type="button" class="btn-ghost byok-test" id="byokTest" onclick="testByok()">测试连通性</button></div>'
+    +'<div class="byok-cap-line">连通性：'+reach+'</div>'
+    +'<div class="byok-cap-line">工具调用：'+tools+'</div>'
+    +'<div class="bal-src">'+esc(cap.note||'')+'</div>';
+}
+// 探测要发一次外网请求，所以**只在点按钮时**发生（打开面板只读缓存，见 loadByok）。
+async function testByok(){
+  const b=document.getElementById('byokTest');
+  if(b&&b.disabled)return;
+  if(b){b.disabled=true;b.textContent='探测中…'}
+  try{
+    const r=await api('/llm/capability/probe',{method:'POST'});
+    renderByokCap(r.ok?r.data:null,r.ok?null:r);
+  }finally{
+    const nb=document.getElementById('byokTest');
+    if(nb){nb.disabled=false;nb.textContent='测试连通性'}
+  }
 }
 function renderByokConfig(cfg,err){
   const st=document.getElementById('byokStatus');if(!st)return;
@@ -670,6 +722,7 @@ async function saveByok(){
     const r=await api('/llm/config',{method:'PUT',body:{base_url,key,model}});
     if(!r.ok){setByokMsg(fmtErr(r.data&&r.data.detail)||'保存失败');return}
     renderByokConfig(r.data);                                  // 顺手清空 key 输入框
+    loadByokCap();                                             // 换了配置，旧的能力结论作废
     setByokMsg('已保存 —— 下一次问答起走你的模型',true);
     loadBalance();
   }finally{byokBusy(false)}
@@ -684,6 +737,7 @@ async function deleteByok(){
     if(!r.ok){setByokMsg(fmtErr(r.data&&r.data.detail)||'删除失败');return}
     const c=await api('/llm/config');
     renderByokConfig(c.ok?c.data:null,c.ok?null:c);
+    loadByokCap();
     setByokMsg('已删除 —— 下一次问答立刻回落服务端全局模型',true);
     loadBalance();
   }finally{byokBusy(false)}

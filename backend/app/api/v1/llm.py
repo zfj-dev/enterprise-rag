@@ -16,7 +16,8 @@ from app.core.byok import LLMConfig
 from app.core.cost import summarize, summarize_note
 from app.core.container import Runtime
 from app.core.ssrf import check_base_url, parse_allowed_hosts
-from app.core.schemas import BalanceOut, LLMConfigIn, LLMConfigOut, VendorBalanceOut
+from app.core.schemas import (BalanceOut, CapabilityOut, LLMConfigIn, LLMConfigOut,
+                              VendorBalanceOut)
 from app.models.entities import User
 
 router = APIRouter(prefix="/llm", tags=["llm"])
@@ -60,6 +61,55 @@ def _out(rt: Runtime, user_id: str) -> LLMConfigOut:
     # persistent 如实告诉用户：没配加密口令时凭据只在内存里，重启就没了
     return LLMConfigOut(configured=bool(view), persistent=rt.user_llm_config_store.persistent,
                         **(view or {}))
+
+
+@router.get("/capability", response_model=CapabilityOut)
+def get_capability(user: User = Depends(get_current_user),
+                   rt: Runtime = Depends(get_runtime)) -> CapabilityOut:
+    """看**已知**的能力结论 —— **只读缓存，不发起探测**。
+
+    打开面板不该把模型端点探一遍，所以探测由 `POST /capability/probe` 显式触发（票 36 / #44）。
+    注意「不发探测」不等于「零网络」：地址复查（票 33）会做一次 DNS 解析，与 `/llm/balance` 同。
+    """
+    return _capability_out(rt, user.id, do_probe=False)
+
+
+@router.post("/capability/probe", response_model=CapabilityOut)
+def probe_capability(user: User = Depends(get_current_user),
+                     rt: Runtime = Depends(get_runtime)) -> CapabilityOut:
+    """**按需**探一次（面板上的「测试连通性」）—— 强制重探，不吃缓存。探不到就如实说没探到。"""
+    return _capability_out(rt, user.id, do_probe=True)
+
+
+def _capability_out(rt: Runtime, user_id: str, *, do_probe: bool) -> CapabilityOut:
+    cfg = rt.user_llm_config_store.get(user_id)
+    if cfg is None:
+        # 没配置：不是「不支持」，是「没有这回事」—— supports_tools 留 None
+        return CapabilityOut(note="未配置自带模型 —— 走服务端全局模型，无需探测")
+    if not rt.base_url_is_still_safe(cfg.base_url):
+        # 地址复查不过（票 33）：**不去连它** —— 探测也是一条对外发请求的路径。
+        # reachable 留 None：我们**没试过**，说「不通」就是编答案。
+        return CapabilityOut(configured=True,
+                             note="自带地址未通过安全复查，不发起探测")
+
+    if do_probe:
+        # 走 probe_fresh：点「测试连通性」必须真探一次，命中缓存也要重来
+        cap, reason = rt.capability_probe.probe_fresh(cfg.base_url, cfg.api_key, cfg.model)
+    else:
+        cap, reason = rt.capability_probe.cached(cfg.base_url, cfg.api_key, cfg.model), ""
+
+    if cap is None:
+        if not do_probe:
+            # **不写「还没探测过」**：探过但没探到结论时同样没有缓存（失败不落缓存，票 34），
+            # 那句就成了假话。只说「暂无结论」—— 这句在两种情况下都成立。
+            return CapabilityOut(configured=True, note="暂无结论 —— 点「测试连通性」探一次")
+        # 探了但没结论：**不谎报「不支持工具」**，如实说没探到并把原因带出来
+        return CapabilityOut(configured=True, checked=True,
+                             note=reason or "没探到 —— 按保守默认处理（视为不支持工具）")
+
+    # 拿到结论就说明对端**答话了**（200 或 4xx 都算），所以连通性为真
+    return CapabilityOut(configured=True, checked=True, reachable=True,
+                         supports_tools=cap.supports_tools, source=cap.source, note=cap.note)
 
 
 @router.get("/balance", response_model=BalanceOut)

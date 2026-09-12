@@ -171,6 +171,21 @@ class BalanceOut(BaseModel):
     ours: CostSummaryOut = Field(default_factory=CostSummaryOut)
 
 
+class CapabilityOut(BaseModel):
+    """自带模型的能力探测结果（给界面看）。
+
+    **没探到就说没探到**：`supports_tools` 为 `None` 表示「不知道」，
+    绝不把「不知道」渲染成 `False`（那等于替用户断定他的模型不支持工具）。
+    """
+
+    configured: bool = False          # 有没有自带配置
+    checked: bool = False             # 有没有结论（缓存里有，或刚探过）
+    reachable: bool | None = None     # None = 不知道（没探到）
+    supports_tools: bool | None = None
+    source: str = ""                  # probed / conservative / ""
+    note: str = ""                    # 结论或失败原因，必须能自己说明白
+
+
 # ---- 跨会话记忆 ----
 class MemoryFactOut(BaseModel):
     id: str
