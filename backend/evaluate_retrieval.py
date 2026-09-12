@@ -97,6 +97,26 @@ def _retrieve_fn(rt):
 
 
 def main() -> None:
+    """离线检索评测。
+
+    **不开降级**（票 39 / #48）：重排不可达就让它抛，这一段照仓库惯例写「未跑」，
+    而不是把 RRF 原顺序的数字当成「重排已跑」报出去。
+
+    ⚠️ `get_settings()` 是 lru_cache 单例，而一页报告是**同一个进程**里顺次跑各段的 ——
+    改了不还回去，后面跑的段会跟着变严格、结果还依赖段序。所以这里用完就恢复。
+    """
+    from app.config import get_settings
+
+    settings = get_settings()
+    prev = settings.rerank_strict
+    settings.rerank_strict = True
+    try:
+        _main_body()
+    finally:
+        settings.rerank_strict = prev
+
+
+def _main_body() -> None:
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     os.environ.setdefault("PARSER_USE_DOCLING", "false")
     from app.config import get_settings

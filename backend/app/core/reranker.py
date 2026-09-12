@@ -18,10 +18,28 @@ logger = logging.getLogger(__name__)
 _RELEVANCE_OFFSET = 0.15
 
 
-def _apply_scores(candidates: Sequence[dict], results: Sequence[dict]) -> list[dict]:
+def _degrade_or_raise(info: dict | None, err: Exception, what: str) -> None:
+    """重排不可达时的**唯一**处置：严格模式直接抛，否则记下这次降级了。
+
+    严格模式是给评测用的 —— 那边要的是「这一段没跑成」，而不是把 RRF 原顺序的数字
+    说成「重排已跑」。线上默认不严格：重排挂掉不该把问答也打断。
+    降级的事实写进 `info` 出参 —— 只写日志等于只有看日志的人知道。
+    """
+    if get_settings().rerank_strict:
+        raise err
+    logger.warning("%s不可达，降级 RRF 顺序：%s", what, err)
+    if info is not None:
+        info["degraded"] = True
+        info["note"] = "重排不可达，已降级为 RRF 原顺序：%s" % err
+
+
+def _apply_scores(candidates: Sequence[dict], results: Sequence[dict],
+                  info: dict | None = None) -> list[dict]:
     """把 `{index, relevance_score}` 的结果落回候选并排序 —— 自建节点与托管服务共用一份。
 
-    没被评分的候选记 **0 分**（不猜它其实相关），与「拿不到就不报数」一致。
+    没被评分的候选记 **0 分**（不猜它其实相关）；但它们**与「评了 0 分」不是一回事** ——
+    前者是「不知道」，后者是「确实不相关」。所以另外数一个 `unscored` 交给调用方，
+    别让两者在报告里混成一个数。
     """
     score = {res["index"]: float(res["relevance_score"]) for res in results if "index" in res}
     out = []
@@ -30,17 +48,28 @@ def _apply_scores(candidates: Sequence[dict], results: Sequence[dict]) -> list[d
         cc["rank_score"] = score.get(i, 0.0)
         out.append(cc)
     out.sort(key=lambda x: x["rank_score"], reverse=True)
+    if info is not None:
+        missing = sum(1 for i in range(len(candidates)) if i not in score)
+        if missing:
+            info["unscored"] = missing
     return out
 
 
 class Reranker(ABC):
     @abstractmethod
-    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
-        ...
+    def rerank(self, query: str, candidates: Sequence[dict], *,
+               info: dict | None = None) -> list[dict]:
+        """重排候选。`info` 是**出参**：把「降级了 / 有候选没被评分」这类
+        **不该被当成结论**的事实写进去，由调用方带走。
+
+        与 `HybridRetriever.retrieve` 的 `timings` 同一个手法 —— 不改返回值形状，
+        也不需要在线程间共享可变状态（运行时是单例、请求可能并发）。
+        """
 
 
 class FakeReranker(Reranker):
-    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
+    def rerank(self, query: str, candidates: Sequence[dict], *,
+               info: dict | None = None) -> list[dict]:
         q = set(str(query).lower().split())
         out = []
         for c in candidates:
@@ -74,7 +103,8 @@ class BgeReranker(Reranker):
             except Exception as e:
                 logger.warning("bge 重排转 fp16 失败: %s", e)
 
-    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
+    def rerank(self, query: str, candidates: Sequence[dict], *,
+               info: dict | None = None) -> list[dict]:
         pairs = [(query, c.get("content", "")) for c in candidates]
         enc = self.tokenizer(pairs, padding=True, truncation=True, return_tensors="pt")
         enc = {k: v.to(self.device) for k, v in enc.items()}
@@ -104,7 +134,8 @@ class ApiReranker(Reranker):
         if not self.base:
             raise ValueError("RERANK_API_BASE 未设置(reranker_provider=api 时需指向推理节点)")
 
-    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
+    def rerank(self, query: str, candidates: Sequence[dict], *,
+               info: dict | None = None) -> list[dict]:
         if not candidates:
             return list(candidates)
         docs = [str(c.get("content", "")) for c in candidates]
@@ -117,9 +148,9 @@ class ApiReranker(Reranker):
                 r.raise_for_status()
                 results = r.json().get("results", [])
         except Exception as e:
-            logger.warning("rerank 节点不可达,降级 RRF 顺序: %s", e)
+            _degrade_or_raise(info, e, "rerank 节点")
             return list(candidates)  # 已按 RRF 融合排序
-        return _apply_scores(candidates, results)
+        return _apply_scores(candidates, results, info)
 
 
 class SiliconFlowReranker(Reranker):
@@ -139,7 +170,8 @@ class SiliconFlowReranker(Reranker):
         self.api_key = api_key or s.rerank_api_key or ""
         self.model = model or s.reranker_model
 
-    def rerank(self, query: str, candidates: Sequence[dict]) -> list[dict]:
+    def rerank(self, query: str, candidates: Sequence[dict], *,
+               info: dict | None = None) -> list[dict]:
         if not candidates:
             return list(candidates)
         docs = [str(c.get("content", "")) for c in candidates]
@@ -154,9 +186,9 @@ class SiliconFlowReranker(Reranker):
                 r.raise_for_status()
                 results = r.json().get("results", [])
         except Exception as e:
-            logger.warning("托管重排不可达，降级 RRF 顺序：%s", e)
+            _degrade_or_raise(info, e, "托管重排")
             return list(candidates)          # 已按 RRF 融合排序
-        return _apply_scores(candidates, results)
+        return _apply_scores(candidates, results, info)
 
 
 def get_reranker(provider: str | None = None) -> Reranker:

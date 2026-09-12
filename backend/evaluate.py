@@ -35,9 +35,28 @@ GOLDEN = os.environ.get("EVAL_GOLDEN", os.path.join(BACKEND, "data", "golden_set
 DOC = os.environ.get("EVAL_DOC", os.path.join(BACKEND, "paper.pdf"))
 
 
+def _rerank_line(report) -> list:
+    """重排降级的说明行（没有就返回空）—— **同一份文案只在这里写**，一页报告也调它。
+
+    降级本身不打断回答（对），但这批数字是在 RRF 原顺序上跑出来的，必须写出来。
+    """
+    out = []
+    degraded = getattr(report, "rerank_degraded", 0)
+    if degraded:
+        out.append("重排: **有 %d 次查询降级为 RRF 原顺序** —— 这批数字不是在重排结果上跑出来的"
+                   % degraded)
+    unscored = getattr(report, "rerank_unscored", 0)
+    if unscored:
+        out.append("重排: 有 %d 次查询里存在**压根没被评分**的候选（与「评了 0 分」不是一回事）"
+                   % unscored)
+    return out
+
+
 def _parse_sse(body: str) -> dict:
     """把 /chat/stream 的 SSE 响应体拼成核心要的 {answer, sources, citation_coverage, context}。"""
     answer, sources, coverage, context = "", [], None, None
+    # None = 服务端没给这个字段（**不知道**），与「给了 false（确实没降级）」不是一回事
+    rerank_degraded, rerank_unscored = None, 0
     for line in body.splitlines():
         if not line.startswith("data:"):
             continue
@@ -52,8 +71,15 @@ def _parse_sse(body: str) -> dict:
         elif ev.get("type") == "done":
             coverage = ev.get("citation_coverage")     # 逐句核验的引用覆盖率（真实模式才有）
             context = ev.get("context")                # 压缩前/后 token（真实分词器才有）
+            # 这次的重排是不是降级成了 RRF 原顺序（票 39 / #48）——
+            # 报告要靠它说清这批数字是不是在「没重排」的情况下跑出来的
+            info = ev.get("rerank")
+            if isinstance(info, dict):
+                rerank_degraded = bool(info.get("degraded"))
+                rerank_unscored = int(info.get("unscored") or 0)
     return {"answer": answer, "sources": sources, "citation_coverage": coverage,
-            "context": context}
+            "context": context, "rerank_degraded": rerank_degraded,
+            "rerank_unscored": rerank_unscored}
 
 
 def _answer_fn(client: httpx.Client, kb_id: str, headers: dict, session_id: str | None = None):
@@ -129,8 +155,22 @@ def run_online(base=None, golden_path=None, doc_path=None):
     multi = _truthy(os.environ.get("EVAL_MULTI_TURN"))
     session_id = "eval-multi-turn" if multi else None
     judge, judge_note = _build_judge()
-    report = run_eval(golden, _answer_fn(c, kb, H, session_id),
+    # 数一下有多少次查询的重排降级了：降级本身不打断回答（对），但报告不能假装重排跑过了（#48）
+    inner = _answer_fn(c, kb, H, session_id)
+    counts = {"degraded": 0, "unscored": 0}
+
+    def counting(question):
+        got = inner(question)
+        if got.get("rerank_degraded") is True:      # 明确降级才算；None 是「不知道」，不猜
+            counts["degraded"] += 1
+        if got.get("rerank_unscored"):
+            counts["unscored"] += 1
+        return got
+
+    report = run_eval(golden, counting,
                       judge_fn=judge, judge_label=judge.label if judge else None)
+    report.rerank_degraded = counts["degraded"]
+    report.rerank_unscored = counts["unscored"]
     if judge_note:
         report.judge_error = report.judge_error or judge_note
     c.delete("/api/v1/knowledge/%s" % kb, headers=H)
@@ -147,6 +187,7 @@ def main() -> None:
     try:
         report, upload = run_online()
         head.append(_upload_line(upload))
+        head.extend(_rerank_line(report))
         head.append("")
         body = report.to_lines()
     except Exception:

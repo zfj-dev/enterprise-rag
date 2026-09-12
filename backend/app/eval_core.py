@@ -99,6 +99,10 @@ class Report:
     latency: LatencyMetrics | None = None       # 延迟分桶（票 07）；同上
     judge_label: str | None = None              # 裁判口径，写进报告才可跨时间比较
     judge_error: str | None = None              # 裁判整体不可用的原因（缺 Key 等）
+    # 重排降级/未评分的次数（票 39）：降级不打断回答是对的，但报告得说清这批数字
+    # 是不是在「没重排」的情况下跑出来的。
+    rerank_degraded: int = 0
+    rerank_unscored: int = 0
 
     @property
     def ragas(self) -> dict | None:

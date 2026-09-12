@@ -88,7 +88,15 @@ class HybridRetriever:
 
         t_rerank = time.perf_counter()
         if self.reranker:
-            merged = self.reranker.rerank(query, merged)
+            info: dict = {}
+            merged = self.reranker.rerank(query, merged, info=info)
+            if timings is not None:
+                # 降级要跟着数字一起走：只记 rerank_ms 会让报告看起来「重排已跑」（#48）
+                timings["rerank_degraded"] = bool(info.get("degraded"))
+                if info.get("note"):
+                    timings["rerank_note"] = info["note"]
+                if info.get("unscored"):
+                    timings["rerank_unscored"] = info["unscored"]
         if timings is not None:
             timings["rerank_ms"] = (time.perf_counter() - t_rerank) * 1000
 
