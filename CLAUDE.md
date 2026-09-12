@@ -31,13 +31,19 @@ AI 求职 + 真给身边人用的**自托管 RAG 文档问答**，单人独立�
 - 注册默认 `viewer`；seed 管理员 `admin/admin123`。
 - 演示模式 `FakeLLM` 返回固定"（模拟回答）..."，做全链路演示；真实模式需 API Key。
 
-## 当前进度（2026-08-27）
-- ✅ 后端全链路（上传→解析→分块→向量化→混合检索→重排→生成→引用→反馈→调试）+ API 20 测试全绿 + 前端 + docker-compose + README + 本文档已完成。
-- 演示模式**完整可用**；真实模式（pgvector search / Docling / 云端 LLM / 问题优化）为**适配接口就位、真机联调待做**。
+## 当前进度（2026-09-12）
+- ✅ **`docs/specs/0001-0006` 全部落地**：评测 / Agentic+MCP / 上下文压缩 / 跨会话记忆 / 成本面板 / 自带 Key（BYOK）。
+- 测试：后端 **612 passed / 3 skipped**（约 2.5 分钟，pre-commit 钩子自动跑，别 --no-verify）；Playwright e2e **55 passed / 2 skipped**。
+- 演示模式**完整可用**；真实模式（GPU bge + Docling + DashScope）已在真机跑通全链路。
+- **票做完了**：`ready-for-agent` 队列为空（`gh issue list --label ready-for-agent`）。剩下的是**交付物**。
 
-## 下一步
-- 真实模式：补 `PgVectorStore.search`；接入 Docling/PP-Structure；云端 LLM + 问题优化；语义缓存(Redis)；RAGAS 评估/黄金集。
-- 面试讲法：混合检索+RRF+重排；引用校验；检索时权限过滤；工程取舍（pgvector/Celery/混合/砍 GraphRAG）。
+## 下一步（交付物，需要用户真机出手）
+- **一页评测报告（带数字）**：`scripts/evaluate_all.ps1` → `backend/logs/eval-summary.log`。三条前置缺一不可 ——
+  生成层与延迟要**服务在跑**；RGB 要**官方数据集**（`github.com/chen700564/RGB` 的 `data/` → `backend/data/rgb/`）；
+  并发要先调高 `MAX_CONCURRENT_STREAMS_PER_USER`。**缺前置一律写「未跑」，绝不产假数字。**
+  ⚠️ `backend/data/` 是**入库目录**（黄金集在里面），RGB 数据有几十 MB —— 放进去前先想好要不要真入库（或先加 `.gitignore`）。
+- **在线 Demo 地址 + 2 分钟演示视频**：尚未上线。
+- 面试讲法：混合检索+RRF+重排；引用校验；检索时权限过滤；BYOK 的 SSRF/加密/能力探测；工程取舍（pgvector/Celery/混合/砍 GraphRAG）。
 
 ## 近期修复（2026-08-27，用户真机演示反馈）
 - **中文检索增强**：FakeEmbedding 改"字符级词袋"（"营收"~"营业收入"部分匹配），不再按空格分词。
@@ -94,6 +100,23 @@ AI 求职 + 真给身边人用的**自托管 RAG 文档问答**，单人独立�
 - **前端体验（2026-09-02）**：① KaTeX 去掉 `defer`（页面脚本前加载好），消除刷新后公式延迟渲染；② `ask()` 去掉全局 `STREAMING` 锁，支持**多对话同时流式输出**，每条 AI 消息自带「⏹停止」按钮；③ 点引用来源改为**右侧「文档管理」面板切到「原文预览」模式**（`showSource`→`#srcPrev`），加载全文+自动滚动到对应页+黄色 pulse 高亮闪烁后渐隐，`‹返回` 恢复文档列表（`exitSourcePreview`）。
 - **多对话并发隔离 + 原文预览精确高亮（2026-09-02）**：① `ask()` 每流独立 `AbortController`/`reqSession`/`st.session`，`ACTIVE_STREAMS` 改 Map 按流注册；`sources` 事件只在当前视图仍是该会话时才回写 `SESSION`/localStorage（防串台），并刷新会话列表；`stopCurrent()` 优先停当前激活会话(SESSION)的流、否则最后启动的，只停一个。② `showSource` 按页渲染(`src-page`)到右栏 `#srcPrev`，只高亮来源片段(`mark.src-flash`)，`prev.scrollTop+=` 手动定位到该页（仅右栏内部滚动，不滚页面）；`@keyframes srcFlash` 黄色闪烁 3 次(0/30/60%)+渐隐(2.2s ease 1)。
 - **多对话 Map 架构重构（2026-09-02）**：前端会话管理层改为 `conversations: Map<uuid, Conversation>`（id/kbId/title/messages/ctrl/isStreaming/currentStreamText/sources）+ `activeConversationId`；每条消息/流式/`abortController`/`currentStreamText` 都按对话隔离；localStorage 用 `chat_history_${conversationId}` 分 key（刷新按 key 恢复、禁止合并）；新建对话即时插 UUID 标题；切换对话只改 `activeConversationId` 不关其他 SSE；停止只停当前激活对话；后端 `_get_or_create_session` 支持客户端 UUID 直接作为会话 id。左列表 pin/多选暂简化（保留重命名/删除），来源点击卡片保留。⚠️ 大重构，需真机全面回归。
+
+### 2026-09-10 ~ 09-12：票 21–36（spec 0001–0006 全部落地）
+- 三轮会话把票做完：上下文压缩（滚动摘要 + 工具结果清理 + 质量护栏）、跨会话记忆、per-query 用量/费用/额度硬拦、自带 Key（BYOK）。
+  **细节以 `docs/specs/0001-0006` 与 `docs/tickets/21-36` 为准**，这里只记不写在别处的东西。
+- **术语先查 `CONTEXT.md`**：踩过一次 —— 界面写「花你自己的额度」，而「额度」在 CONTEXT.md 里是**平台窗口内花费上限**，
+  BYOK 恰好**不占**它。同一个词不能既指 token 又指钱，也不能既指平台额度又指用户自付。
+- **「拿不到就不报数」已贯穿到 UI**（票 35/36）：余额查不到、能力没探到、配置读失败 —— 一律如实写原因，且
+  **`null`（不知道）绝不渲染成 `false`（已断定）**。两轴审查最爱抓的就是这类「把不知道当结论」；票 34 的
+  「保守默认（不支持工具）」是**内部降级值**，外显时必须写成「未知」。
+- **BYOK 的真实边界**：没配 `BYOK_SECRET_KEY` 时凭据只存内存，`persistent=false` 要如实说「重启即失」；
+  `base_url` 保存与使用**各验一道**（DNS rebinding）。
+- **前端不要留「点了没反应」的入口**：本会话清掉 5 个（知识库设置 / 提示词模板 / 深度思考 / 联网搜索 / 模型下拉）——
+  它们只在本地翻状态、**从不进请求体**。`ChatRequest` 只有 `kb_id/question/session_id/stream` 四个字段；
+  加界面前先确认后端收不收。真浏览器里点一下就露。
+- **UI 改动要真机验**：`mcp__Claude_Preview__*`（临时写 `.claude/launch.json` → `preview_start` → `preview_eval` 断言 DOM →
+  验完删掉 launch.json 与它**生成在仓库根**的 `rag.db`）。⚠️ **别删 `backend/rag.db`** —— 那是用户数据。
+  另：同一个页面刚加载完的第一次 eval 常报 `Inspected target navigated or closed`，重试一次即可。
 
 ## Agent skills
 
