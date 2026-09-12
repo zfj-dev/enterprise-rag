@@ -108,6 +108,11 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 - **语义缓存**：bge 相似度 > 0.92 命中（内存版默认，`REDIS_URL` 可切 Redis）；**含精确编号的问题跳过缓存**，否则「表 3.1」与「表 3.3」向量高度相似会互相串台。
 - **鉴权与限流**：JWT + RBAC（`admin` / `uploader` / `viewer`）、登录限流、**SSE 每用户并发上限**。
 - **可观测**：per-query 全链路 trace + 调试面板（`/api/v1/debug/query`）；全局异常与前端 JS 错误落盘 `logs/error.log`。
+- **自带 Key（BYOK）**：左栏「🔑 自带模型」里填自己的 OpenAI 兼容端点 / Key / 模型名，问答即按**发起用户**解析用谁的模型 —— 花他自己的钱，且**不占服务端额度**（豁免前提是「配置存在**且**地址复查通过」，否则会白送额度）。
+  - Key **加密落库、只回尾号**（PBKDF2-HMAC-SHA256 派生 + Fernet，逐行随机盐）；明文不落库、不回显、不进日志；没配 `BYOK_SECRET_KEY` 时**只存内存**并如实告知「重启即失」。
+  - `base_url` 过 **SSRF 防护**（默认只收 `https`、禁私网 / 回环 / 链路本地），保存与使用**各验一道**。
+  - 面板同时显示**厂商余额**与**我方统计用量**两个维度 —— 厂商没有这个接口或查失败时，**照实写原因**，不拿用量冒充余额。
+  - 换 / 删即时生效，删掉即回落服务端全局模型。
 
 **前端**（[frontend/index.html](frontend/index.html)，单文件、无构建）
 
@@ -124,7 +129,14 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 |---|---|---|
 | [backend/evaluate.py](backend/evaluate.py) | **端到端**：答案含期望事实 / 引用忠实度（事实确在来源里）/ 引用页码正确 | `backend/logs/eval-report.log` |
 | [backend/evaluate_retrieval.py](backend/evaluate_retrieval.py) | **离线检索**：混合 / 纯向量 / 纯 BM25 的 hit@k、recall@k、MRR + 负样本拒答 | `backend/logs/retrieval-eval-report.log` |
+| [backend/evaluate_latency.py](backend/evaluate_latency.py) | **并发延迟**：N 并发同时打 `/chat/stream`，检索 / 重排 / 生成分三段 + TTFT（含检索与重排） | `backend/logs/latency-report.log` |
+| [backend/evaluate_rgb.py](backend/evaluate_rgb.py) | **RGB 中文四能力**：噪声鲁棒 / 否定拒绝 / 信息集成 / 反事实鲁棒 | `backend/logs/rgb-eval-report.log` |
+| [backend/evaluate_agent.py](backend/evaluate_agent.py) | **代理链路**：开了代理开关后事实命中 / 延迟的**变化** | `backend/logs/agent-eval-report.log` |
+| [backend/evaluate_guardrail.py](backend/evaluate_guardrail.py) | **压缩质量护栏**：压缩前后同跑，事实命中不下降 | `backend/logs/guardrail-report.log` |
+| [backend/evaluate_memory.py](backend/evaluate_memory.py) | **跨会话召回**：记忆注入的示例与覆盖率 | `backend/logs/memory-eval-report.log` |
 | [backend/selftest.py](backend/selftest.py) | **全链路自检**：health / 登录 / 建库 / 上传 / 异步入库 / 真实 LLM / 引用 / 反馈 / 调试 / 清理 | `backend/logs/selftest-report.log` |
+
+[backend/evaluate_all.py](backend/evaluate_all.py)（`scripts\evaluate_all.ps1`）把它们合成**一页报告** → `backend/logs/eval-summary.log`，开头附配置快照与目标线。
 
 黄金集在 [backend/data/](backend/data/)（问题 + 期望事实 + 页码 + 负样本）。运行：`scripts\evaluate.ps1`（需先起服务）。
 
@@ -140,13 +152,17 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 > **口径**：判据为「去空白、小写后子串匹配」，兼容 Docling 在数字与标点间插入空格（如 `表 4 . 1`）。
 > `evaluate.py` 默认取 `backend/paper.pdf`（自备文档，未入库）；跑自己的文档请设 `EVAL_DOC`。
 
+> **一页报告的现状**：上表是**端到端那一节**的真机数字（46 页论文 PDF，GPU bge + DashScope `qwen-plus`）。
+> 生成层 / 延迟 / RGB 三节在一页报告里目前写的是**「未跑」** —— 缺的是运行前置（服务要在跑、
+> RGB 要官方 `data/`、并发要调高 `MAX_CONCURRENT_STREAMS_PER_USER`），**缺前置不产假数字**。
+
 ---
 
 ## 测试
 
 ```bash
 cd backend
-python -m pytest tests/ -q        # 94 项：单元 + API 集成（91 passed, 3 skipped）
+python -m pytest tests/ -q        # 601 passed, 3 skipped（单元 + API 集成 + 回归契约，约 150s）
 ```
 
 3 项 skip 对应明确未实现的功能：refresh token、登出黑名单、pgvector（需 `TEST_PG_URL` 指向真实库）。
@@ -238,8 +254,8 @@ enterprise-rag/
 
 ## 已知边界与路线图
 
-- ✅ **已完成**：全链路（上传→检索→引用→反馈）、混合检索 + RRF + 重排、逐句引用校验、评测闭环、Agentic（ReAct + 3 工具 + 引用自检）、MCP server（可被任意 MCP 客户端挂载）、跨会话记忆、私有推理节点、生产编排。
-- 🚧 **计划中**（详见 [docs/ROADMAP.md](docs/ROADMAP.md)）：RAGAS 四项 + RGB 中文基准的一页报告（代码已就位，待真机跑出数字）；上下文压缩；成本面板；自带 Key（BYOK）。
+- ✅ **已完成**：全链路（上传→检索→引用→反馈）、混合检索 + RRF + 重排、逐句引用校验、评测闭环、Agentic（ReAct + 3 工具 + 引用自检）、MCP server（可被任意 MCP 客户端挂载）、跨会话记忆、**上下文压缩**（滚动摘要 + 工具结果清理 + 压缩质量护栏）、**成本可见性**（per-query 用量/费用 + 额度硬拦）、**自带 Key（BYOK）**（加密落库 + SSRF 防护 + 能力探测 + 余额提醒 + 前端配置面板）、私有推理节点、生产编排。
+- 🚧 **待补的交付物**（详见 [docs/ROADMAP.md](docs/ROADMAP.md)）：**带数字的一页评测报告**（代码已全部就位，缺的是运行前置，见上）、**在线 Demo 地址与演示视频**。
 - ⚠️ **边界**：
   - **在线 Demo 地址与演示视频尚未上线**（本仓库目前是源码 + 一键本地/局域网部署）。
   - 真实模式依赖 `requirements-real.txt`（`bge` / `docling` / 公式 OCR 模型）；Windows 上 Docling 下载 HuggingFace 模型需要 `run_real.ps1` 里预设的几个环境变量（关闭符号链接、关闭 Xet、走镜像）。

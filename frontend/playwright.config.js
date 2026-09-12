@@ -32,10 +32,10 @@ module.exports = defineConfig({
       dependencies: ['setup'],
       use: { ...devices['Desktop Chrome'] },
     },
-    // 已登录场景：会话 / token（用 setup 产出的 storageState 作为起始登录态）
+    // 已登录场景：会话 / token / BYOK（用 setup 产出的 storageState 作为起始登录态）
     {
       name: 'auth',
-      testMatch: /session\.spec\.js/,
+      testMatch: /session\.spec\.js|byok\.spec\.js/,
       dependencies: ['setup'],
       use: {
         ...devices['Desktop Chrome'],

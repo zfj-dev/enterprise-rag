@@ -262,6 +262,24 @@
   .slider-scale{display:flex;justify-content:space-between;font-size:10px;color:var(--text-quaternary);margin-top:2px}
   #fileIn{display:none}
 
+  /* 自带模型（BYOK）面板 */
+  .modal.byok-c{width:min(560px,94vw);max-width:560px;text-align:left}
+  .byok-desc{font-size:12px;color:var(--text-tertiary);line-height:1.7;margin:6px 0 14px}
+  .byok-status{background:var(--surface-muted);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--text-secondary);line-height:1.9;margin-bottom:14px;word-break:break-all}
+  .byok-status .k{display:inline-block;min-width:44px;color:var(--text-quaternary)}
+  .byok-status .tag{display:inline-block;border-radius:6px;padding:1px 6px;font-size:11px;background:var(--accent-weak);color:var(--accent);margin-left:6px;line-height:1.6}
+  .byok-status .warn{color:#d97706}
+  .byok-field{margin-bottom:10px}
+  .byok-field label{display:block;font-size:12px;color:var(--text-tertiary);margin-bottom:4px}
+  .byok-field input{width:100%}
+  .byok-hint{font-size:11px;color:var(--text-quaternary);line-height:1.7;margin-top:2px}
+  .byok-hint code{background:var(--surface-muted);padding:0 4px;border-radius:4px}
+  .byok-msg{font-size:12px;min-height:18px;margin-top:8px;color:var(--danger);word-break:break-word}
+  .byok-msg.ok{color:#16a34a}
+  .byok-btns{display:flex;gap:8px;align-items:center;margin-top:14px}
+  .byok-btns button:disabled{opacity:.5;cursor:not-allowed}
+  .byok-bal{background:var(--surface-muted);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:12px;color:var(--text-secondary);line-height:1.9;margin-top:16px}
+
   /* 删除确认弹窗 */
   .modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:200;display:flex;align-items:center;justify-content:center}
   .modal{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;width:340px;box-shadow:var(--shadow-menu);animation:modalIn .2s ease-out}
@@ -326,6 +344,7 @@
     <div id="balBox" style="padding:0 16px 8px;font-size:12px;color:var(--text-muted,#6b7280);line-height:1.7"></div>
     <div class="side-nav">
       <div class="nav-item" onclick="openDocLib()">📚 文档库</div>
+      <div class="nav-item" onclick="openByok()">🔑 自带模型</div>
       <div class="nav-item">🗂 知识库设置</div>
       <div class="nav-item">📝 提示词模板</div>
     </div>
@@ -567,11 +586,108 @@ async function register(){if(AUTH_BUSY)return;setAuthBusy(true);try{const r=awai
 async function loadKbs(){const r=await api('/knowledge');if(!r.ok){clearAuth();document.getElementById('loginMsg').textContent='登录已过期';return}let arr=r.data||[];if(!arr.length){const c=await api('/knowledge',{method:'POST',body:{name:'默认知识库',description:''}});if(c.ok)arr=[c.data];else toast('自动创建知识库失败，请点左栏➕手动创建')}KBS=arr;const sel=document.getElementById('kbSel');sel.innerHTML=KBS.map(k=>`<option value="${k.id}">${esc(k.name)} (${k.doc_count})</option>`).join('');const curId=KB?KB.id:(KBS[0]?KBS[0].id:null);if(curId){sel.value=curId;KB=KBS.find(k=>k.id===curId)||KBS[0]||null}loadBalance();if(KB){loadDocs();loadSessions();loadHistory()}else{document.getElementById('chatInner').innerHTML='';document.getElementById('docsBox').innerHTML=''}}
 // 余额与用量**两个维度分开显示**：厂商余额（能查则查）+ 我方统计用量（本地记账）。
 // 查不到就照实写出来（「该厂商不支持余额查询」/「查询失败」），**不留空、也不拿用量冒充余额**。
-async function loadBalance(){const el=document.getElementById('balBox');if(!el)return;const r=await api('/llm/balance');if(!r.ok){el.textContent='';return}const v=r.data.vendor||{},o=r.data.ours||{};
-const vt=v.available?('厂商余额：'+v.amount+' '+(v.currency||'')):(v.note||'厂商余额：不可用');
-const ot=(o.total_cost===null||o.total_cost===undefined)?'不可用（单价未知 / 量不到）':(o.total_cost+' 元');
-el.innerHTML='<div>💰 '+esc(vt)+'</div><div>📊 我方统计用量：'+esc(ot)+'</div>'
-+'<div class="bal-src">来源：'+esc(v.note||'')+' | '+esc(o.note||'')+'</div>'+(v.alert?'<div style="color:#d97706">⚠️ '+esc(v.alert)+'</div>':'')}
+function balanceHtml(d){
+  const v=(d&&d.vendor)||{},o=(d&&d.ours)||{};
+  const vt=v.available?('厂商余额：'+v.amount+' '+(v.currency||'')):(v.note||'厂商余额：不可用');
+  const ot=(o.total_cost===null||o.total_cost===undefined)?'不可用（单价未知 / 量不到）':(o.total_cost+' 元');
+  return '<div>💰 '+esc(vt)+'</div><div>📊 我方统计用量：'+esc(ot)+'</div>'
+    +'<div class="bal-src">来源：'+esc(v.note||'')+' | '+esc(o.note||'')+'</div>'
+    +(v.alert?'<div style="color:#d97706">⚠️ '+esc(v.alert)+'</div>':'');
+}
+// 只发一次请求，侧栏 #balBox 与面板 #byokBal 两处一起更新。
+// 取不到就如实写「没取到」—— 留空或写 0 都会被当成「没花钱」。
+async function loadBalance(){
+  const r=await api('/llm/balance');
+  const el=document.getElementById('balBox');if(el)el.innerHTML=r.ok?balanceHtml(r.data):'';
+  const b=document.getElementById('byokBal');
+  if(b)b.innerHTML=r.ok?balanceHtml(r.data):'⚠️ 余额没取到：'+esc(fmtErr(r.data&&r.data.detail||'请求失败'));
+}
+
+/* 自带模型（BYOK）：填 / 轮换 / 删除自己的 Key —— 票 32 的界面。
+   明文 key 只提交一次：提交后立刻清空输入框，不回填、不写 localStorage、不进日志。 */
+function byokModal(){return document.getElementById('byokModal')}
+function openByok(){
+  if(byokModal())return;
+  const m=document.createElement('div');m.id='byokModal';m.className='modal-mask';
+  m.innerHTML='<div class="modal byok-c"><h3>🔑 自带模型</h3>'
+    +'<div class="byok-desc">填入自己的 OpenAI 兼容端点与 Key，问答时按你的配置调用 —— 费用由你自己承担，不占服务端额度；未配置则用服务端全局模型。</div>'
+    +'<div class="byok-status" id="byokStatus">加载中…</div>'
+    +'<form onsubmit="event.preventDefault();saveByok()">'
+    +'<div class="byok-field"><label>接口地址 base_url</label><input id="byokBaseUrl" placeholder="https://api.deepseek.com/v1" autocomplete="off"></div>'
+    +'<div class="byok-field"><label>API Key</label><input id="byokKey" type="password" placeholder="sk-…" autocomplete="new-password"></div>'
+    +'<div class="byok-field"><label>模型名 model</label><input id="byokModel" placeholder="deepseek-chat" autocomplete="off"></div>'
+    +'<div class="byok-hint">地址须为 <code>https</code>、且不得指向私网 / 回环（SSRF 防护；部署方可在服务端显式放宽）。明文 Key 只提交这一次，不回显、不进日志。</div>'
+    +'<div class="byok-btns"><button type="submit" class="btn-primary" id="byokSave">保存</button><button type="button" class="btn-danger" id="byokDelete" onclick="deleteByok()" style="display:none">删除</button><button type="button" class="btn-cancel" id="byokClose" onclick="closeByok()">关闭</button></div>'
+    +'<div class="byok-msg" id="byokMsg"></div></form>'
+    +'<div class="byok-bal" id="byokBal">加载中…</div></div>';
+  m.onclick=e=>{if(e.target===m)closeByok()};
+  document.body.appendChild(m);
+  loadByok();
+}
+function closeByok(){const m=byokModal();if(m)m.remove()}
+function setByokMsg(text,ok){const el=document.getElementById('byokMsg');if(!el)return;el.className='byok-msg'+(ok?' ok':'');el.textContent=text}
+function byokBusy(on){const s=document.getElementById('byokSave'),d=document.getElementById('byokDelete');if(s)s.disabled=on;if(d)d.disabled=on}
+function setInput(id,v){const e=document.getElementById(id);if(e)e.value=v}
+// 拉不到配置 **不等于** 未配置：失败时如实说失败，不假装「回落服务端全局」。
+async function loadByok(){
+  const c=await api('/llm/config');
+  renderByokConfig(c.ok?c.data:null,c.ok?null:c);
+  loadBalance();
+}
+function renderByokConfig(cfg,err){
+  const st=document.getElementById('byokStatus');if(!st)return;
+  const del=document.getElementById('byokDelete');
+  if(err){
+    st.innerHTML='<span class="warn">⚠️ 取配置失败（'+esc(fmtErr(err.data&&err.data.detail||'请求失败'))+'）—— 这不代表未配置，请关掉面板重开重试。</span>';
+    if(del)del.style.display='none';
+    return;
+  }
+  if(!cfg||!cfg.configured){
+    st.innerHTML='<span class="warn">● 未配置</span> —— 当前用服务端全局模型，不花你自己的钱。';
+    if(del)del.style.display='none';
+    setInput('byokBaseUrl','');setInput('byokModel','');setInput('byokKey','');return;
+  }
+  const persist=cfg.persistent?'<span class="tag">已加密落库</span>'
+    :'<span class="tag warn">仅存内存 —— 未配加密口令，重启后失效</span>';
+  st.innerHTML='<div><b>● 已配置</b>' + persist + '</div>'
+    +'<div><span class="k">地址</span>'+esc(cfg.base_url||'')+'</div>'
+    +'<div><span class="k">模型</span>'+esc(cfg.model||'')+'</div>'
+    +'<div><span class="k">Key</span>····'+esc(cfg.key_tail||'')+'（只显示尾号）</div>';
+  if(del)del.style.display='';
+  setInput('byokBaseUrl',cfg.base_url||'');
+  setInput('byokModel',cfg.model||'');
+  setInput('byokKey','');
+}
+async function saveByok(){
+  if(document.getElementById('byokSave').disabled)return;      // in-flight 守卫：双击只发一次
+  const base_url=document.getElementById('byokBaseUrl').value.trim();
+  const key=document.getElementById('byokKey').value;
+  const model=document.getElementById('byokModel').value.trim();
+  setByokMsg('');
+  if(!base_url||!key||!model){setByokMsg('三项都要填：接口地址、Key、模型名');return}
+  byokBusy(true);
+  try{
+    const r=await api('/llm/config',{method:'PUT',body:{base_url,key,model}});
+    if(!r.ok){setByokMsg(fmtErr(r.data&&r.data.detail)||'保存失败');return}
+    renderByokConfig(r.data);                                  // 顺手清空 key 输入框
+    setByokMsg('已保存 —— 下一次问答起走你的模型',true);
+    loadBalance();
+  }finally{byokBusy(false)}
+}
+async function deleteByok(){
+  const d=document.getElementById('byokDelete');
+  if(d&&d.disabled)return;
+  setByokMsg('');
+  byokBusy(true);
+  try{
+    const r=await api('/llm/config',{method:'DELETE'});
+    if(!r.ok){setByokMsg(fmtErr(r.data&&r.data.detail)||'删除失败');return}
+    const c=await api('/llm/config');
+    renderByokConfig(c.ok?c.data:null,c.ok?null:c);
+    setByokMsg('已删除 —— 下一次问答立刻回落服务端全局模型',true);
+    loadBalance();
+  }finally{byokBusy(false)}
+}
 async function selectKb(){const sel=document.getElementById('kbSel');KB=KBS.find(k=>k.id===sel.value)||null;if(KB){await loadDocs();loadSessions();loadHistory();if(document.getElementById('docView').style.display!=='none'){document.getElementById('docLibTitle').textContent='文档库 · '+KB.name;renderDocList();SEL_DOC=null}}else{document.getElementById('chatInner').innerHTML='';document.getElementById('docsBox').innerHTML=''}}
 
 async function createKb(){const name=(prompt('新建知识库名称：','默认知识库')||'').trim();if(!name)return;const r=await api('/knowledge',{method:'POST',body:{name,description:''}});if(!r.ok){toast('创建失败：'+((r.data&&r.data.detail)||''));return}await loadKbs();const sel=document.getElementById('kbSel');const opt=sel.querySelector(`option[value="${r.data.id}"]`);if(opt){sel.value=r.data.id;selectKb()}toast('已创建知识库「'+name+'」')}
