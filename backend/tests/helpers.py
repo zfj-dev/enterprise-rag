@@ -66,3 +66,36 @@ def offline_resolver(*ips: str):
     测试不该真去查 DNS；而「域名指向哪里」正是 rebinding 那条用例要控制的东西。
     """
     return lambda host: list(ips) if ips else [PUBLIC_IP]
+
+
+# 一个「代理答上来了」的样板结果：走代理链路的用例多半只关心**是不是它答的**，
+# 不关心中间那几步，所以形状固定下来共用一份（原先两个测试文件里逐字重复）。
+AGENT_RESULT = {
+    "answer": "代理给的答案：803.96 亿元。",
+    "sources": [{"chunk_id": "c1", "doc_name": "年报.pdf", "page": 2, "text": "营收803.96亿元"}],
+    "steps": [{"tool": "KbRetrieve", "arguments": {"query": "营收"}, "summary": "{}", "ms": 1.0,
+               "ok": True}],
+    "latency": {"total_ms": 12.0, "steps_ms": [1.0]},
+    "stopped": "answered",
+    "trace": {"self_check": "passed_with_citation", "citation_coverage": 1.0},
+}
+
+
+def seed_chat_doc(client, name: str, text: str = "比亚迪2025年营业收入为803.96亿元。"):
+    """注册 + 建库 + 传一篇文档并等入库，返回 (headers, kb_id, user, db, runtime)。
+
+    问答链路类用例几乎都要这一套（要看真实检索/压缩/代理行为，就得真有入库文档），
+    收在这里省得每个测试文件各抄一遍。
+    """
+    from app.api.deps import get_runtime
+    from app.db.session import SessionLocal
+    from app.models.entities import User
+
+    H, uid, kb = register_and_kb(client, name)
+    up = client.post("/api/v1/documents?kb_id=%s" % kb, headers=H,
+                     files={"file": ("annual.txt", text, "text/plain")}).json()
+    assert wait_until(lambda: client.get("/api/v1/documents/%s" % up["id"], headers=H)
+                      .json().get("status") in ("indexed", "failed")), "文档未入库"
+    db = SessionLocal()
+    user = db.query(User).filter(User.id == uid).first()
+    return H, kb, user, db, get_runtime()

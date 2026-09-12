@@ -137,12 +137,8 @@
   .ai-body ul,.ai-body ol{padding-left:20px;margin:8px 0}
   .ai-body p{margin:8px 0}
   .ref-tag{display:inline-block;background:var(--accent-weak);color:var(--accent);border-radius:6px;padding:2px 6px;font-size:11px;margin:2px 4px 2px 0;cursor:pointer;font-variant-numeric:tabular-nums}
-  .thinking-panel{border:1px solid var(--border);background:var(--surface-muted);border-radius:10px;margin:8px 0;overflow:hidden}
-  .thinking-head{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:13px;color:var(--text-tertiary);cursor:pointer;font-style:italic}
-  .thinking-head .arrow{transition:transform .2s;font-size:11px}
-  .thinking-head.open .arrow{transform:rotate(90deg)}
-  .thinking-body{padding:0 12px 10px;font-size:13px;color:var(--text-quaternary);font-style:italic;line-height:1.7}
   .bal-src{font-size:11px;opacity:.75;margin-top:2px}
+  .agent-ok{margin-top:10px;border-left:3px solid var(--accent);background:var(--accent-weak);border-radius:8px;padding:8px 12px;font-size:13px;color:var(--text-secondary);line-height:1.6}
   .agent-note{margin-top:10px;border-left:3px solid var(--warn,#d97706);background:var(--surface-muted);border-radius:8px;padding:8px 12px;font-size:13px;color:var(--text-muted,#6b7280);line-height:1.6}
   .src-card{margin-top:12px;border:1px solid var(--border);border-radius:12px;background:var(--surface-muted);padding:12px 14px}
   .src-card .src-title{font-size:13px;font-weight:500;margin-bottom:8px;color:var(--text-secondary);display:flex;align-items:center;gap:6px}
@@ -176,6 +172,9 @@
   textarea#question{width:100%;border:none;background:transparent;resize:none;max-height:144px;padding:4px 0;font-size:15px;line-height:1.6;outline:none}
   .input-toolbar{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
   .tool-left,.tool-right{display:flex;align-items:center;gap:6px}
+  .tool-btn{display:flex;align-items:center;gap:5px;padding:5px 10px;border-radius:8px;background:var(--surface-muted);color:var(--text-tertiary);font-size:12px}
+  .tool-btn:hover{background:var(--surface-hover);color:var(--text-primary)}
+  .tool-btn svg{width:15px;height:15px}
   .plus-btn{width:34px;height:34px;border-radius:50%;background:var(--surface-muted);color:var(--text-tertiary);display:flex;align-items:center;justify-content:center;font-size:18px}
   .plus-btn:hover{background:var(--surface-hover)}
   .send-btn{width:34px;height:34px;border-radius:10px;background:var(--text-primary);color:var(--surface);display:flex;align-items:center;justify-content:center}
@@ -393,6 +392,8 @@
           <div class="input-toolbar">
             <div class="tool-left">
               <button class="plus-btn" id="plusBtn" onclick="togglePlusMenu()">＋</button>
+              <button class="tool-btn" id="deepBtn" onclick="toggleDeep()" style="display:none"
+                      title="走代理链路（ReAct + 工具）回答本次问题">🧠 深度思考</button>
             </div>
             <div class="tool-right">
               <button class="send-btn" id="stopBtn" onclick="stopCurrent()" style="display:none;background:var(--danger);color:#fff" title="停止当前输出">■</button>
@@ -433,7 +434,7 @@ window.onerror=function(msg,src,line,col,err){
   return false;
 };
 let TOKEN=localStorage.getItem('_rag_tok')||'';
-let KBS=[],DOCS=[],SESSIONS=[],KB=null,SESSION=null,STREAMING=false,ACTIVE_STREAMS=new Map(),STREAM_KEY=0,conversations=new Map(),activeConversationId=null;
+let KBS=[],DOCS=[],SESSIONS=[],KB=null,SESSION=null,STREAMING=false,DEEP=false,ACTIVE_STREAMS=new Map(),STREAM_KEY=0,conversations=new Map(),activeConversationId=null;
 let ATTACHED=null,PLUS_MENU=null,MENU=null,lastMsgId=null,MULTI=false,MULTI_SEL={},SEL_DOC=null;
 let AUTH_BUSY=false;
 function setAuthBusy(busy){AUTH_BUSY=busy;const lb=document.querySelector('#loginCard .btn-primary');const rb=document.querySelector('#loginCard .btn-ghost');if(lb){lb.disabled=busy;lb.textContent=busy?'登录中…':'登录'}if(rb){rb.disabled=busy;rb.textContent=busy?'注册中…':'注册'}}
@@ -531,6 +532,8 @@ function toggleTheme(){const cur=document.documentElement.getAttribute('data-the
 function initTheme(){const t=localStorage.getItem('_rag_theme')||'light';document.documentElement.setAttribute('data-theme',t);document.getElementById('themeBtn').textContent=t==='dark'?'☀':'🌙'}
 
 /* 布局 */
+// 「深度思考」= 这一次走代理链路（票 37）。按钮只在服务端允许时才显示，见 checkMode。
+function toggleDeep(){DEEP=!DEEP;const b=document.getElementById('deepBtn');if(!b)return;b.style.background=DEEP?'var(--accent-weak)':'';b.style.color=DEEP?'var(--accent)':''}
 function toggleSidebar(open){const sb=document.getElementById('sidebar'),mask=document.getElementById('mask');const narrow=window.innerWidth<=1279;let want;if(typeof open==='boolean')want=open;else want=!(narrow?sb.classList.contains('open'):!sb.classList.contains('closed'));if(narrow){sb.classList.toggle('open',want);mask.classList.toggle('show',want)}else{sb.classList.toggle('closed',!want)}}
 function updateRpFab(){const f=document.getElementById('rpFab');if(f)f.style.display=document.getElementById('rightPanel').classList.contains('closed')?'flex':'none'}
 function togglePanel(open){const rp=document.getElementById('rightPanel');rp.classList.toggle('open',open);rp.classList.toggle('closed',!open);updateRpFab();positionRpResize()}
@@ -570,7 +573,8 @@ function logout(){clearAuth();location.reload();}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
 function positionRpResize(){var rp=document.getElementById('rightPanel');var h=document.getElementById('rpResize');if(!rp||!h)return;h.style.right=(rp.offsetWidth-6)+'px';h.style.top='0px';h.style.height=window.innerHeight+'px';}
 (function(){var h=document.getElementById('rpResize');if(!h)return;h.addEventListener('mousedown',function(e){e.preventDefault();var rp=document.getElementById('rightPanel');var sx=e.clientX,sw=rp.offsetWidth;rp.style.transition='none';function mv(ev){var w=sw+(sx-ev.clientX);var maxw=Math.min(window.innerWidth*0.62,820);w=Math.max(260,Math.min(w,maxw));rp.style.width=w+'px';positionRpResize();}function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);rp.style.transition='';var fm=document.querySelector('#rightPanel .src-flash');if(fm){try{fm.scrollIntoView({block:'center'});}catch(e){fm.scrollIntoView();}}}document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});window.addEventListener('resize',positionRpResize);positionRpResize();})();
-async function checkMode(){try{const r=await fetch('/health');const d=await r.json();const b=document.getElementById('modeBadge');if(b)b.style.display=d.use_real?'none':'inline-block';}catch(e){}}
+async function checkMode(){try{const r=await fetch('/health');const d=await r.json();const b=document.getElementById('modeBadge');if(b)b.style.display=d.use_real?'none':'inline-block';// 代理按钮该不该出现由服务端说了算；不允许时连状态一起清掉，免得误发 deep
+const db=document.getElementById('deepBtn');if(db)db.style.display=d.agent_enabled?'inline-flex':'none';if(!d.agent_enabled&&DEEP)toggleDeep();}catch(e){}}
 function showApp(){document.getElementById('loginCard').classList.add('hide');document.getElementById('appCard').classList.remove('hide');document.getElementById('userAvatar').textContent=(localStorage.getItem('_rag_user')||'用').slice(0,1);document.getElementById('userRole').textContent=localStorage.getItem('_rag_user')||'用户';loadKbs();checkMode()}
 async function login(){if(AUTH_BUSY)return;setAuthBusy(true);try{const r=await api('/auth/login',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});if(r.ok){TOKEN=r.data.access_token;localStorage.setItem('_rag_tok',TOKEN);localStorage.setItem('_rag_user',r.data.username||document.getElementById('u').value);document.getElementById('userRole').textContent=(r.data.username||document.getElementById('u').value||'用户');showApp()}else document.getElementById('loginMsg').textContent=fmtErr(r.data.detail)||'登录失败'}finally{setAuthBusy(false)}}
 async function register(){if(AUTH_BUSY)return;setAuthBusy(true);try{const r=await api('/auth/register',{method:'POST',body:{username:document.getElementById('u').value,password:document.getElementById('p').value}});document.getElementById('loginMsg').textContent=r.ok?'注册成功，请登录':(fmtErr(r.data.detail)||'注册失败')}finally{setAuthBusy(false)}}
@@ -820,6 +824,7 @@ function renderChat(){
     else{div.innerHTML=`<div class="bubble"><div class="ai-head"><div class="logo">🤖</div><span class="ai-label">AI 助手</span></div><div class="ai-body" id="ai-${conv.id}-${idx}"></div><div class="msg-actions"><button class="act-btn" onclick="copyMsg(this)">复制</button><button class="act-btn" onclick="regenerate()">重新生成</button><button class="act-btn" onclick="fb(1)">👍 有用</button></div></div>`;
       const ab=div.querySelector('.ai-body');ab.innerHTML=m.content?renderMd(m.content):'';
       const srcs=m.sources||[];
+      if(m.agent){const at=document.createElement('div');at.className='agent-ok';at.textContent='🧠 本次由代理链路作答';ab.appendChild(at);}
       if(m.note){const nt=document.createElement('div');nt.className='agent-note';nt.textContent='⚠️ '+m.note;ab.appendChild(nt);}
       if(srcs.length){const sc=document.createElement('div');sc.className='src-card';const wt=document.createElement('div');wt.className='src-title';wt.textContent='🔗 引用来源';const wr=document.createElement('div');wr.className='ref-wrap';srcs.forEach((sp,i)=>{const el=document.createElement('span');el.className='ref-tag';el.dataset.idx=i;el.title='点击查看原文并定位';el.textContent=(i+1)+'. '+(sp.doc_name||sp.doc)+' · 第'+sp.page+'页';wr.appendChild(el)});sc.appendChild(wt);sc.appendChild(wr);sc.onclick=(e)=>{const tag=(e.target&&e.target.closest)?e.target.closest('.ref-tag'):null;if(tag)showSource(srcs[+tag.dataset.idx])};ab.appendChild(sc);}
     }
@@ -891,10 +896,10 @@ async function streamToConv(conv, q, aiIdx){
   updateStopBtn();
   const cid=conv.id;
   try{
-    const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:conv.kbId||KB.id,question:q,session_id:cid,stream:true}),signal:ctrl.signal});
+    const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:conv.kbId||KB.id,question:q,session_id:cid,stream:true,deep:!!DEEP}),signal:ctrl.signal});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;if(activeConversationId===cid)renderChat();}}}catch(e){}}}
+    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;conv.messages[aiIdx].agent=!!ev.agent;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;}}}catch(e){}}}
   }catch(e){ conv._failed=true; }
   finally{
     conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
@@ -913,24 +918,6 @@ function resumeAllPartial(){conversations.forEach(function(conv){if(conv.kbId!==
 function updateStopBtn(){const b=document.getElementById('stopBtn');if(b){const any=[...conversations.values()].some(c=>c.isStreaming);b.style.display=any?'inline-flex':'none'}}
 function stopCurrent(){const conv=conversations.get(activeConversationId);if(conv&&conv.ctrl){conv.ctrl.abort()}else{const last=[...conversations.values()].reverse().find(c=>c.isStreaming&&c.ctrl);if(last)last.ctrl.abort()}}
 
-function finalize(div,answer,sources){
-  const body=div.querySelector('.ai-body');
-  const think=document.createElement('div');think.className='thinking-panel';
-  think.innerHTML=`<div class="thinking-head"><span class="arrow">›</span>已深度思考 · 检索 ${sources&&sources.length?sources.length:0} 个相关片段</div><div class="thinking-body hide">通过混合检索（向量 + BM25 + 重排）定位到 ${sources&&sources.length?sources.length:0} 个文档片段作为本次回答的参考资料。</div>`;
-  think.querySelector('.thinking-head').onclick=()=>{think.querySelector('.thinking-head').classList.toggle('open');think.querySelector('.thinking-body').classList.toggle('hide')};
-  const auto=body.querySelector('.src-card.auto');if(auto)auto.remove();
-  body.innerHTML=renderMd(answer);
-  body.prepend(think);
-  if(sources&&sources.length){
-    const sc=document.createElement('div');sc.className='src-card';
-    const wt=document.createElement('div');wt.className='src-title';wt.textContent='🔗 引用来源';
-    const wr=document.createElement('div');wr.className='ref-wrap';
-    sources.forEach((sp,i)=>{const el=document.createElement('span');el.className='ref-tag';el.dataset.idx=i;el.title='点击查看原文并定位';el.textContent=(i+1)+'. '+(sp.doc_name||sp.doc)+' · 第'+sp.page+'页';wr.appendChild(el)});
-    sc.appendChild(wt);sc.appendChild(wr);sc.onclick=(e)=>{const tag=(e.target&&e.target.closest)?e.target.closest('.ref-tag'):null;if(tag)showSource(sources[+tag.dataset.idx])};
-    body.appendChild(sc);
-  }
-  loadSessions();
-}
 async function regenerate(){const conv=conversations.get(activeConversationId);if(!conv)return;var users=conv.messages.filter(function(m){return m.role==='user'});var q=users.length?users[users.length-1].content:'';if(!q){toast('没有可重新生成的问题');return}conv.isStreaming=false;saveConv(conv);renderChat();ask(q, true)}
 
 /* 文档上传 */

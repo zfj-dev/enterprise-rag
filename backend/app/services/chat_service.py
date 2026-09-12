@@ -476,11 +476,15 @@ def _save_rolling_summary(db: Session, sess: ChatSession, plan: ContextPlan) -> 
 
 
 def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
-                  allow_agent: bool = True) -> Iterator[dict]:
+                  allow_agent: bool = False) -> Iterator[dict]:
     """流式生成：先给 sources，再增量给 answer，最后 done。含语义缓存与引用覆盖率。
 
-    代理开关（票 15）**默认关**：关着时一行代理代码都不跑，行为与今天完全一致。
-    `allow_agent=False` 供**对比评测**用：基准链路不能被全局开关顺手换掉。
+    `allow_agent` 表示「**这一次**要不要走代理」，由调用方决定（HTTP 层看请求里的 `deep`，
+    票 37）。**默认 False** —— 不主动要就不走，与 CONTEXT.md 的「代理链路默认关」一致；
+    默认 True 会让非 HTTP 的调用方悄悄跑在另一套规则上。
+
+    传了 True 也还要全局 `agent_enabled` 允许：那是运维的闸门（这个部署能不能用代理），
+    不是用户的选择。两者都满足才走代理。
     """
     t_generate = time.perf_counter()
     prep.trace["ttft_ms"] = None
@@ -638,6 +642,7 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
            "context": prep.trace.get("context_tokens"),   # 压缩前/后 token 与口径（票 19）
            "usage": prep.trace.get("usage"),              # 本次用量的 token 与口径来源（票 27）
            "agent_skipped": prep.trace.get("agent_skipped"),   # 代理为何没用上（票 34）
+           "agent": bool(prep.trace.get("agent")),          # 这次是否真的走了代理（票 37）
            # 分段耗时（只为评测分桶；前端不消费，字段是新增的、不影响既有契约）
            "latency": {k: prep.trace.get(k) for k in
                        ("retrieval_ms", "rerank_ms", "ttft_ms", "generate_ms")}}
@@ -698,10 +703,12 @@ def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id:
 
 
 def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
-           session_id: str | None = None, *, allow_agent: bool = True) -> dict:
+           session_id: str | None = None, *, allow_agent: bool = False) -> dict:
     """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id, trace}。
 
-    `allow_agent=False` 走**确定性链路**（对比评测的基准用），不受全局代理开关影响。
+    `allow_agent` 的默认是 **False**（见 stream_answer）：不主动要就走确定性链路。
+
+    对比评测的基准显式传 `allow_agent=False`，免得被全局开关顺手换成代理、两列都成了代理。
     """
     prep = prepare(db, rt, user, kb_id, question, session_id)
     result: dict = {}

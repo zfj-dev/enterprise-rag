@@ -95,7 +95,9 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "app": settings.app_name, "use_real": settings.use_real}
+        # agent_enabled 一并发给前端：代理按钮该不该出现由服务端说了算，前端别自己猜（票 37）
+        return {"status": "ok", "app": settings.app_name, "use_real": settings.use_real,
+                "agent_enabled": settings.agent_enabled}
 
     @app.middleware("http")
     async def catch_unhandled(request, call_next):
