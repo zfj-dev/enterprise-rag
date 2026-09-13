@@ -92,6 +92,7 @@ class ItemResult:
     ctx_note: str = ""                      # 没有真实分词器时的原因
     ctx_budget: int | None = None            # 当时的上下文预算（口径三件套之一）
     ctx_exempt_note: str = ""               # 本问豁免压缩的原因（与「没分词器」是两回事）
+    source_count: int = 0                   # 这次回答带回了几条来源（0 = 一条都没检索到）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
     judge_error: str | None = None  # 这条裁判挂了的原因（要明说，不能当没算过）
@@ -244,6 +245,15 @@ class Report:
         return ""
 
     @property
+    def zero_source_count(self) -> int:
+        """**一条来源都没检索到**的条数。
+
+        这是一条独立的警报：这类题目上的「拒答」是「无来源」逼出来的，
+        **不是**判断出了内容不相关 —— 拿它当抗噪声能力就是假成功（#54 真机踩到过）。
+        """
+        return sum(1 for x in self.items if not x.source_count)
+
+    @property
     def tokenizer_note(self) -> str:
         """没有真实分词器时的原因（取第一条说清楚就够）。
 
@@ -363,6 +373,12 @@ class Report:
             lines.append("拒答率(负样本) %d%%  (%d/%d；明确拒答 %d，未拒答 %d)"
                          % (round(self.refuse_rate * 100), n_ref, len(self.negatives),
                             n_ref, len(self.negatives) - n_ref))
+            if self.zero_source_count:
+                # 「拒答」有两种来源：真判断出不相关，和**根本没检索到东西**。
+                # 后者不能算抗噪声能力 —— 不写出来，这张表看着就是「拒答率满分」（#54）。
+                lines.append("⚠️ 本轮有 %d 条回答**一条来源都没检索到** —— 那上面的「拒答」是"
+                             "「无来源」逼出来的，不是判断出了噪声；不能当成抗噪声能力的证据"
+                             % self.zero_source_count)
         else:
             lines.append("拒答率 不适用  (本次黄金集没有负样本条目)")
         lines.append("引用忠实度(期望事实在随答案返回的来源里) %d%%  (%d/%d)"
@@ -448,7 +464,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             # 期望事实缺失 → 记为未命中，而不是静默跳过（否则分母变小、数字虚高）
             fact_hit=bool(want) and want in normalize(answer),
             grounded=bool(want) and want in normalize(src_text),
-            expect_page=expect_page, pages=pages,
+            expect_page=expect_page, pages=pages, source_count=len(sources),
             page_hit=(expect_page in pages) if expect_page else None,
             group=g.get("group", ""),
             negative=bool(g.get("negative")), refused=is_refusal(answer),

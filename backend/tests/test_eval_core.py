@@ -490,3 +490,29 @@ def test_the_reason_says_so_when_every_question_was_exempt():
                             ctx_exempt_note="本问为枚举/编号查询，豁免压缩")])
 
     assert "全部豁免" in r.reduction_missing_reason
+
+
+# ---------- 「没检索到东西」不能算成「拒答得好」（#54）----------
+
+def test_a_refusal_from_zero_sources_is_flagged_not_counted_as_a_win():
+    """**真机踩到的**：RGB 段全部 0 命中时，20 条负样本「全部拒答」被报成 100%。
+
+    那不是抗噪声能力，是「什么都没检索到」的副产品 —— 报告必须自己说清楚。
+    """
+    from app.eval_core import Report
+
+    r = Report(items=[_item(negative=True, refused=True, source_count=0),
+                      _item(negative=True, refused=True, source_count=0)])
+
+    text = chr(10).join(r.to_lines())
+
+    assert "一条来源都没检索到" in text
+
+
+def test_a_refusal_with_real_sources_is_not_flagged():
+    """正常情况（真检索到了噪声文档、然后拒答）不该多嘴。"""
+    from app.eval_core import Report
+
+    r = Report(items=[_item(negative=True, refused=True, source_count=3)])
+
+    assert "一条来源都没检索到" not in chr(10).join(r.to_lines())

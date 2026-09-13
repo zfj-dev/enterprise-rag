@@ -20,7 +20,6 @@ from app.eval_rgb import ABILITIES, ability_label, available, load_entries
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.path.join(BACKEND, "logs", "rgb-eval-report.log")
-OWNER_ID = "rgb_eval_owner"
 DATA_DIR = os.environ.get("EVAL_RGB_DIR", os.path.join(BACKEND, "data", "rgb"))
 LIMIT = int(os.environ.get("EVAL_RGB_LIMIT", "50"))
 
@@ -35,10 +34,12 @@ def _eval_user(db):
     return eval_user(db, "__rgb_eval__")
 
 
-def _index_entry(rt, entry: dict, kb_id: str, tag: str) -> int:
+def _index_entry(rt, entry: dict, kb_id: str, tag: str, owner_id: str) -> int:
     """把这条的官方文档切块 → 嵌入 → 进内存索引，返回块数。
 
     `tag` 让每条条目的块 id 互不相同（不同条目共用同一个向量库）。
+    **`owner_id` 必须传检索时用的那一个**（就是评测用户的 id）—— 写死一个常量的话，
+    检索按真实 user.id 过滤就一条也命中不到，每题都会变成「无来源 → 拒答」（#54）。
     """
     chunks = []
     for d, doc in enumerate(entry["documents"]):
@@ -47,7 +48,7 @@ def _index_entry(rt, entry: dict, kb_id: str, tag: str) -> int:
             if c["chunk_type"] != "child":
                 continue
             chunks.append({"id": c["id"], "content": c["content"],
-                           "metadata": {"kb_id": kb_id, "owner_id": OWNER_ID, "doc_id": doc_id,
+                           "metadata": {"kb_id": kb_id, "owner_id": owner_id, "doc_id": doc_id,
                                         "doc_name": "官方文档%d" % (d + 1), "page_num": 1,
                                         "content": c["content"]}})
     return index_chunks(rt, chunks)
@@ -114,18 +115,20 @@ def main() -> None:
     from app.db.session import SessionLocal
     from app.services import chat_service
 
+    # **先建评测用户、再索引**：索引时的 owner_id 与检索时的必须同一个，
+    # 否则每题 0 命中，管线按「no source → no claim」全拒答（#54：那 100% 拒答率是假成功）。
+    db = SessionLocal()
+    user = _eval_user(db)
     rt = build_runtime()
     kbs: list = []
     t0 = time.time()
     for i, e in enumerate(entries):
         kbs.append("rgbeval%d" % i)
-        _index_entry(rt, e, kbs[-1], "rgb%d" % i)
+        _index_entry(rt, e, kbs[-1], "rgb%d" % i, user.id)
     lines.append("建索引耗时 %.1fs（%d 条）" % (time.time() - t0, len(entries)))
     lines.append("")
 
-    db = SessionLocal()
     try:
-        user = _eval_user(db)
 
         def answer_with(kb_id: str, question: str) -> dict:
             out = chat_service.answer(db, rt, user, kb_id, question)

@@ -241,3 +241,25 @@ def test_nested_document_lists_are_flattened(tmp_path):
 
     assert docs == ["甲的第一半", "甲的第二半", "乙全文"]
 
+
+# ---------- 索引与检索的 owner 必须同一个（#54）----------
+
+def test_an_entry_is_indexed_under_the_owner_it_is_given():
+    """**真机踩到的**：索引时写死 owner_id、检索时用真实用户 id → 每题 0 命中，
+
+    管线按「no source → no claim」全拒答 —— 报告里那个 100% 拒答率是**假成功**：
+    系统不是因为正确识别了噪声文档才拒答，而是什么来源都没检索到。
+
+    这条链路是「离线自己索引 + 走真实问答管线检索」，两边口径必须对齐。
+    """
+    from app.core.container import build_runtime
+
+    from evaluate_rgb import _index_entry
+
+    rt = build_runtime()
+    entry = {"documents": ["比亚迪2025年营业收入为803.96亿元。"]}
+
+    _index_entry(rt, entry, "kb1", "t0", "owner-a")
+
+    assert rt.retriever.retrieve("比亚迪 营业收入", kb_id="kb1", owner_id="owner-a")
+    assert rt.retriever.retrieve("比亚迪 营业收入", kb_id="kb1", owner_id="owner-b") == []
