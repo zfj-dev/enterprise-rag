@@ -433,3 +433,60 @@ def test_the_reports_do_not_render_the_provider_from_the_environment():
             literals = [a.value for a in node.args if isinstance(a, ast.Constant)]
             assert "EMBEDDING_PROVIDER" not in literals, (
                 "%s 还在按环境变量渲染 provider —— 要读配置（embedding_label）" % mod.__name__)
+
+
+def test_the_token_caliber_carries_the_reason_not_a_generic_placeholder():
+    """没有真实分词器时，报告要写**为什么** —— 只印「（未接真实分词器）」等于没说（#53）。
+
+    真机上原因就记在 note 里（SSLError: huggingface.co ...），却一直没被渲染出来。
+    """
+    from app.eval_core import ItemResult, Report
+
+    reason = "真实分词器 Qwen/Qwen2.5-7B-Instruct 不可用：SSLError: 证书校验失败"
+    item = ItemResult(question="q", expect="", answer="", fact_hit=False, grounded=False,
+                      expect_page=None, pages=[], page_hit=None, ctx_note=reason)
+    r = Report(items=[item])
+
+    text = "".join(r._token_lines())
+
+    assert "SSLError" in text
+    assert "（未接真实分词器）" not in text
+
+
+def _item(**kw):
+    base = dict(question="q", expect="", answer="", fact_hit=False, grounded=False,
+                expect_page=None, pages=[], page_hit=None)
+    base.update(kw)
+    from app.eval_core import ItemResult
+
+    return ItemResult(**base)
+
+
+def test_a_compression_exemption_does_not_swallow_the_tokenizer_reason():
+    """**真机踩到的**（#53）：第一条问题恰好是枚举/编号查询（豁免压缩），
+
+    「没有真实分词器」与「本问豁免压缩」原本挤在同一个 note 字段里，
+    而报告级的口径取的是**第一条** note —— 于是把「豁免」当成了「没接分词器」的原因。
+    """
+    from app.eval_core import Report
+
+    reason = "真实分词器 Qwen/xxx 不可用：SSLError: 证书校验失败"
+    r = Report(items=[
+        _item(ctx_exempt_note="本问为枚举/编号查询，豁免压缩：没有降幅可报"),   # 真机里它在最前面
+        _item(ctx_note=reason),
+    ])
+
+    text = "".join(r._token_lines())
+
+    assert "SSLError" in text                 # 真正的原因带出来了
+    assert "豁免压缩" not in text.split("口径")[1][:80]
+
+
+def test_the_reason_says_so_when_every_question_was_exempt():
+    """全部豁免时，「不适用」的原因和「没有多轮历史」不是一回事 —— 别混成一句。"""
+    from app.eval_core import Report
+
+    r = Report(items=[_item(ctx_tokenizer="Qwen/xxx", ctx_budget=3000,
+                            ctx_exempt_note="本问为枚举/编号查询，豁免压缩")])
+
+    assert "全部豁免" in r.reduction_missing_reason

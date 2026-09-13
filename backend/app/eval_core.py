@@ -91,6 +91,7 @@ class ItemResult:
     ctx_tokenizer: str = ""                 # token 口径（哪个分词器）；空 = 没有真实分词器
     ctx_note: str = ""                      # 没有真实分词器时的原因
     ctx_budget: int | None = None            # 当时的上下文预算（口径三件套之一）
+    ctx_exempt_note: str = ""               # 本问豁免压缩的原因（与「没分词器」是两回事）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
     judge_error: str | None = None  # 这条裁判挂了的原因（要明说，不能当没算过）
@@ -244,7 +245,11 @@ class Report:
 
     @property
     def tokenizer_note(self) -> str:
-        """没有真实分词器时的原因（取第一条说清楚就够）。"""
+        """没有真实分词器时的原因（取第一条说清楚就够）。
+
+        **只看 ctx_note** —— 它是「没有真实分词器」专用的。豁免压缩的原因走 `ctx_exempt_note`，
+        两者挤在一个字段里会让报告把「本问豁免压缩」当成「没接分词器」的原因（#53）。
+        """
         for x in self.items:
             if x.ctx_note:
                 return x.ctx_note
@@ -258,8 +263,15 @@ class Report:
         各写各的必然会漂移，把「不适用」说成「没有真实分词器」就成了假话。
         """
         if self.tokenizer_label:
+            if self._all_positives_exempt():
+                return "不适用（本次问题全部豁免压缩——枚举/编号查询；口径 %s）" % self.tokenizer_label
             return "不适用（本次没有可压的多轮历史；口径 %s）" % self.tokenizer_label
         return "不可用（%s）" % (self.tokenizer_note or "没有真实分词器（不拿字数估算顶替）")
+
+    def _all_positives_exempt(self) -> bool:
+        """参与统计的正样本是不是**全部**豁免压缩了 —— 那这条「不适用」的原因就不一样。"""
+        pos = [x for x in self.positives if x.ctx_budget]
+        return bool(pos) and all(x.ctx_exempt_note for x in pos)
 
     def _token_lines(self) -> list:
         """压缩降幅那一段 —— 三种情形分得清清楚楚，绝不把「没数据」说成「没分词器」。
@@ -269,7 +281,9 @@ class Report:
         red = self.token_reduction_rate
         budget = next((x.ctx_budget for x in self.positives if as_int(x.ctx_budget)), None)
         scope = "触发条件: 超预算才压；口径: %s%s%s" % (
-            self.tokenizer_label or "（未接真实分词器）",
+            # 没有真实分词器时**把原因带出来** —— 只写「未接」等于没说（#53）。
+            # 原因取自 tokenizer_note（唯一来源；见该属性为何只看 ctx_note）。
+            self.tokenizer_label or self.tokenizer_note or "（未接真实分词器，且没记下原因）",
             "；预算 %d tokens" % budget if budget else "",
             "；只算历史那部分，记忆不计入")
         if red is not None:
@@ -441,6 +455,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             citation_coverage=out.get("citation_coverage"),
             ctx_before=as_int(ctx.get("tokens_before")), ctx_after=as_int(ctx.get("tokens_after")),
             ctx_tokenizer=str(ctx.get("tokenizer") or ""), ctx_note=str(ctx.get("note") or ""),
+            ctx_exempt_note=str(ctx.get("exempt_note") or ""),
             ctx_budget=as_int(ctx.get("budget")),
         ))
         # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低

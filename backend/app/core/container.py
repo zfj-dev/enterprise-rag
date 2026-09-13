@@ -96,6 +96,12 @@ class Runtime:
 
 
 def build_runtime() -> Runtime:
+    # **第一件事**就是把 HF 镜像补进环境变量：huggingface_hub 在 **import 时**读 HF_ENDPOINT，
+    # 之后再设就是 no-op —— 而下面 get_embedding() 可能先一步把 huggingface_hub 拉进来
+    # （本地 bge 那条路）。放在这里，托管与本地两条路都覆盖到。
+    from app.core.tokenizer import apply_hf_endpoint
+
+    apply_hf_endpoint()
     s = get_settings()
     embedding = get_embedding()
     vector_store = get_vector_store(backend=s.vector_store, conn_url=s.database_url, dim=s.embedding_dim)
