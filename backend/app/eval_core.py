@@ -49,6 +49,21 @@ _REFUSAL_MARKERS = (
 _REFUSAL_MAX_CHARS = 120
 
 
+def embedding_label() -> str:
+    """报告里写「用的是哪个嵌入」—— **读配置，不读环境变量**，而且**要带上模型名**。
+
+    坑一：`.env` 里的值**不会**进 `os.environ`（pydantic 只把它灌进 Settings），
+    照环境变量渲染会把自己写成「fake」—— 真机上跑的是 bge-m3，报告却写「嵌入: fake」（#52）。
+    坑二：只写 provider 不够 —— 换模型就换了口径，报告得让人看出**是哪个模型**。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    if s.embedding_provider == "fake":
+        return "fake（字符词袋，**不是真模型**）"      # 不写成 bge-xxx，免得看着像真跑了
+    return "%s / %s" % (s.embedding_provider, s.embedding_model)
+
+
 def is_refusal(answer: str) -> bool:
     """免 LLM 的拒答判据：答案**整段**就是一句拒答话术，才算「明确拒答」。
 
