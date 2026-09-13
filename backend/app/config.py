@@ -77,6 +77,9 @@ class Settings(BaseSettings):
     # 默认**留空** = 不接：演示模式没有"同族"可言，也免得每次启动都去打网下载；
     # 真实模式由 run_real.ps1 设好。留空/拿不到时分词器指标一律报「不可用」，绝不回退成字数估算。
     tokenizer_model: str = ""
+    # HuggingFace 端点（国内用 https://hf-mirror.com）。**必须走配置**：huggingface_hub 只认
+    # 环境变量，而 .env 里的值 pydantic 不进 os.environ —— 加载器会把它补进去（见 core/tokenizer.py）。
+    hf_endpoint: str = ""
     context_history_messages: int = 20  # 每次问答从库里加载的历史**消息**条数上限（一轮=2 条）
     # 票 18 已知边界：加载窗口外的轮次压根不进装配，也就不会被滚进摘要 —— 对话涨得比
     # 预算快时，窗口外更早的轮次恢复不了（要更早的历史就只能调大这个窗口）

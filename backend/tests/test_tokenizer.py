@@ -1,9 +1,11 @@
 """真实分词器（票 19 / #26）：惰性加载 + 缓存；拿不到就报「不可用」，绝不回退成估算。"""
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from app.core.tokenizer import setup_token_counter, try_real_token_counter
+from app.core.tokenizer import apply_hf_endpoint, setup_token_counter, try_real_token_counter
 
 
 class FakeTokenizer:
@@ -62,3 +64,63 @@ def test_a_real_tokenizer_reports_its_label_through_setup():
 
     assert counter.label == "Qwen/test" and note == ""
     assert counter.count("") == 0
+
+
+# ---------- HF 镜像：配置要能进到环境变量（#53）----------
+
+def _set(monkeypatch, **kw):
+    from app.config import get_settings
+
+    s = get_settings()
+    for k, v in kw.items():
+        monkeypatch.setattr(s, k, v)
+    return s
+
+
+def test_the_configured_hf_endpoint_reaches_the_environment(monkeypatch):
+    """huggingface_hub 只认环境变量，而 .env 的值不进 os.environ —— 所以要有这一道桥。
+
+    真机上评测进程因此直连 huggingface.co 失败，token 指标整个丢掉（#53）。
+    """
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    _set(monkeypatch, hf_endpoint="https://hf-mirror.com")
+
+    apply_hf_endpoint()
+
+    assert os.environ["HF_ENDPOINT"] == "https://hf-mirror.com"
+
+
+def test_an_explicitly_set_hf_endpoint_is_not_overridden(monkeypatch):
+    """命令行/脚本里显式设过的优先 —— 配置只是补位，不是覆盖。"""
+    monkeypatch.setenv("HF_ENDPOINT", "https://my.own.mirror")
+    _set(monkeypatch, hf_endpoint="https://hf-mirror.com")
+
+    apply_hf_endpoint()
+
+    assert os.environ["HF_ENDPOINT"] == "https://my.own.mirror"
+
+
+def test_no_configured_endpoint_leaves_the_environment_alone(monkeypatch):
+    monkeypatch.delenv("HF_ENDPOINT", raising=False)
+    _set(monkeypatch, hf_endpoint="")
+
+    apply_hf_endpoint()
+
+    assert "HF_ENDPOINT" not in os.environ
+
+
+def test_build_runtime_applies_the_hf_endpoint(monkeypatch):
+    """镜像要在**加载任何模型之前**补进环境变量。
+
+    huggingface_hub 在 import 时读 HF_ENDPOINT，之后再设就是 no-op ——
+    而 build_runtime 里 get_embedding()（本地 bge 那条路）会先把 huggingface_hub 拉进来（#53）。
+    """
+    import app.core.container as container
+    import app.core.tokenizer as tokenizer
+
+    called = []
+    monkeypatch.setattr(tokenizer, "apply_hf_endpoint", lambda: called.append(1))
+
+    container.build_runtime()
+
+    assert called == [1]

@@ -5,6 +5,7 @@
 
 - 预算判定：没有真实分词器时回落字符估算（阈值判断不能停）。
 - **对外报数：只用真实分词器**；没有就把指标标成「不可用」——绝不静默回退成估算
+  （**并且把拿不到的原因写进报告**：只写「未接」等于没说，见 #53）
   （沿用 Spec 0001「缺件不得静默给假数字」）。
 """
 from __future__ import annotations
@@ -34,8 +35,26 @@ class HfTokenCounter(TokenCounter):
         return len(self._tok.encode(text, add_special_tokens=False))
 
 
+def apply_hf_endpoint() -> None:
+    """把配置里的 `HF_ENDPOINT` 补进环境变量（已显式设过的优先，不覆盖）。
+
+    huggingface_hub **只认环境变量**，而 `.env` 里的值 pydantic 只灌进 Settings、不进 `os.environ`。
+    于是评测进程（不像 run_real.ps1 那样给它显式设过）会直连 huggingface.co —— 国内必失败，
+    token 指标整个丢掉，而且报告只印一句笼统的「未接真实分词器」（#53 真机踩到）。
+    这一道补上，`.env` 才真的「一处配置，处处生效」。
+    """
+    import os
+
+    from app.config import get_settings
+
+    endpoint = get_settings().hf_endpoint
+    if endpoint:
+        os.environ.setdefault("HF_ENDPOINT", endpoint)
+
+
 def _hf_loader(model_id: str):
     """默认加载器：惰性 import transformers，从 HF（或其镜像）取 tokenizer 文件。"""
+    apply_hf_endpoint()          # 镜像从**配置**来 —— 不然国内直连 hf 必失败
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(model_id)

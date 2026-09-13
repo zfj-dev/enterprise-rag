@@ -168,6 +168,9 @@ def test_an_exempt_round_reports_no_reduction_instead_of_a_fake_number(client, m
 
         usage = prep.trace["context_tokens"]
         assert usage["tokens_before"] is None and usage["tokens_after"] is None
-        assert "豁免压缩" in usage["note"]
+        # 豁免的原因走 **exempt_note**：「没有真实分词器」是另一回事，两个挤一个字段会让
+        # 报告把「本问豁免压缩」当成「没接分词器」的原因（#53）。note 这里必须是空的。
+        assert "豁免压缩" in usage["exempt_note"]
+        assert usage["note"] == ""
     finally:
         db.close()

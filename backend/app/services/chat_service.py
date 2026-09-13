@@ -449,8 +449,10 @@ def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int,
 
     if exempt:
         # 本问豁免压缩：没有"降了多少"可报 —— 报了只会是 0% 甚至负值，那是误导
+        # **豁免**与「没有真实分词器」是两回事，不能挤在同一个 note 里 ——
+        # 报告级的「token 口径」会去取第一条 note，被豁免那条占住就把真正的原因盖掉了（#53）。
         return {"tokens_before": None, "tokens_after": None, "tokenizer": "", "budget": budget,
-                "note": "本问为枚举/编号查询，豁免压缩：没有降幅可报"}
+                "note": "", "exempt_note": "本问为枚举/编号查询，豁免压缩：没有降幅可报"}
     counter = rt.token_counter
     label = getattr(counter, "label", "")
     if not label:

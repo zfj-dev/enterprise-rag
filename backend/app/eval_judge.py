@@ -4,6 +4,11 @@
 所以测试里换成 stub 就能确定性、无网络地跑。裁判口径固定为 judge 模型 + 温度 0
 （见 config.ragas_judge_model / ragas_judge_temperature），报告里会写明，数字才可跨时间比较。
 
+**布尔判定是「一条一问」**（#53）：早先是「一次问 N 条、要求回长度恰好 N 的数组」，
+而**让模型自己数数不可靠** —— 真机上 10 条里 9 条因为「回了 5 个、要 6 个」被整条丢掉，
+RAGAS 数字只剩 1 个样本。改成一条一问后，长度对不上**结构上不可能发生**；
+代价是裁判调用次数 ×N（离线评测可接受）。
+
 四项：
   faithfulness      答案的论断能否被检索上下文推出：先拆论断，再逐条核验
   answer_relevancy  从答案反生成问题，与原问题的嵌入相似度取均值
@@ -15,9 +20,11 @@ expect 若只是几个关键词，这一项会退化成 0/1 —— 报告口径�
 """
 from __future__ import annotations
 
+import re
+
 from app.config import get_settings
 from app.core.similarity import cosine
-from app.utils.text import extract_json, lines_of
+from app.utils.text import lines_of
 
 DEFAULT_N_QUESTIONS = 3
 
@@ -34,10 +41,13 @@ _STATEMENTS_PROMPT = (
     "不要编号、不要解释、不要把两条并成一条。只有一条就只输出一条。\n\n文字：\n%s"
 )
 
-_SUPPORT_PROMPT = (
-    "下面每条论断，能否**仅凭**【上下文】推出？逐条判断：是则 true，否则 false。"
-    "只输出一个 JSON 数组（长度与论断条数一致，元素是 true / false），不要任何解释。\n"
-    "\n【上下文】\n%s\n\n【论断】\n%s\n\nJSON 数组："
+# **一条一问**：以前是「一次问 N 条、要求回长度恰好为 N 的数组」，而**让模型自己数数不可靠** ——
+# 真机上 10 条里 9 条因为「回了 5 个、要 6 个」被整条丢掉，RAGAS 数字只剩 1 个样本（#53）。
+# 一次问一条，n 恒为 1，长度对不上这一类失败**结构上不可能发生**。代价是调用次数 ×N（离线评测可接受）。
+_SUPPORT_ONE_PROMPT = (
+    "下面这**一条**论断，能否**仅凭**【上下文】推出？能则回 true，不能则回 false。"
+    "只回一个词（true 或 false），不要解释、不要输出 JSON。\n"
+    "\n【上下文】\n%s\n\n【论断】\n%s"
 )
 
 _GENQ_PROMPT = (
@@ -45,11 +55,35 @@ _GENQ_PROMPT = (
     "\n答案：\n%s"
 )
 
-_CTX_REL_PROMPT = (
-    "下面每一段【上下文】，对回答【问题】有没有用？逐段判断：有用则 true，否则 false。"
-    "只输出一个 JSON 数组（长度与段数一致，元素是 true / false），不要任何解释。\n"
-    "\n【问题】\n%s\n\n【上下文】\n%s\n\nJSON 数组："
+_CTX_REL_ONE_PROMPT = (
+    "下面这**一段**【上下文】，对回答【问题】有没有用？有用回 true，没用回 false。"
+    "只回一个词（true 或 false），不要解释、不要输出 JSON。\n"
+    "\n【问题】\n%s\n\n【上下文】\n%s"
 )
+
+
+# 认布尔：**只认「本身就是判断」的短回复**，认不出就返回 None（调用方按不可用处理）。
+#
+# 为什么不「在整句里找关键词」：那样会**猜出结论** ——
+#   「不确定是否相关」含「否」→ 被判成 false；「not true」含 true → 被判成 true。
+# 而这一票的规矩是「解析不出来就报不可用，绝不猜」。提示词已经明确要求「只回一个词」，
+# 所以这里严格认，多话的回复就当作没答。
+_TRUE_WORDS = frozenset(("true", "yes", "是", "是的", "对", "对的", "可以", "能", "支持", "相关", "有用", "成立"))
+_FALSE_WORDS = frozenset(("false", "no", "不是", "否", "不能", "不可以", "无法", "不支持", "不相关",
+                          "没用", "无关", "不成立"))
+_PUNCT_RE = re.compile(r'''[\s。，,.!！?？:：;；'"`*\\[\\]（）()]+''')
+
+
+def parse_bool(raw) -> bool | None:
+    """认出一个布尔；**认不出返回 None**（调用方按「不可用」处理，绝不猜）。"""
+    core = _PUNCT_RE.sub("", str(raw or "").lower())
+    if not core or len(core) > 12:      # 这么长不是在回答「能/不能」，不猜
+        return None
+    if core in _FALSE_WORDS:
+        return False
+    if core in _TRUE_WORDS:
+        return True
+    return None
 
 
 class RagasJudge:
@@ -95,7 +129,8 @@ class RagasJudge:
     def _context_precision(self, question: str, contexts: list) -> float:
         if not contexts:
             return 0.0
-        useful = self._bools(_CTX_REL_PROMPT % (question, self._join(contexts)), len(contexts))
+        useful = [self._one_bool(_CTX_REL_ONE_PROMPT % (question, c), "这段上下文有没有用")
+                  for c in contexts]
         hits, acc = 0, 0.0
         for k, ok in enumerate(useful, start=1):
             if ok:
@@ -111,8 +146,8 @@ class RagasJudge:
     def _supported_ratio(self, claims: list, contexts: list) -> float:
         if not claims:
             return 0.0
-        flags = self._bools(_SUPPORT_PROMPT % (self._join(contexts), "\n".join(claims)),
-                            len(claims))
+        flags = [self._one_bool(_SUPPORT_ONE_PROMPT % (self._join(contexts), c), "这条论断能否推出")
+                 for c in claims]
         return sum(1 for f in flags if f) / len(claims)
 
     # ---- 与模型打交道 ----
@@ -123,13 +158,13 @@ class RagasJudge:
         except Exception as e:   # noqa: BLE001 —— 裁判的任何失败都转成「不可用」，绝不静默
             raise JudgeUnavailable("裁判调用失败：%s: %s" % (type(e).__name__, e))
 
-    def _bools(self, prompt: str, n: int) -> list:
+    def _one_bool(self, prompt: str, what: str) -> bool:
+        """问**一条**、回**一个**布尔。认不出来就报不可用 —— 绝不猜。"""
         raw = self._ask(prompt)
-        data = extract_json(raw, "[")
-        data = data if isinstance(data, list) else None
-        if data is None or len(data) != n:
-            raise JudgeUnavailable("裁判没有按要求回 %d 个 true/false，实回：%r" % (n, raw[:120]))
-        return [bool(x) for x in data]
+        got = parse_bool(raw)
+        if got is None:
+            raise JudgeUnavailable("裁判没给出可判定的答复（%s），实回：%r" % (what, raw[:120]))
+        return got
 
     @staticmethod
     def _join(contexts: list) -> str:

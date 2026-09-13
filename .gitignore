@@ -29,6 +29,10 @@ logs/
 # 生成式样本文档（backend/scripts/gen_sample_docs.py 产出，不随仓库分发）
 /backend/data/samples/
 
+# RGB 公开基准数据（约 9MB，可随时重新下载，不随仓库分发）
+# 必须锚定成 /backend/data/rgb/，别写成 data/rgb/ —— 那会把 backend/data/ 下的黄金集一起忽略
+/backend/data/rgb/
+
 # Node (frontend)
 node_modules/
 dist/

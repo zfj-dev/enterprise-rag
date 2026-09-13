@@ -49,6 +49,21 @@ _REFUSAL_MARKERS = (
 _REFUSAL_MAX_CHARS = 120
 
 
+def embedding_label() -> str:
+    """报告里写「用的是哪个嵌入」—— **读配置，不读环境变量**，而且**要带上模型名**。
+
+    坑一：`.env` 里的值**不会**进 `os.environ`（pydantic 只把它灌进 Settings），
+    照环境变量渲染会把自己写成「fake」—— 真机上跑的是 bge-m3，报告却写「嵌入: fake」（#52）。
+    坑二：只写 provider 不够 —— 换模型就换了口径，报告得让人看出**是哪个模型**。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    if s.embedding_provider == "fake":
+        return "fake（字符词袋，**不是真模型**）"      # 不写成 bge-xxx，免得看着像真跑了
+    return "%s / %s" % (s.embedding_provider, s.embedding_model)
+
+
 def is_refusal(answer: str) -> bool:
     """免 LLM 的拒答判据：答案**整段**就是一句拒答话术，才算「明确拒答」。
 
@@ -76,6 +91,8 @@ class ItemResult:
     ctx_tokenizer: str = ""                 # token 口径（哪个分词器）；空 = 没有真实分词器
     ctx_note: str = ""                      # 没有真实分词器时的原因
     ctx_budget: int | None = None            # 当时的上下文预算（口径三件套之一）
+    ctx_exempt_note: str = ""               # 本问豁免压缩的原因（与「没分词器」是两回事）
+    source_count: int = 0                   # 这次回答带回了几条来源（0 = 一条都没检索到）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
     judge_error: str | None = None  # 这条裁判挂了的原因（要明说，不能当没算过）
@@ -228,8 +245,21 @@ class Report:
         return ""
 
     @property
+    def zero_source_count(self) -> int:
+        """**一条来源都没检索到**的条数。
+
+        这是一条独立的警报：这类题目上的「拒答」是「无来源」逼出来的，
+        **不是**判断出了内容不相关 —— 拿它当抗噪声能力就是假成功（#54 真机踩到过）。
+        """
+        return sum(1 for x in self.items if not x.source_count)
+
+    @property
     def tokenizer_note(self) -> str:
-        """没有真实分词器时的原因（取第一条说清楚就够）。"""
+        """没有真实分词器时的原因（取第一条说清楚就够）。
+
+        **只看 ctx_note** —— 它是「没有真实分词器」专用的。豁免压缩的原因走 `ctx_exempt_note`，
+        两者挤在一个字段里会让报告把「本问豁免压缩」当成「没接分词器」的原因（#53）。
+        """
         for x in self.items:
             if x.ctx_note:
                 return x.ctx_note
@@ -243,8 +273,15 @@ class Report:
         各写各的必然会漂移，把「不适用」说成「没有真实分词器」就成了假话。
         """
         if self.tokenizer_label:
+            if self._all_positives_exempt():
+                return "不适用（本次问题全部豁免压缩——枚举/编号查询；口径 %s）" % self.tokenizer_label
             return "不适用（本次没有可压的多轮历史；口径 %s）" % self.tokenizer_label
         return "不可用（%s）" % (self.tokenizer_note or "没有真实分词器（不拿字数估算顶替）")
+
+    def _all_positives_exempt(self) -> bool:
+        """参与统计的正样本是不是**全部**豁免压缩了 —— 那这条「不适用」的原因就不一样。"""
+        pos = [x for x in self.positives if x.ctx_budget]
+        return bool(pos) and all(x.ctx_exempt_note for x in pos)
 
     def _token_lines(self) -> list:
         """压缩降幅那一段 —— 三种情形分得清清楚楚，绝不把「没数据」说成「没分词器」。
@@ -254,7 +291,9 @@ class Report:
         red = self.token_reduction_rate
         budget = next((x.ctx_budget for x in self.positives if as_int(x.ctx_budget)), None)
         scope = "触发条件: 超预算才压；口径: %s%s%s" % (
-            self.tokenizer_label or "（未接真实分词器）",
+            # 没有真实分词器时**把原因带出来** —— 只写「未接」等于没说（#53）。
+            # 原因取自 tokenizer_note（唯一来源；见该属性为何只看 ctx_note）。
+            self.tokenizer_label or self.tokenizer_note or "（未接真实分词器，且没记下原因）",
             "；预算 %d tokens" % budget if budget else "",
             "；只算历史那部分，记忆不计入")
         if red is not None:
@@ -334,6 +373,12 @@ class Report:
             lines.append("拒答率(负样本) %d%%  (%d/%d；明确拒答 %d，未拒答 %d)"
                          % (round(self.refuse_rate * 100), n_ref, len(self.negatives),
                             n_ref, len(self.negatives) - n_ref))
+            if self.zero_source_count:
+                # 「拒答」有两种来源：真判断出不相关，和**根本没检索到东西**。
+                # 后者不能算抗噪声能力 —— 不写出来，这张表看着就是「拒答率满分」（#54）。
+                lines.append("⚠️ 本轮有 %d 条回答**一条来源都没检索到** —— 那上面的「拒答」是"
+                             "「无来源」逼出来的，不是判断出了噪声；不能当成抗噪声能力的证据"
+                             % self.zero_source_count)
         else:
             lines.append("拒答率 不适用  (本次黄金集没有负样本条目)")
         lines.append("引用忠实度(期望事实在随答案返回的来源里) %d%%  (%d/%d)"
@@ -419,13 +464,14 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             # 期望事实缺失 → 记为未命中，而不是静默跳过（否则分母变小、数字虚高）
             fact_hit=bool(want) and want in normalize(answer),
             grounded=bool(want) and want in normalize(src_text),
-            expect_page=expect_page, pages=pages,
+            expect_page=expect_page, pages=pages, source_count=len(sources),
             page_hit=(expect_page in pages) if expect_page else None,
             group=g.get("group", ""),
             negative=bool(g.get("negative")), refused=is_refusal(answer),
             citation_coverage=out.get("citation_coverage"),
             ctx_before=as_int(ctx.get("tokens_before")), ctx_after=as_int(ctx.get("tokens_after")),
             ctx_tokenizer=str(ctx.get("tokenizer") or ""), ctx_note=str(ctx.get("note") or ""),
+            ctx_exempt_note=str(ctx.get("exempt_note") or ""),
             ctx_budget=as_int(ctx.get("budget")),
         ))
         # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低

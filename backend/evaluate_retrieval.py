@@ -14,7 +14,7 @@ import json
 import os
 import time
 
-from app.eval_core import normalize, run_retrieval_eval
+from app.eval_core import embedding_label, normalize, run_retrieval_eval
 from app.eval_index import index_chunks
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
@@ -128,7 +128,7 @@ def _main_body() -> None:
 
     lines: list[str] = [
         "=== RAG 检索质量评估(离线) ===",
-        "嵌入: %s | 文档数: %d" % (os.environ.get("EMBEDDING_PROVIDER", "fake"), len(docs)),
+        "嵌入: %s | 文档数: %d" % (embedding_label(), len(docs)),
         "黄金集: %s" % GOLDEN,
     ]
     rt = build_runtime()

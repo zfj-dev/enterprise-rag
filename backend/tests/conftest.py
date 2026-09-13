@@ -8,6 +8,23 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_D}/test_rag.db"
 os.environ["TOKENIZER_MODEL"] = ""
 os.environ["SECRET_KEY"] = "test-secret"
 
+# ⚠️ **把档位钉死**：环境变量优先于 .env，而开发者本机的 backend/.env 里是真实模式
+# （USE_REAL=true + 托管嵌入 + 真 Key）。不钉的话，跑测试会真的去打网络、用真实模型 ——
+# 测试既不 hermetic，pre-commit 钩子也会跟着挂（提交被卡住）。
+# 这里一律钉回「演示/测试档」的代码默认值；要在某个用例里改行为，请**显式** monkeypatch。
+os.environ.update({
+    "USE_REAL": "false",
+    "EMBEDDING_PROVIDER": "fake",
+    "RERANKER_PROVIDER": "fake",
+    "LLM_PROVIDER": "fake",
+    "VECTOR_STORE": "inmemory",
+    "EMBEDDING_API_KEY": "",
+    "RERANK_API_KEY": "",
+    "LLM_API_KEY": "",
+    "MAX_CONCURRENT_STREAMS_PER_USER": "2",
+    "RERANK_STRICT": "false",
+})
+
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
