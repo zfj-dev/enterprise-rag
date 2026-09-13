@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import time
 
-from app.eval_core import run_eval
+from app.eval_core import embedding_label, run_eval
 from app.eval_index import index_chunks
 from app.eval_rgb import ABILITIES, ability_label, available, load_entries
 
@@ -84,7 +84,7 @@ def main() -> None:
     avail = available(DATA_DIR)
     lines = ["=== RGB 中文四能力评测 ===",
              "数据目录: %s" % DATA_DIR,
-             "嵌入: %s" % os.environ.get("EMBEDDING_PROVIDER", "fake"),
+             "嵌入: %s" % embedding_label(),
              "每种能力上限: %d 条" % LIMIT]
 
     if not any(avail.values()):
@@ -105,6 +105,9 @@ def main() -> None:
                 continue
             lines.append("载入「%s」%d 条（取前 %d）" % (ability_label(ability), len(got), LIMIT))
             entries.extend(got[:LIMIT])
+    lines.append("")
+    lines.append("口径：官方 answer 常是**多值**（zh_int.json 实测 100/100 条如此），而评测核心的")
+    lines.append("      expect 是单个字符串 —— 这里**只核第一个值**，属于偏宽松的口径，别当成全核过了。")
     lines.append("")
 
     from app.core.container import build_runtime

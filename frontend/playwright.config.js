@@ -49,5 +49,13 @@ module.exports = defineConfig({
     url: 'http://127.0.0.1:8000/health',
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
+    // 同样把档位钉死：开发者本机的 backend/.env 是真实模式，不钉的话这个服务会真去调
+    // 托管嵌入（还会在启动 reindex 时刷一堆 401），测试变慢又依赖本机配置。
+    env: {
+      USE_REAL: 'false',
+      EMBEDDING_PROVIDER: 'fake',
+      RERANKER_PROVIDER: 'fake',
+      LLM_PROVIDER: 'fake',
+    },
   },
 });

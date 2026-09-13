@@ -6,27 +6,38 @@ from __future__ import annotations
 
 import json
 
+NL = chr(10)   # 只在这里拼换行，避免转义层数出错
+
 import pytest
 
 from app.eval_core import run_eval
 from app.eval_rgb import (DatasetMissing, available, dataset_path,
                           load_entries)
 
+# 夹具**照官方文件的真实形状**：answer 是**列表**、positive 可以是**list 套 list**。
+# 早期版本把 answer 写成字符串、文档写成单层列表，测试就一路绿着 ——
+# 真机一跑 `Extra data`（官方是 JSONL）+ 命中率全 0（str(list) 匹配不上），见 #52。
 ZH = [
-    {"id": 0, "query": "香港第六届立法会选举有多少个议席？", "answer": "70",
+    {"id": 0, "query": "香港第六届立法会选举有多少个议席？", "answer": ["70"],
      "positive": ["第六届立法会共有70个议席，经2016年9月4日的选举产生。"],
      "negative": ["今天的天气很好。"]},
-    {"id": 1, "query": "第二个问题", "answer": "甲", "positive": ["甲"], "negative": []},
+    {"id": 1, "query": "第二个问题", "answer": ["甲"], "positive": ["甲"], "negative": []},
 ]
-INT = [{"id": 0, "query": "综合两篇文档回答", "answer": "乙",
-        "positive": ["乙的第一半", "乙的第二半"], "negative": ["噪声"]}]
+INT = [{"id": 0, "query": "综合两篇文档回答", "answer": ["乙"],
+        "positive": [["乙的第一半", "乙的第二半"]], "negative": ["噪声"]}]
 FACT = [{"id": 0, "query": "议席有多少", "answer": "70", "fakeanswer": "170",
          "positive": ["共有70个议席"], "positive_wrong": ["共有170个议席", "错得离谱的另一篇"]}]
 
 
 def _dir(tmp_path, **files):
+    """写夹具 —— **一行一条（JSONL）**，跟官方文件一致。
+
+    夹具要是照着「我以为的格式」写，测试就只验证「我以为的格式」：
+    官方其实是 JSONL，整份当单个 JSON 读会直接报 `Extra data`（#52）。
+    """
     for name, data in files.items():
-        (tmp_path / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        body = "".join(json.dumps(item, ensure_ascii=False) + NL for item in data)
+        (tmp_path / name).write_text(body, encoding="utf-8")
     return str(tmp_path)
 
 
@@ -176,3 +187,57 @@ def test_answer_cursor_refuses_to_answer_out_of_order():
     ask = _answer_cursor([{"question": "甲"}], ["kb"], lambda kb, q: {"answer": ""})
     with pytest.raises(RuntimeError):
         ask("乙")                                   # 顺序对不上就炸，绝不静默答错
+
+
+# ---------- 官方数据是 JSONL（#52）----------
+
+def test_official_jsonl_files_are_read_line_by_line(tmp_path):
+    """官方文件**一行一条**，不是单个 JSON 文档 —— 夹具现在就是这个形状。"""
+    assert len(load_entries(_full(tmp_path), "noise")) == len(ZH)
+
+
+def test_a_single_json_array_still_works(tmp_path):
+    """有的数据版本/别处导出的确是单个数组 —— 两种都认，别为兼容把老格式弄坏。"""
+    for name, data in (("zh.json", ZH), ("zh_int.json", INT), ("zh_fact.json", FACT)):
+        (tmp_path / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    assert len(load_entries(str(tmp_path), "noise")) == len(ZH)
+
+
+def test_a_broken_line_names_the_line_number(tmp_path):
+    """坏行要报出**行号** —— 几 MB 的文件里没有行号没法找。"""
+    body = json.dumps(INT[0], ensure_ascii=False) + NL + "{不是 JSON" + NL
+    (tmp_path / "zh_int.json").write_text(body, encoding="utf-8")
+
+    with pytest.raises(DatasetMissing) as e:
+        load_entries(str(tmp_path), "integration")
+    assert "第 2 行" in str(e.value)
+
+
+def test_a_list_answer_does_not_become_a_python_repr(tmp_path):
+    """**最要命的一条**：`str(["12名"])` 得到字面量 `['12名']`，跟答案文本永远匹配不上。
+
+    而报告只会显示「命中率 0」—— 看上去像效果差，看不出是解析坏了。
+    """
+    item = {"id": 0, "query": "问", "answer": ["12名"],
+            "positive": ["答案就是12名"], "negative": []}
+    (tmp_path / "zh_int.json").write_text(json.dumps(item, ensure_ascii=False) + NL,
+                                          encoding="utf-8")
+
+    expect = load_entries(str(tmp_path), "integration")[0]["expect"]
+
+    assert expect == "12名"
+    assert "[" not in expect and "'" not in expect
+
+
+def test_nested_document_lists_are_flattened(tmp_path):
+    """`zh_int.json` 的 positive 是 **list 套 list** —— 摊平，别把子列表 str 进去。"""
+    item = {"id": 0, "query": "问", "answer": ["乙"],
+            "positive": [["甲的第一半", "甲的第二半"], ["乙全文"]], "negative": []}
+    (tmp_path / "zh_int.json").write_text(json.dumps(item, ensure_ascii=False) + NL,
+                                          encoding="utf-8")
+
+    docs = load_entries(str(tmp_path), "integration")[0]["documents"]
+
+    assert docs == ["甲的第一半", "甲的第二半", "乙全文"]
+

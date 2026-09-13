@@ -370,3 +370,123 @@ def test_report_states_the_context_recall_baseline():
                    judge_fn=lambda q, a, s, r: {"context_recall": 1.0})
     text = "\n".join(rep.to_lines())
     assert "reference" in text and "退化成 0/1" in text
+
+
+# ---------- 报告口径不许撒谎（#52）----------
+
+def test_the_embedding_label_reads_config_not_the_environment(monkeypatch):
+    """`.env` 里的值**不会**进 os.environ，照环境变量渲染会把自己写成 fake。
+
+    真机上出现过：跑的是 bge-m3，检索报告却写「嵌入: fake」—— 报告在口径上撒谎。
+    """
+    from app.config import get_settings
+    from app.eval_core import embedding_label
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "环境变量里的假值")     # 环境变量说了不算
+    monkeypatch.setattr(get_settings(), "embedding_provider", "siliconflow")
+    monkeypatch.setattr(get_settings(), "embedding_model", "BAAI/bge-m3")
+
+    assert embedding_label() == "siliconflow / BAAI/bge-m3"
+
+
+def test_the_embedding_label_names_the_model_not_just_the_provider(monkeypatch):
+    """只写 provider 不够 —— 换模型就换了口径，报告得看出**是哪个模型**。"""
+    from app.config import get_settings
+    from app.eval_core import embedding_label
+
+    monkeypatch.setattr(get_settings(), "embedding_provider", "siliconflow")
+    monkeypatch.setattr(get_settings(), "embedding_model", "BAAI/bge-m3")
+
+    assert "bge-m3" in embedding_label()
+
+
+def test_the_fake_provider_is_labelled_as_not_a_real_model(monkeypatch):
+    """演示档别写成 bge-xxx —— 那看着像真跑了。"""
+    from app.config import get_settings
+    from app.eval_core import embedding_label
+
+    monkeypatch.setattr(get_settings(), "embedding_provider", "fake")
+
+    assert "不是真模型" in embedding_label()
+
+
+def test_the_reports_do_not_render_the_provider_from_the_environment():
+    """两处调用点都别再走 os.environ —— 那是这个 bug 的来源。
+
+    用 AST 找**调用**而不是字符串匹配：后者换个引号或换行就漏（`tests/test_tools.py` 有同样教训）。
+    """
+    import ast
+    import inspect
+
+    import evaluate_retrieval
+    import evaluate_rgb
+
+    for mod in (evaluate_retrieval, evaluate_rgb):
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            called = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+            if called not in ("get", "getenv"):
+                continue
+            literals = [a.value for a in node.args if isinstance(a, ast.Constant)]
+            assert "EMBEDDING_PROVIDER" not in literals, (
+                "%s 还在按环境变量渲染 provider —— 要读配置（embedding_label）" % mod.__name__)
+
+
+def test_the_token_caliber_carries_the_reason_not_a_generic_placeholder():
+    """没有真实分词器时，报告要写**为什么** —— 只印「（未接真实分词器）」等于没说（#53）。
+
+    真机上原因就记在 note 里（SSLError: huggingface.co ...），却一直没被渲染出来。
+    """
+    from app.eval_core import ItemResult, Report
+
+    reason = "真实分词器 Qwen/Qwen2.5-7B-Instruct 不可用：SSLError: 证书校验失败"
+    item = ItemResult(question="q", expect="", answer="", fact_hit=False, grounded=False,
+                      expect_page=None, pages=[], page_hit=None, ctx_note=reason)
+    r = Report(items=[item])
+
+    text = "".join(r._token_lines())
+
+    assert "SSLError" in text
+    assert "（未接真实分词器）" not in text
+
+
+def _item(**kw):
+    base = dict(question="q", expect="", answer="", fact_hit=False, grounded=False,
+                expect_page=None, pages=[], page_hit=None)
+    base.update(kw)
+    from app.eval_core import ItemResult
+
+    return ItemResult(**base)
+
+
+def test_a_compression_exemption_does_not_swallow_the_tokenizer_reason():
+    """**真机踩到的**（#53）：第一条问题恰好是枚举/编号查询（豁免压缩），
+
+    「没有真实分词器」与「本问豁免压缩」原本挤在同一个 note 字段里，
+    而报告级的口径取的是**第一条** note —— 于是把「豁免」当成了「没接分词器」的原因。
+    """
+    from app.eval_core import Report
+
+    reason = "真实分词器 Qwen/xxx 不可用：SSLError: 证书校验失败"
+    r = Report(items=[
+        _item(ctx_exempt_note="本问为枚举/编号查询，豁免压缩：没有降幅可报"),   # 真机里它在最前面
+        _item(ctx_note=reason),
+    ])
+
+    text = "".join(r._token_lines())
+
+    assert "SSLError" in text                 # 真正的原因带出来了
+    assert "豁免压缩" not in text.split("口径")[1][:80]
+
+
+def test_the_reason_says_so_when_every_question_was_exempt():
+    """全部豁免时，「不适用」的原因和「没有多轮历史」不是一回事 —— 别混成一句。"""
+    from app.eval_core import Report
+
+    r = Report(items=[_item(ctx_tokenizer="Qwen/xxx", ctx_budget=3000,
+                            ctx_exempt_note="本问为枚举/编号查询，豁免压缩")])
+
+    assert "全部豁免" in r.reduction_missing_reason
