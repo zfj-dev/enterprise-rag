@@ -95,8 +95,8 @@ def _target_lines(report) -> list:
     return out
 
 
-def _section(name: str, module, log_path: str) -> list:
-    """跑的是一段独立脚本，收的是它自己落盘的报告 —— 口径只在那一处。"""
+def _section(name: str, main_fn, log_path: str) -> list:
+    """跑一段（`main_fn` 是个可调用对象），收的是它自己落盘的报告 —— 口径只在那一处。"""
     out = ["", "=== %s ===" % name]
     # 先清掉上一次的报告：这段万一抛错，摘要会写「未跑」，但磁盘上旧的那份还在 ——
     # 读起来跟正常结果一样。宁可没有，也不要留一份会骗人的（票 39 / #48）。
@@ -106,7 +106,7 @@ def _section(name: str, module, log_path: str) -> list:
     except OSError:
         pass
     try:
-        module.main()
+        main_fn()
     except Exception as e:   # noqa: BLE001 —— 这段没跑成要明说，不能当没这回事
         out.append("未跑：%s: %s" % (type(e).__name__, e))
         return out
@@ -152,15 +152,15 @@ def main() -> None:
     lines.extend(_target_lines(report))
     lines += gen
 
-    for key, name, module, log_path in (
-        ("retrieval", "检索层（离线）", evaluate_retrieval, evaluate_retrieval.REPORT),
-        ("rgb", "RGB 中文四能力（离线）", evaluate_rgb, evaluate_rgb.REPORT),
-        ("latency", "延迟（并发）", evaluate_latency, evaluate_latency.REPORT),
+    for key, name, main_fn, log_path in (
+        ("retrieval", "检索层（离线）", evaluate_retrieval.main, evaluate_retrieval.REPORT),
+        ("rgb", "RGB 中文四能力（离线）", evaluate_rgb.main, evaluate_rgb.REPORT),
+        ("latency", "延迟（并发）", evaluate_latency.main, evaluate_latency.REPORT),
     ):
         if key in skip or name in skip or name.split("（")[0] in skip:
             lines += ["", "=== %s ===" % name, "按 EVAL_SKIP 跳过"]
             continue
-        lines.extend(_section(name, module, log_path))
+        lines.extend(_section(name, main_fn, log_path))
 
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     with open(REPORT, "w", encoding="utf-8") as f:

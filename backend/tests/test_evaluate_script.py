@@ -17,6 +17,9 @@ class _Resp:
     def json(self):
         return self._payload
 
+    def raise_for_status(self):
+        pass
+
 
 class _FakeClient:
     """只会照剧本应答的假 httpx.Client。"""
@@ -40,6 +43,9 @@ class _FakeClient:
 
     def delete(self, url, headers=None):
         return _Resp({"ok": True})
+
+    def close(self):
+        pass
 
 
 # ---------- SSE 解析 ----------

@@ -7,7 +7,7 @@
 **布尔判定是「一条一问」**（#53）：早先是「一次问 N 条、要求回长度恰好 N 的数组」，
 而**让模型自己数数不可靠** —— 真机上 10 条里 9 条因为「回了 5 个、要 6 个」被整条丢掉，
 RAGAS 数字只剩 1 个样本。改成一条一问后，长度对不上**结构上不可能发生**；
-代价是裁判调用次数 ×N（离线评测可接受）。
+代价是裁判调用次数 ×N —— 所以那些彼此独立的判定**并行跑**（`_bool_each`，并发度可配，设 1 退回串行）。
 
 四项：
   faithfulness      答案的论断能否被检索上下文推出：先拆论断，再逐条核验
@@ -21,6 +21,7 @@ expect 若只是几个关键词，这一项会退化成 0/1 —— 报告口径�
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 from app.config import get_settings
 from app.core.similarity import cosine
@@ -90,13 +91,16 @@ class RagasJudge:
     """RAGAS 四项裁判。构造时注入 LLM 与嵌入；调用一次算一条问答。"""
 
     def __init__(self, llm, embedding, label: str | None = None,
-                 n_questions: int = DEFAULT_N_QUESTIONS):
+                 n_questions: int = DEFAULT_N_QUESTIONS,
+                 concurrency: int | None = None):
         if getattr(llm, "api_key", None) == "":
             raise JudgeUnavailable("未配置 LLM API Key，RAGAS 裁判不可用")
         s = get_settings()
         self._llm = llm
         self._embedding = embedding
         self._n = n_questions
+        # 逐条判定彼此独立 → 并行跑（#55）。设 1 退回串行。
+        self._workers = concurrency if concurrency is not None else s.ragas_judge_concurrency
         # 口径字符串要与真正在用的裁判对齐 —— 模型与温度都优先读对象自身的，读不到才回落配置
         model = getattr(llm, "model", None) or s.ragas_judge_model
         temp = getattr(llm, "temperature", None)
@@ -129,8 +133,8 @@ class RagasJudge:
     def _context_precision(self, question: str, contexts: list) -> float:
         if not contexts:
             return 0.0
-        useful = [self._one_bool(_CTX_REL_ONE_PROMPT % (question, c), "这段上下文有没有用")
-                  for c in contexts]
+        useful = self._bool_each([_CTX_REL_ONE_PROMPT % (question, c) for c in contexts],
+                                 "这段上下文有没有用")
         hits, acc = 0, 0.0
         for k, ok in enumerate(useful, start=1):
             if ok:
@@ -146,8 +150,8 @@ class RagasJudge:
     def _supported_ratio(self, claims: list, contexts: list) -> float:
         if not claims:
             return 0.0
-        flags = [self._one_bool(_SUPPORT_ONE_PROMPT % (self._join(contexts), c), "这条论断能否推出")
-                 for c in claims]
+        flags = self._bool_each([_SUPPORT_ONE_PROMPT % (self._join(contexts), c) for c in claims],
+                                "这条论断能否推出")
         return sum(1 for f in flags if f) / len(claims)
 
     # ---- 与模型打交道 ----
@@ -157,6 +161,21 @@ class RagasJudge:
             return "".join(self._llm.stream([{"role": "user", "content": prompt}]))
         except Exception as e:   # noqa: BLE001 —— 裁判的任何失败都转成「不可用」，绝不静默
             raise JudgeUnavailable("裁判调用失败：%s: %s" % (type(e).__name__, e))
+
+    def _bool_each(self, prompts: list, what: str) -> list:
+        """逐条判定 —— **并行**跑（#55）。
+
+        一条一问（#53）把「模型数不准就整条打回」换成了「一条一次」，代价是调用次数 ×N。
+        但这些判定**彼此完全独立**，串行等网络就是白等；`Executor.map` 保序，
+        结果与入参一一对应。并发度来自配置 —— 设 1 就退回串行。
+        """
+        if not prompts:
+            return []
+        workers = min(self._workers, len(prompts))
+        if workers <= 1:
+            return [self._one_bool(p, what) for p in prompts]
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            return list(pool.map(lambda p: self._one_bool(p, what), prompts))
 
     def _one_bool(self, prompt: str, what: str) -> bool:
         """问**一条**、回**一个**布尔。认不出来就报不可用 —— 绝不猜。"""

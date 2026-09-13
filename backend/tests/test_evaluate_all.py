@@ -28,7 +28,7 @@ def _stub_sections(monkeypatch, tmp_path):
         path = tmp_path / ("%s.log" % name)
         monkeypatch.setattr(mod, "REPORT", str(path))
 
-        def main(p=path, n=name):
+        def main(p=path, n=name, session=None):     # 延迟段会带 session 进来
             p.write_text("子报告 %s 的数字与口径\n" % n, encoding="utf-8")
 
         monkeypatch.setattr(mod, "main", main)
@@ -234,7 +234,8 @@ def test_a_stale_report_from_a_previous_run_is_not_left_behind(tmp_path, monkeyp
 
     monkeypatch.setattr(evaluate_rgb, "main", boom)
 
-    out = evaluate_all._section("RGB 中文四能力（离线）", evaluate_rgb, str(stale))
+    out = evaluate_all._section("RGB 中文四能力（离线）", evaluate_rgb.main, str(stale))
 
     assert any("未跑" in line for line in out)
     assert not stale.exists()          # 旧的那份不许留着骗人
+

@@ -25,7 +25,7 @@ import time
 import httpx
 
 from app.eval_core import LATENCY_STAGES, LatencyMetrics
-from app.eval_http import upload_and_wait
+from app.eval_http import OnlineSession
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 BASE = os.environ.get("SELFTEST_BASE", "http://localhost:8000")
@@ -101,12 +101,17 @@ def _run_round(client, headers, kb_id, questions: list) -> list:
     return out
 
 
-def _upload(client, kb_id: str, headers: dict) -> str:
-    d = upload_and_wait(client, kb_id, headers, DOC)
-    return "上传: %s chunks=%s" % (d.get("status"), d.get("chunk_count"))
+def _upload_line(upload: dict) -> str:
+    """上传结果一行 —— 会话复用时上传已经在别处做过了，这里只负责渲染。"""
+    return "上传: %s chunks=%s" % (upload.get("status"), upload.get("chunk_count"))
 
 
 def main() -> None:
+    """延迟段。
+
+    ⚠️ **自己开自己的知识库**，不跟生成层共用 —— 语义缓存按 kb_id 共享，共用会让这里的
+    请求命中生成层刚写下的缓存，生成耗时与首字塌成接近 0（#55 里试过、退回来了）。
+    """
     os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     with open(GOLDEN, encoding="utf-8") as f:
         golden = json.load(f)
@@ -115,18 +120,17 @@ def main() -> None:
     lines = ["=== 延迟评测 ===", "文档: %s" % DOC, "并发: %d × %d 轮" % (CONCURRENCY, ROUNDS)]
     samples: list = []
     try:
-        c = httpx.Client(base_url=BASE, timeout=300)
-        r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
-        H = {"Authorization": "Bearer %s" % r.json().get("access_token")}
-        kb = c.post("/api/v1/knowledge", json={"name": "__latency__", "description": ""},
-                    headers=H).json()["id"]
-        lines.append(_upload(c, kb, H))
-        lines.append("")
+        sess = OnlineSession.open(BASE, DOC, name="__latency__")
+        try:
+            c, H, kb = sess.client, sess.headers, sess.kb_id
+            lines.append(_upload_line(sess.upload))
+            lines.append("")
 
-        for _ in range(ROUNDS):
-            batch = (questions * ((CONCURRENCY // len(questions)) + 1))[:CONCURRENCY]
-            samples.extend(_run_round(c, H, kb, batch))
-        c.delete("/api/v1/knowledge/%s" % kb, headers=H)
+            for _ in range(ROUNDS):
+                batch = (questions * ((CONCURRENCY // len(questions)) + 1))[:CONCURRENCY]
+                samples.extend(_run_round(c, H, kb, batch))
+        finally:
+            sess.close()
     except Exception as e:   # noqa: BLE001 —— 这页是给人看的，写一行就够；traceback 太长会淹掉其它段
         lines.append("未跑：%s: %s" % (type(e).__name__, e))
 
