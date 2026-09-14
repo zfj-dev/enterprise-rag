@@ -5,6 +5,9 @@
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import pytest
 
 from app.eval_core import RAGAS_METRICS
@@ -21,23 +24,36 @@ class ScriptedLLM:
     api_key = "k"
     model = "qwen-turbo"
 
-    def __init__(self, replies: dict):
+    def __init__(self, replies: dict, delay: float = 0.0):
         self.replies = {k: (list(v) if isinstance(v, list) else v) for k, v in replies.items()}
         self.prompts: list[str] = []
+        self.delay = delay              # 慢一点才看得出有没有真的重叠
+        self.live = 0                   # 当前在飞的调用数
+        self.max_live = 0               # 见过的最大并发
+        self._lock = threading.Lock()
 
     def stream(self, messages):
         prompt = messages[-1]["content"]
-        self.prompts.append(prompt)
-        for marker, reply in self.replies.items():
-            if marker in prompt:
-                if isinstance(reply, list):
-                    if not reply:
-                        raise AssertionError("脚本已用完（又调了一次）：%s" % prompt[:60])
-                    yield reply.pop(0)
+        with self._lock:
+            self.prompts.append(prompt)
+            self.live += 1
+            self.max_live = max(self.max_live, self.live)
+        try:
+            if self.delay:
+                time.sleep(self.delay)
+            for marker, reply in self.replies.items():
+                if marker in prompt:
+                    if isinstance(reply, list):
+                        if not reply:
+                            raise AssertionError("脚本已用完（又调了一次）：%s" % prompt[:60])
+                        yield reply.pop(0)
+                        return
+                    yield reply
                     return
-                yield reply
-                return
-        raise AssertionError("未脚本化的提示词：%s" % prompt[:80])
+            raise AssertionError("未脚本化的提示词：%s" % prompt[:80])
+        finally:
+            with self._lock:
+                self.live -= 1
 
 
 class StubEmbedding:
@@ -50,6 +66,8 @@ class StubEmbedding:
 def _judge(replies, **kw):
     return RagasJudge(ScriptedLLM(replies), StubEmbedding(), **kw)
 
+
+NL = chr(10)      # 测试里拼多行提示词用，免得转义层数出错
 
 SPLIT = "拆成若干条"
 SUPPORT = "能否**仅凭**"
@@ -200,3 +218,60 @@ def test_the_judge_returns_exactly_the_canonical_metric_names():
     replies = {SPLIT: "一条", SUPPORT: ["true"], GENQ: "一问", CTX_REL: ["true"]}
     got = _judge(replies)("问", "答", [{"text": "ctx"}])
     assert set(got) == set(RAGAS_METRICS)
+
+
+# ---------- 判定并行化（#55）----------
+
+def _slow_judge(n_claims, delay=0.05, concurrency=None):
+    llm = ScriptedLLM({SPLIT: NL.join("论断%d" % i for i in range(n_claims)),
+                       SUPPORT: ["true"] * n_claims, GENQ: "一问", CTX_REL: ["true"]},
+                      delay=delay)
+    kw = {} if concurrency is None else {"concurrency": concurrency}
+    return RagasJudge(llm, StubEmbedding(), **kw), llm
+
+
+def test_verdicts_are_judged_in_parallel():
+    """一条一问把正确性换回来了，但那些判定**彼此独立** —— 串行等网络就是白等（#55）。"""
+    judge, llm = _slow_judge(6)
+
+    judge("问", "答", [{"text": "ctx"}])
+
+    assert llm.max_live > 1, "判定没有重叠（还是串行）"
+
+
+def test_parallel_verdicts_keep_their_order():
+    """并发不能把结果顺序搞乱：第 1 条论断的判定必须还给第 1 条。"""
+    llm = ScriptedLLM({SPLIT: "甲" + NL + "乙" + NL + "丙",
+                       SUPPORT: ["true", "false", "true"], GENQ: "一问", CTX_REL: ["true"]},
+                      delay=0.03)
+    judge = RagasJudge(llm, StubEmbedding())
+
+    got = judge("问", "答", [{"text": "ctx"}])
+
+    assert got["faithfulness"] == pytest.approx(2 / 3)      # 顺序对了才是 2/3
+
+
+def test_concurrency_one_falls_back_to_serial():
+    """并发度设 1 就退回串行 —— 排障与「怀疑并发惹的祸」时要用。"""
+    judge, llm = _slow_judge(6, concurrency=1)
+
+    judge("问", "答", [{"text": "ctx"}])
+
+    assert llm.max_live == 1
+
+
+def test_a_failure_still_raises_under_concurrency():
+    """并发不改变失败语义：有一条认不出来，仍然报不可用（绝不拿一部分凑数）。"""
+    llm = ScriptedLLM({SPLIT: "甲" + NL + "乙", SUPPORT: ["true", "我拿不准"],
+                       GENQ: "一问", CTX_REL: ["true"]})
+    with pytest.raises(JudgeUnavailable):
+        RagasJudge(llm, StubEmbedding())("问", "答", [{"text": "ctx"}])
+
+
+def test_a_single_call_does_not_spin_up_a_pool():
+    """只有一条时没必要开线程池 —— 顺带保证边界情况不会卡住。"""
+    judge, llm = _slow_judge(1, concurrency=8)
+
+    judge("问", "答", [{"text": "ctx"}])
+
+    assert llm.max_live == 1

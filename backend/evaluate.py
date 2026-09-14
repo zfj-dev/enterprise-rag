@@ -26,7 +26,7 @@ import traceback
 import httpx
 
 from app.eval_core import run_eval
-from app.eval_http import upload_and_wait
+from app.eval_http import OnlineSession
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 BASE = os.environ.get("SELFTEST_BASE", "http://localhost:8000")
@@ -137,6 +137,10 @@ def run_online(base=None, golden_path=None, doc_path=None):
 
     服务不可达等失败会**抛异常** —— 调用方自己决定怎么报（一页报告要能把它标成"没跑"）。
     base / golden_path / doc_path 不给就用模块级常量（**调用时**才读，改得动）。
+
+    ⚠️ **不跟别的评测段共用知识库**：语义缓存按 kb_id 共享，两段用同一个库的话，
+    后跑的那段会命中前一段的缓存 —— 延迟段尤其致命（生成耗时与首字会塌成接近 0，
+    是个「好看但错」的数字）。宁可各自多解析一遍，也不改口径（#55 里试过、退回来了）。
     """
     base = base or BASE
     golden_path = golden_path or GOLDEN
@@ -144,12 +148,8 @@ def run_online(base=None, golden_path=None, doc_path=None):
     with open(golden_path, encoding="utf-8") as f:
         golden = json.load(f)
 
-    c = httpx.Client(base_url=base, timeout=300)
-    r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
-    H = {"Authorization": "Bearer %s" % r.json().get("access_token")}
-    kb = c.post("/api/v1/knowledge", json={"name": "__eval__", "description": ""},
-                headers=H).json()["id"]
-    upload = upload_and_wait(c, kb, H, doc_path)
+    sess = OnlineSession.open(base, doc_path)
+    c, H, kb, upload = sess.client, sess.headers, sess.kb_id, sess.upload
 
     # EVAL_MULTI_TURN=1：同一个会话里连着问 —— 历史累积后压缩才会触发，降幅才有数
     multi = _truthy(os.environ.get("EVAL_MULTI_TURN"))
@@ -173,7 +173,7 @@ def run_online(base=None, golden_path=None, doc_path=None):
     report.rerank_unscored = counts["unscored"]
     if judge_note:
         report.judge_error = report.judge_error or judge_note
-    c.delete("/api/v1/knowledge/%s" % kb, headers=H)
+    sess.close()
     return report, upload
 
 

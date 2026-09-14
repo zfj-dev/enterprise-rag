@@ -129,6 +129,9 @@ class Settings(BaseSettings):
     memory_inject_max_chars: int = 200     # 单条事实**注入时**的长度上限（存储不截断）
     ragas_judge_model: str = "qwen-turbo"  # RAGAS 裁判固定口径：模型写进报告，数字才可跨时间比较
     ragas_judge_temperature: float = 0.0
+    # 裁判逐条判定的并发度（#55）：一条一问把正确性换回来了，但调用次数 ×N，
+    # 而这些判定彼此独立、串行等网络就是白等。设 1 退回串行（排障用）。
+    ragas_judge_concurrency: int = 4
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
     login_rate_limit_per_min: int = 10  # 登录限流:每用户名每分钟最多尝试次数,超限 429
