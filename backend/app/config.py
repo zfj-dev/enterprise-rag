@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     rerank_top_k: int = 3  # 上下文/来源宽度（具体查询更聚焦）
     min_relevance: float = 0.4
     rrf_k: int = 60
+    # 引用覆盖率门槛（票 B）：**逐句校验后**，覆盖率不高于它就改口拒答，不拿模型自己的知识作答。
+    # 语义是「必须**严格大于**」—— 默认 0.0 = 一条依据都没有就拒答（这条规则不需要标定）。
+    # 调高更严（0.5 = 一半句子要有依据；1.0 = 只要有一句没依据就拒答），
+    # 但那是取值，得先在真机上量过再定，别凭空写。
+    citation_min_coverage: float = 0.0
 
     parser_use_docling: bool = True  # 装了 docling 且 PDF 走它(表格/版面更好)，否则回退 PyMuPDF
     docling_images_scale: float = 1.0  # docling 版面分析图像倍率；0.5=更快但小表格/图可能漏

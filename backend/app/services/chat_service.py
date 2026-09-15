@@ -639,11 +639,24 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
     prep.trace["generate_ms"] = (time.perf_counter() - t_generate) * 1000
 
     # 真实模型才逐句校验引用覆盖率；代理链路在自检（票 14）里已经算过，不重复调模型
+    # （agent 那边只留下一个数、没有 `verified`，所以这道守门暂时覆盖不到它）。
     if not prep.llm.is_fake and prep.trace.get("citation_coverage") is None:
         try:
-            from app.core.citation import verify_claims
+            from app.core.citation import (apply_coverage_guard, coverage_too_low,
+                                           verify_claims)
             cov = verify_claims(answer, prep.sources, prep.llm)
             prep.trace["citation_coverage"] = cov.get("coverage")
+            # 票 B：没依据的回答不许放行。两道前提缺一不可 ——
+            # `verified`（没校验成 = 未知，不许当结论）与**确实有来源**
+            # （一条来源都没有时上游已经用 apply_no_source_no_claim 拒过，
+            #  那句话说清了是「未检索到」；这里再拦一次只会把真原因换成别的）。
+            min_cov = get_settings().citation_min_coverage
+            fired = bool(prep.sources) and coverage_too_low(cov, min_cov)
+            prep.trace["citation_guard"] = {"min_coverage": min_cov, "fired": fired,
+                                            "coverage": cov.get("coverage"),
+                                            "verified": cov.get("verified")}
+            if fired:
+                answer = apply_coverage_guard(answer, cov, min_cov)
         except Exception as e:
             logger.warning("引用覆盖率校验失败: %s", e)
 
@@ -659,6 +672,8 @@ def _finish(db: Session, rt: Runtime, prep: Prep, answer: str, *,
     yield {"type": "done", "session_id": prep.session_id, "message_id": asst.id, "sources": prep.sources,
            "answer": answer, "cache_hit": cache_hit,
            "citation_coverage": prep.trace.get("citation_coverage"),
+           # 这次是不是因为「依据不成立」被改口拒答（票 B）；没拦就是 None（SSE 契约只增）
+           "citation_guard": prep.trace.get("citation_guard"),
            "context": prep.trace.get("context_tokens"),   # 压缩前/后 token 与口径（票 19）
            "usage": prep.trace.get("usage"),              # 本次用量的 token 与口径来源（票 27）
            "agent_skipped": prep.trace.get("agent_skipped"),   # 代理为何没用上（票 34）

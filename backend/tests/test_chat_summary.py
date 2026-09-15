@@ -215,6 +215,61 @@ def test_answer_carries_the_fields_the_eval_core_reads(client):
         db.close()
 
 
+class GroundlessLLM:
+    """假装是真模型：生成一个**在来源里找不到依据**的答案，逐句校验回「一条都不支撑」。
+
+    演示用的 FakeLLM 会被 `_finish` 跳过（不调校验），所以要 `is_fake = False` 才走得到守门。
+    """
+
+    is_fake = False
+
+    def stream(self, messages):
+        prompt = messages[-1]["content"]
+        if "是否被参考资料支撑" in prompt:
+            yield '{"claims":[{"claim":"答案是 42。","supported":false}]}'
+        else:
+            yield "答案是 42。"
+
+
+def test_a_groundless_answer_is_turned_into_a_refusal(client, monkeypatch):
+    """接线测试（票 B）：一条依据都没有 -> 落库与返回都改成拒答，trace 记下拦过。
+
+    这条走的是**真实的 chat_service 链路**（不是手写一个 verification dict）——
+    守门接没接上，只有从 `answer()` 一路问出来才算数。
+    """
+    user, kb, db, rt, _ = _setup(client, "sum_guard")
+    rt.llm = GroundlessLLM()
+    monkeypatch.setattr(chat_service, "retrieve_candidates",
+                        lambda *a, **k: [{"chunk_id": "c1", "content": "无关内容",
+                                          "page_num": 1, "score": 0.9}])
+    try:
+        out = chat_service.answer(db, rt, user, kb, "营收多少", "sum-guard")
+
+        assert "无法确定" in out["answer"] and "42" not in out["answer"]
+        assert out["trace"]["citation_guard"]["fired"] is True
+        assert out["trace"]["citation_coverage"] == 0.0
+    finally:
+        db.close()
+
+
+def test_the_no_source_refusal_keeps_its_own_wording(client, monkeypatch):
+    """一条来源都没有时，别把上游「未检索到可引用的内容」那句换成「论断没依据」。
+
+    两句都是拒答，但说的是**不同的**原因（没检索到 / 检索到了但撑不住）——
+    覆盖掉就是把真原因说没了（#62 两轴审查抓到）。
+    """
+    user, kb, db, rt, _ = _setup(client, "sum_nosrc")
+    rt.llm = GroundlessLLM()
+    monkeypatch.setattr(chat_service, "retrieve_candidates", lambda *a, **k: [])
+    try:
+        out = chat_service.answer(db, rt, user, kb, "营收多少", "sum-nosrc")
+
+        assert "未检索到可引用的内容" in out["answer"]
+        assert out["trace"]["citation_guard"]["fired"] is False
+    finally:
+        db.close()
+
+
 class BoomSummarizer:
     """摘要器炸了（网络/配额）—— 退回不压缩，但**原因不是**「历史没超预算」。"""
 
