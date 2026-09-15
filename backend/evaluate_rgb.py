@@ -54,6 +54,21 @@ def _index_entry(rt, entry: dict, kb_id: str, tag: str, owner_id: str) -> int:
     return index_chunks(rt, chunks)
 
 
+def _answer_fn(db, rt, user):
+    """RGB 的答题函数：**把管线自己的结果整份透传**，不手挑字段。
+
+    以前只手挑 `answer` / `sources`，把 `context`（token 口径）与 `citation_coverage`
+    （引用覆盖率）都丢了 —— 报告只能写「不可用」，还把原因错写成「没有真实分词器」。
+    分词器一直是好的（实测 RGB 进程里是 HfTokenCounter），错的是这里没把数据带出来（#58）。
+    """
+    from app.services import chat_service
+
+    def answer_with(kb_id: str, question: str) -> dict:
+        return chat_service.answer(db, rt, user, kb_id, question)
+
+    return answer_with
+
+
 def _answer_cursor(entries: list, kbs: list, answer_with):
     """按**条目顺序**取这一条自己的库，返回 core 要的 answer_fn。
 
@@ -113,7 +128,6 @@ def main() -> None:
 
     from app.core.container import build_runtime
     from app.db.session import SessionLocal
-    from app.services import chat_service
 
     # **先建评测用户、再索引**：索引时的 owner_id 与检索时的必须同一个，
     # 否则每题 0 命中，管线按「no source → no claim」全拒答（#54：那 100% 拒答率是假成功）。
@@ -129,12 +143,8 @@ def main() -> None:
     lines.append("")
 
     try:
-
-        def answer_with(kb_id: str, question: str) -> dict:
-            out = chat_service.answer(db, rt, user, kb_id, question)
-            return {"answer": out.get("answer", ""), "sources": out.get("sources", [])}
-
-        lines.extend(run_eval(entries, _answer_cursor(entries, kbs, answer_with)).to_lines())
+        lines.extend(run_eval(entries,
+                              _answer_cursor(entries, kbs, _answer_fn(db, rt, user))).to_lines())
     finally:
         db.close()
 

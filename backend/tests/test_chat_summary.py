@@ -175,3 +175,72 @@ def test_the_trace_reports_tokens_only_with_a_real_tokenizer(client, monkeypatch
         assert usage2["tokens_before"] is None and usage2["tokenizer"] == ""
     finally:
         db.close()
+
+
+def test_no_compression_is_not_reported_as_a_zero_reduction(client, monkeypatch):
+    """历史没超预算 = 这一问**压根没压**。token 记 None（不进降幅）并写明原因。
+
+    报成 0% 等于把「没发生」写成「发生了但结果是 0」；口径仍要留在原地 ——
+    这不是「没接分词器」（#57）。
+    """
+    user, kb, db, rt, _ = _setup(client, "sum_nocompress")
+    rt.token_counter = LabeledCounter()
+    monkeypatch.setattr(chat_service.get_settings(), "context_token_budget", 100000)
+    monkeypatch.setattr(chat_service.get_settings(), "context_keep_recent", 1)
+    try:
+        for i in range(1, 4):
+            out = chat_service.answer(db, rt, user, kb, "第%d个问题" % i, "sum-nocompress")
+        usage = out["trace"]["context_tokens"]
+
+        assert usage["tokens_before"] is None and usage["tokens_after"] is None
+        assert usage["tokenizer"] == "Qwen/test"          # 口径还在：不是「没分词器」
+        assert usage["note"] == ""                        # 更不能错记成「拿不到分词器」
+        assert "未超预算" in usage["no_compress_note"]
+    finally:
+        db.close()
+
+
+def test_answer_carries_the_fields_the_eval_core_reads(client):
+    """非流式入口也要带 `context` / `citation_coverage`。
+
+    评测走的正是这条路（RGB 段）：只手挑 answer + sources 会把 token 口径与
+    引用覆盖率整段丢掉，报告只能写「不可用」并错怪分词器（#58）。
+    """
+    user, kb, db, rt, _ = _setup(client, "sum_fields")
+    try:
+        out = chat_service.answer(db, rt, user, kb, "文档里写了什么？")
+
+        assert out["context"] is not None and "citation_coverage" in out
+    finally:
+        db.close()
+
+
+class BoomSummarizer:
+    """摘要器炸了（网络/配额）—— 退回不压缩，但**原因不是**「历史没超预算」。"""
+
+    def summarize(self, messages):
+        raise RuntimeError("网络挂了")
+
+
+def test_a_failed_summarizer_is_not_blamed_on_the_budget(client, monkeypatch):
+    """摘要失败 -> 报告必须说「摘要失败」。
+
+    从「没有摘要」反推成「未超预算」就是编了一个原因 —— 而这条链路真会报出
+    「历史 N tokens 未超预算 M」且 N > M 的自相矛盾句子（#57 的两轴审查抓到）。
+    """
+    user, kb, db, rt, _ = _setup(client, "sum_boom")
+    rt.token_counter = LabeledCounter()
+    rt.context_summarizer_factory = lambda llm: BoomSummarizer()
+    monkeypatch.setattr(chat_service.get_settings(), "context_token_budget", 3)
+    monkeypatch.setattr(chat_service.get_settings(), "context_keep_recent", 1)
+    try:
+        for i in range(1, 6):
+            out = chat_service.answer(db, rt, user, kb, "第%d个问题" % i, "sum-boom")
+        note = out["trace"]["context_tokens"]["no_compress_note"]
+
+        assert "摘要失败" in note
+        assert "未超预算" not in note          # 别把失败说成「本来就不需要压」
+        assert out["trace"]["context_tokens"]["tokenizer"] == "Qwen/test"
+        assert out["trace"]["context_tokens"]["tokens_before"] is None
+    finally:
+        db.close()

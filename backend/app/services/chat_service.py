@@ -374,7 +374,8 @@ def prepare(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         plan = plan_exempt(history, previous=sess.summary, previous_upto=sess.summary_upto)
     else:
         # 关压缩：与今天一致 —— 不带摘要（开过关的会话里那份摘要也不在这条路上出现）
-        plan = ContextPlan(summary=None, kept=history)
+        plan = ContextPlan(summary=None, kept=history,
+                           skip_reason="压缩已关闭（context_compress 为假）")
     timings: dict = {}
     candidates = retrieve_candidates(db, rt, kb_id=kb_id, owner_id=user.id, question=question,
                                      query=q2, timings=timings)
@@ -444,6 +445,8 @@ def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int,
     **只用真实分词器**报数：没有真实分词器时 token 一律 None（报告写「不可用」），
     绝不拿字符估算的数字顶替 —— 预算判定可以用估算，对外报的数字不行。
     只算**历史**那部分（全量历史 -> 摘要 + 保留轮）：记忆两侧都在，算进来只会稀释降幅。
+    **没有摘要可带**时 token 同样记 None，并照抄 `plan.skip_reason` 说明为什么 ——
+    「没压」与「压了但没省」是两回事，不能都渲染成 0%（#57）。
     """
     from app.core.prompt import format_turn
 
@@ -459,6 +462,14 @@ def _token_usage(rt: Runtime, plan: ContextPlan, history: list, budget: int,
         return {"tokens_before": None, "tokens_after": None, "tokenizer": "", "budget": budget,
                 "note": getattr(counter, "note", "")}
     count = counter.count
+    if not plan.summary:
+        # 这一问**没有摘要可带**（没压 / 压了没成）：before == after，报 0% 就是把
+        # 「没发生」写成「发生了但结果是 0」（#57）。token 记 None 让它**不进降幅**。
+        # 原因**照抄 plan** —— 从「没有摘要」反推必然把「摘要失败」说成「未超预算」。
+        # 数 token 放在这之后：这条路上两个数都没人用，算了也是白算。
+        return {"tokens_before": None, "tokens_after": None, "tokenizer": label,
+                "budget": budget, "note": "",
+                "no_compress_note": plan.skip_reason or "本次没有摘要可带（未记录原因）"}
     before = sum(count(format_turn(t)) for t in history)
     after = count(plan.summary or "") + sum(count(format_turn(t)) for t in plan.kept)
     return {"tokens_before": before, "tokens_after": after, "tokenizer": label, "budget": budget,
@@ -718,11 +729,18 @@ def _launch_fact_extraction(rt: Runtime, prep: Prep, *, answer: str, message_id:
 
 def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
            session_id: str | None = None, *, allow_agent: bool = False) -> dict:
-    """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id, trace}。
+    """同步问答（配合非流式/测试）。返回 {session_id, answer, sources, message_id,
+    context, citation_coverage, trace}。
 
     `allow_agent` 的默认是 **False**（见 stream_answer）：不主动要就走确定性链路。
 
     对比评测的基准显式传 `allow_agent=False`，免得被全局开关顺手换成代理、两列都成了代理。
+
+    **口径字段与 SSE 的 done 事件对齐**：走这条路的是 RGB 评测，以前只手挑
+    answer + sources，token 口径与引用覆盖率整段丢掉，报告只能写「不可用」，
+    还把原因错写成「没有真实分词器」（#58）。
+    只带 `run_eval` 真读的两个（`context` / `citation_coverage`）；重排那几项没人消费，
+    带出来只是死字段 —— 等 RGB 段真要报「这次没重排」时再加（见 #58 的评论）。
     """
     prep = prepare(db, rt, user, kb_id, question, session_id)
     result: dict = {}
@@ -733,5 +751,7 @@ def answer(db: Session, rt: Runtime, user: User, kb_id: str, question: str,
         "answer": result.get("answer", ""),
         "sources": prep.sources,
         "message_id": result.get("message_id"),
+        "context": result.get("context"),
+        "citation_coverage": result.get("citation_coverage"),
         "trace": prep.trace,
     }
