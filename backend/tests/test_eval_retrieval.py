@@ -44,6 +44,32 @@ def test_all_four_retrieval_labels_are_kept():
     assert all(label in m.scores for label in LABELS4)
 
 
+def test_a_gold_set_bigger_than_k_says_recall_at_k_is_capped():
+    """正确分块比 k 还多的题：recall@k 的上限就是 k/正确分块数，结构性地低。
+
+    报告必须点名说清 —— 否则读者会把这几个数当成「整体检索水平」（#60）。
+    （真机上「论文的研究对象」正确分块 102 条，recall@10 上限只有 0.10。）
+    """
+    ranks = {label: ["g1", "g2"] for label in LABELS4}
+    m = run_retrieval_eval(
+        [{"question": "有哪些图片", "gold_ids": {"g%d" % i for i in range(1, 51)}}],
+        _fn({"有哪些图片": {"ranks": ranks, "top1": 0.9}}), ks=(1, 3))
+    text = "\n".join(m.to_lines())
+
+    assert "上限" in text and "有哪些图片" in text
+    assert "0.06" in text                     # 3 / 50
+    assert "hit@k" in text                    # 说清哪几项不受影响
+
+
+def test_a_gold_set_within_k_gets_no_cap_warning():
+    """装得下的题不许出现这条提示 —— 提示一多就成了噪音。"""
+    ranks = {label: ["g1", "x"] for label in LABELS4}
+    m = run_retrieval_eval([{"question": "Q1", "gold_ids": {"g1"}}],
+                           _fn({"Q1": {"ranks": ranks, "top1": 0.9}}), ks=KS)
+
+    assert "注意：" not in "\n".join(m.to_lines())
+
+
 def test_metrics_are_averaged_over_questions_per_label_and_k():
     table = {
         "Q1": {"ranks": {"hybrid": ["g1", "x"], "vector": ["x", "g1"]}, "top1": 0.9},

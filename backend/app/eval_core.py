@@ -3,12 +3,14 @@
 `run_eval(黄金集, answer_fn, judge_fn)` 的**被评对象与裁判都从外部注入**，所以核心
 **不连服务、不调 LLM**：离线、CI、测试里都能跑出确定结果，换个后端也不用改评测代码。
 
-判据口径（免 LLM）：把期望事实与待查文本都「去空白 + 转小写」后做子串匹配 ——
-解析器会在数字/标点之间插空格（'表 3 . 1'、'Windows 11'），不这样归一化会整片漏判。
+判据口径（免 LLM）：把期望事实与待查文本都「去空白 + 转小写 + 数字写法归一」后比对，
+数字片段还要求**不粘在别的数字上**（见 `normalize` / `contains`）—— 解析器会在数字/标点
+之间插空格（'表 3 . 1'、'Windows 11'），不这样归一化会整片漏判。
 """
 from __future__ import annotations
 
 import math
+import re
 
 from dataclasses import dataclass, field
 from typing import Callable, Sequence
@@ -28,8 +30,101 @@ def as_int(value) -> int | None:
 
 
 def normalize(text) -> str:
-    """判据口径：去空白 + 转小写。"""
-    return "".join(str(text or "").split()).lower()
+    """判据口径：去空白 + 转小写 + **数字写法归一**（#60）。
+
+    一个值有多种写法：「加息四次」/「加息4次」、「1,313,851」/「1313851」、「８％」/「8%」。
+    只统一**写法**，不放松**取值** —— 「131万辆」跟「1313851」仍然不算命中（那是四舍五入），
+    「万/亿」也不展开（见 `_unify_numbers`：展开反而会把原本命中的判错）。
+    中文数字只在量词前转，认不出来的一律不转（见 `_CN_COUNTERS`）。
+    比对时还要过 `contains` 的数字边界 —— 本函数只管归一，不管「算不算命中」。
+    """
+    s = str(text or "").translate(_FULLWIDTH_TABLE)
+    s = "".join(s.split()).lower()
+    return _unify_numbers(s)
+
+
+# ---------- 数字写法归一（#60）----------
+# 判据是子串匹配，写法的差异会被当成「没命中」：真机 RGB 里「加息四次」判不过期望「4次」、
+# 「131万辆」判不过「1313851」。这里只统一**写法**；取值真不同（四舍五入、单位换错）照旧算错。
+_FULLWIDTH_TABLE = {ord(c): ord(d) for c, d in
+                    zip("０１２３４５６７８９％．，", "0123456789%.,")}
+_THOUSANDS_SEP = re.compile(r"(?<=\d),(?=\d)")
+_NUM_CHARS = "0123456789."
+_CN_DIGIT = {"零": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+             "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_UNIT = {"十": 10, "百": 100, "千": 1000}
+_CN_SECTION = {"万": 10000, "亿": 100000000}
+# 中文数字**只在这些量词前**才当数看。一/百/万 大量出现在普通词里（一般、一致、百度、万一），
+# 不加限定就会把它们拆成数字去碰瓷 —— 那是「放松取值」，会让错的答案命中（#60 两轴审查抓到：
+# 未加限定那版把「万一」转成 1、「百度」转成 100度，而且「4次」会命中「十四次」）。
+# 认不出来的一律**不转**：漏转只是维持现状（判没命中），错转会凭空造出一个命中。
+_CN_COUNTERS = set("个名位次年月日号家人辆条种倍批项张枚棵只间座页题轮套件岁层份台架头场届")
+_CN_RUN = re.compile("[" + "".join(_CN_DIGIT) + "".join(_CN_UNIT) + "".join(_CN_SECTION) + "]+")
+
+
+def _cn_to_int(run: str) -> str | None:
+    """一段中文数字 -> 阿拉伯数字；这段说不通是数就返回 None（原样留着）。
+
+    认识「十五」「二十一」「三百零五」「一万二千」。整段只有万/亿（单独一个「万」）不算数 ——
+    那是「万一」「万分」里的字，不是量。
+    """
+    if not any(ch in _CN_DIGIT or ch in _CN_UNIT for ch in run):
+        return None
+    total = section = number = 0
+    for ch in run:
+        if ch in _CN_DIGIT:
+            number = _CN_DIGIT[ch]
+        elif ch in _CN_UNIT:
+            section += (number or 1) * _CN_UNIT[ch]      # 「十五」的十读作一十
+            number = 0
+        else:
+            total += (section + number) * _CN_SECTION[ch]
+            section = number = 0
+    return str(total + section + number)
+
+
+def _unify_numbers(s: str) -> str:
+    """千分位去掉；**量词前**的中文数字 -> 阿拉伯数字（其余原样留着）。
+
+    **不展开「131万」这类单位**：展开会把原写法换掉，「期望 803.96 / 答案 803.96亿元」
+    这种原本命中的反而会判错（变成 80396000000 元）。要处理「万/亿」的换算就得做数值
+    容差比较，那是另一码事，本仓库明确不做 —— 宁可漏判，也不把四舍五入放过去。
+    """
+    s = _THOUSANDS_SEP.sub("", s)
+    out, i = [], 0
+    for m in _CN_RUN.finditer(s):
+        if s[m.end():m.end() + 1] not in _CN_COUNTERS:   # 后边不接量词 -> 当词看，不动它
+            continue
+        converted = _cn_to_int(m.group())
+        if converted is None:
+            continue                    # 说不通：这一段原样留着（i 不动）
+        out.append(s[i:m.start()])
+        out.append(converted)
+        i = m.end()
+    out.append(s[i:])
+    return "".join(out)
+
+
+def contains(want: str, text: str) -> bool:
+    """`want` 是否作为**独立片段**出现在 `text` 里（两边都已经 `normalize` 过）。
+
+    数字片段不许粘在别的数字上：「4次」不命中「14次」、「21」不命中「210」——
+    判据是子串匹配，不加这道边界，「14」就会当成「4」命中，等于放松取值
+    （#60 两轴审查抓到；ASCII 数字那边是老毛病，一并收掉）。
+    want 为空时返回 False —— 空串 `in` 恒真，那是个隐性 bug。
+    """
+    if not want:
+        return False
+    at = text.find(want)
+    while at != -1:
+        end = at + len(want)
+        left_ok = want[0] not in _NUM_CHARS or at == 0 or text[at - 1] not in _NUM_CHARS
+        right_ok = (want[-1] not in _NUM_CHARS or end == len(text)
+                    or text[end] not in _NUM_CHARS)
+        if left_ok and right_ok:
+            return True
+        at = text.find(want, at + 1)
+    return False
 
 
 # 拒答措辞。只收明确表示「答不了」的说法，不收「不确定」「可能」这类正常答案里也有的词。
@@ -349,7 +444,8 @@ class Report:
     def to_lines(self) -> list[str]:
         """报告正文：先口径、再逐条、后汇总 —— 数字脱离口径就不可信。"""
         lines = [
-            "判据口径：期望事实与待查文本都「去空白 + 转小写」后做子串匹配",
+            "判据口径：期望事实与待查文本都「去空白 + 转小写 + 数字写法归一」后比对，",
+            "  且数字片段不许粘在别的数字上（「4次」不命中「14次」）；写法统一、取值不放松",
             "  fact_hit  期望事实出现在答案里",
             "  grounded  期望事实出现在**随答案返回的来源文本**里（系统给出的来源集合；"
             "不逐条核对该论断是否被答案显式引用）",
@@ -484,8 +580,8 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
         report.items.append(ItemResult(
             question=question, expect=expect, answer=answer,
             # 期望事实缺失 → 记为未命中，而不是静默跳过（否则分母变小、数字虚高）
-            fact_hit=bool(want) and want in normalize(answer),
-            grounded=bool(want) and want in normalize(src_text),
+            fact_hit=contains(want, normalize(answer)),
+            grounded=contains(want, normalize(src_text)),
             expect_page=expect_page, pages=pages, source_count=len(sources),
             page_hit=(expect_page in pages) if expect_page else None,
             group=g.get("group", ""),
@@ -578,8 +674,10 @@ class RetrievalMetrics:
         lines = [
             "=== 检索层指标 ===",
             "判据口径：正确分块 = 内容含期望事实（声明了页码时还要求页码相符）的 child 块",
+            "  含 = 去空白 + 转小写 + 数字写法归一后比对，且数字片段不许粘在别的数字上",
             "  hit@k    任一正确分块落在前 k 条",
-            "  recall@k 前 k 条里命中的正确分块占全部正确分块的比例",
+            "  recall@k 前 k 条里命中的正确分块占全部正确分块的比例"
+            "（正确分块多于 k 的题，上限就是 k/正确分块数）",
             "  MRR      首个正确分块名次的倒数（用全排名，不看 k）",
             "",
         ]
@@ -588,6 +686,20 @@ class RetrievalMetrics:
                         % (self.skipped_count, " / ".join(self.skipped_questions))
                         if self.skipped_count else ""))
         lines.append("")
+        # 拿一个「满篇都是的词」当期望事实时，正确分块会有几十上百条 —— recall@k 对这类题
+        # 结构性地接近 0（前 k 条装不下），跟 1 条分块的题同样权重，会把整列压低（#60）。
+        # 点名说清，别让读者把它当成整体检索水平。
+        top_k = max(self.ks) if self.ks else 0
+        capped = [r for r in self.rows if top_k and r.gold_count > top_k]
+        if capped:
+            lines.append("注意：%d 条题的「正确分块」比最大的 k（%d）还多 —— recall@k 对它们"
+                         "上限只有 k/正确分块数（下面给的是**上界**：实际值明显低于上界，"
+                         "才说明这题真的漏检了）；hit@k 与 MRR 不受此影响："
+                         % (len(capped), top_k))
+            for r in capped:
+                lines.append("  %s 正确分块 %d 条 -> recall@%d 上限 %.2f"
+                             % (r.question, r.gold_count, top_k, top_k / r.gold_count))
+            lines.append("")
 
         head = "%-14s" % "方式"
         for k in self.ks:

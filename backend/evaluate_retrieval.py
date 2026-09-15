@@ -14,7 +14,7 @@ import json
 import os
 import time
 
-from app.eval_core import embedding_label, normalize, run_retrieval_eval
+from app.eval_core import contains, embedding_label, normalize, run_retrieval_eval
 from app.eval_index import index_chunks
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
@@ -70,7 +70,7 @@ def _gold_ids(chunks: list[dict], g: dict) -> set:
     """含期望事实（声明了页码时还要求页码相符）的 child 块 —— 该问题「应该被捞到」的那些。"""
     want = normalize(g["expect"])
     return {c["id"] for c in chunks
-            if want in normalize(c["content"])
+            if contains(want, normalize(c["content"]))
             and (g.get("page") is None or c["page_num"] == g["page"])}
 
 
