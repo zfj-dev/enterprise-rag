@@ -92,6 +92,7 @@ class ItemResult:
     ctx_note: str = ""                      # 没有真实分词器时的原因
     ctx_budget: int | None = None            # 当时的上下文预算（口径三件套之一）
     ctx_exempt_note: str = ""               # 本问豁免压缩的原因（与「没分词器」是两回事）
+    ctx_no_compress_note: str = ""          # 本问没压出摘要的原因（未超预算/摘要失败/压缩关；#57）
     source_count: int = 0                   # 这次回答带回了几条来源（0 = 一条都没检索到）
     refused: bool = False       # 判据认定「明确拒答」
     judged: dict | None = None  # 注入 judge_fn 时的裁判结论
@@ -267,16 +268,37 @@ class Report:
 
     @property
     def reduction_missing_reason(self) -> str:
-        """没有降幅数字时的**原因**（只此一处）——「有分词器但没可压的历史」与「没分词器」是两回事。
+        """没有降幅数字时的**原因**（只此一处）—— 三种「没压」不许混成一句。
 
+        三种：全部豁免压缩 / 没有摘要可带（原因照抄 `plan.skip_reason`，见 #57）/
+        压根没有可压的多轮历史。
         三处渲染（本模块的 `_token_lines`、`evaluate_all`、`eval_compare`）都从这里取原因：
         各写各的必然会漂移，把「不适用」说成「没有真实分词器」就成了假话。
         """
         if self.tokenizer_label:
             if self._all_positives_exempt():
                 return "不适用（本次问题全部豁免压缩——枚举/编号查询；口径 %s）" % self.tokenizer_label
+            if self.no_compress_note:
+                exempt = sum(1 for x in self.positives if x.ctx_exempt_note)
+                return "不适用（%s%s；口径 %s）" % (
+                    self.no_compress_note,
+                    "；另有 %d 条豁免压缩" % exempt if exempt else "",
+                    self.tokenizer_label)
             return "不适用（本次没有可压的多轮历史；口径 %s）" % self.tokenizer_label
         return "不可用（%s）" % (self.tokenizer_note or "没有真实分词器（不拿字数估算顶替）")
+
+    @property
+    def no_compress_note(self) -> str:
+        """「本次没有摘要可带」的原因（#57）—— 与豁免、与没分词器都不同。
+
+        只看 `ctx_no_compress_note`：三种「没数字」各走各的字段，挤在一起就会互相冒充。
+        **扫正样本**，与旁边的 `_all_positives_exempt` 同一个范围 —— 两处范围不一致时，
+        一个负样本的 note 会把正样本那批的口径盖掉。
+        """
+        for x in self.positives:
+            if x.ctx_no_compress_note:
+                return x.ctx_no_compress_note
+        return ""
 
     def _all_positives_exempt(self) -> bool:
         """参与统计的正样本是不是**全部**豁免压缩了 —— 那这条「不适用」的原因就不一样。"""
@@ -472,6 +494,7 @@ def run_eval(goldenset: Sequence[dict], answer_fn: AnswerFn,
             ctx_before=as_int(ctx.get("tokens_before")), ctx_after=as_int(ctx.get("tokens_after")),
             ctx_tokenizer=str(ctx.get("tokenizer") or ""), ctx_note=str(ctx.get("note") or ""),
             ctx_exempt_note=str(ctx.get("exempt_note") or ""),
+            ctx_no_compress_note=str(ctx.get("no_compress_note") or ""),
             ctx_budget=as_int(ctx.get("budget")),
         ))
         # 负样本只判拒答：它本就没有参考答案，送进 RAGAS 只会把四项均值无端拖低

@@ -13,6 +13,18 @@ def _ask(context):
     return ask
 
 
+def mix(first: dict, second: dict):
+    """两条条目各给一份 context：第一条是 GOLDEN[0]，第二条是问题 "b"。
+
+    两份都补上 `tokenizer`，免得「口径是谁」意外变成被测点。
+    """
+    def ask(question: str) -> dict:
+        ctx = dict(second if question == "b" else first)
+        ctx.setdefault("tokenizer", "Qwen/x")
+        return {"answer": "甲", "sources": [], "context": ctx}
+    return ask
+
+
 def _lines(rep) -> list:
     return "\n".join(rep.to_lines()).splitlines()
 
@@ -86,8 +98,54 @@ def test_the_sum_and_the_count_use_the_same_filter_as_the_rate():
             {"tokens_before": 0, "tokens_after": 0, "tokenizer": "Qwen/x"} if question == "b"
             else {"tokens_before": 100, "tokens_after": 40, "tokenizer": "Qwen/x"})}
 
-    rep = run_eval([GOLDEN[0], {**GOLDEN[0], "question": "b"}], ask)
+    rep = run_eval([GOLDEN[0], {**GOLDEN[0], "question": "b"}], mix(
+        {"tokens_before": 100, "tokens_after": 40},
+        {"tokens_before": 0, "tokens_after": 0}))
     row = next(ln for ln in _lines(rep) if ln.startswith("上下文压缩降幅(token)"))
 
     assert rep.token_reduction_rate == 0.6
     assert "压缩前 100 -> 压缩后 40" in row and "1 条计入" in row
+
+
+def test_a_request_that_never_compressed_is_not_averaged_in_as_zero():
+    """「这一次没压」不能当成降幅 0% 平均进去（#57）—— 那正是把「没发生」
+    写成「发生了但结果是 0」。要出「不适用 + 为什么」，而且不许提分词器。"""
+    rep = run_eval(GOLDEN, _ask({
+        "tokens_before": None, "tokens_after": None, "tokenizer": "Qwen/x", "budget": 3000,
+        "no_compress_note": "历史 2824 tokens 未超预算 3000，不需要压缩"}))
+    row = next(ln for ln in _lines(rep) if ln.startswith("上下文压缩降幅(token)"))
+
+    assert rep.token_reduction_rate is None
+    assert "不适用" in row and "未超预算" in row and "不需要压缩" in row
+    assert "0%" not in row
+    assert "没有真实分词器" not in row
+
+
+def test_a_failed_summarizer_is_reported_as_a_failure_not_as_a_small_history():
+    """真实原因必须**照抄**、不许反推：摘要炸了就得写「摘要失败」。
+
+    从「没有摘要」反推「未超预算」，会印出「历史 N tokens 未超预算 M」而 N > M。
+    """
+    rep = run_eval(GOLDEN, _ask({
+        "tokens_before": None, "tokens_after": None, "tokenizer": "Qwen/x", "budget": 3,
+        "no_compress_note": "摘要失败，退回不压缩：RuntimeError: 网络挂了"}))
+    row = next(ln for ln in _lines(rep) if ln.startswith("上下文压缩降幅(token)"))
+
+    assert "不适用" in row and "摘要失败" in row and "RuntimeError" in row
+    assert "未超预算" not in row
+
+
+def test_only_the_items_that_really_compressed_count_toward_the_reduction():
+    """一部分触发、一部分没触发：只有触发的进降幅。
+
+    把没触发的也拉进来（它 before == after）会把降幅稀释成一半 ——
+    那不是「压缩省得少」，是分母里混了根本没压的那几条。
+    """
+    rep = run_eval([GOLDEN[0], {**GOLDEN[0], "question": "b"}], mix(
+        {"tokens_before": 100, "tokens_after": 40},
+        {"tokens_before": None, "tokens_after": None,
+         "no_compress_note": "历史 10 tokens 未超预算 3000，压缩未触发"}))
+    row = next(ln for ln in _lines(rep) if ln.startswith("上下文压缩降幅(token)"))
+
+    assert rep.token_reduction_rate == 0.6          # 不是 0.3
+    assert "1 条计入" in row

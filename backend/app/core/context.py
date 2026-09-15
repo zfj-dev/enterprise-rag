@@ -88,6 +88,11 @@ class ContextPlan:
     kept: list[dict]
     dropped: int = 0
     cursor: str | None = None    # 摘要已覆盖到的最后一条消息 id（票 18 的持久化游标）
+    # **本次没压出新摘要**的原因（#57）。只有这里知道走了哪条分支 —— 下游**不许**从
+    # `summary is None` 反推：那会把「摘要器失败」「压缩被配置关掉」一律说成「未超预算」，
+    # 正是这个仓库反复踩的「拿不是真原因的原因去解释一个没有的数字」。
+    # 没有摘要可带时，评测会把它原样写进报告。
+    skip_reason: str = ""
 
 
 _PREVIOUS_LABEL = "以下是此前对话的摘要"
@@ -161,18 +166,26 @@ def assemble_context(
     tail = hist[_covered_turns(hist, cursor):]
     # 复用：尾部没超预算就没必要再压 —— 游标原地不动，也不用调摘要器
     if len(tail) <= keep_recent:
-        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor)
-    if sum(count_tokens(format_turn(t)) for t in tail) <= budget:
-        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor)
+        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor,
+                           skip_reason="历史只有 %d 轮（≤ 保留 %d 轮），不需要压缩"
+                                       % (len(tail), keep_recent))
+    # 预算量的是**未摘要的尾部** —— 原因里报的数必须同一个口径，别拿全量历史去比预算
+    tail_tokens = sum(count_tokens(format_turn(t)) for t in tail)
+    if tail_tokens <= budget:
+        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor,
+                           skip_reason="历史 %d tokens 未超预算 %d，不需要压缩"
+                                       % (tail_tokens, budget))
 
     older, recent = tail[:-keep_recent], tail[-keep_recent:]
     try:
         summary = (summarize(_with_previous(older, previous)) or "").strip()
     except Exception as e:  # 摘要器可能因网络/配额失败 —— 降级而非让整个回答崩掉
         logger.warning("对话摘要失败，退回不压缩：%s", e)
-        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor)
+        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor,
+                           skip_reason="摘要失败，退回不压缩：%s" % e)
     if not summary:
-        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor)
+        return ContextPlan(summary=kept_summary, kept=tail, cursor=cursor,
+                           skip_reason="摘要器返回空，退回不压缩")
     return ContextPlan(summary=summary, kept=recent, dropped=len(older),
                        cursor=_last_id(older[-1]) or cursor)
 
