@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.eval_core import is_refusal, normalize, run_eval
+from app.eval_core import contains, is_refusal, normalize, run_eval
 
 GOLDEN = [
     {"question": "Q1", "expect": "803.96"},
@@ -84,6 +84,48 @@ def test_normalize_removes_whitespace_and_case():
     assert normalize("Windows  11") == normalize("windows11")
     assert normalize(None) == ""
     assert normalize("RTX 3060") == "rtx3060"
+
+
+def test_normalize_unifies_number_spellings_but_not_values():
+    """同一个值的不同**写法**要能对上：量词前的中文数字、全角、千分位（#60）。
+
+    只统一写法，**不放松取值**：「131万辆」跟「1313851」仍然算没命中 ——
+    那是四舍五入，不是写法差异。**不做容差比较**，那会把真错的答案放过去。
+    """
+    assert normalize("加息四次") == normalize("加息4次")
+    assert normalize("一万二千人") == normalize("12000人")
+    assert normalize("十五个") == normalize("15个")
+    assert normalize("三百零五名") == normalize("305名")
+    assert normalize("1,313,851") == normalize("1313851")
+    assert normalize("８％") == normalize("8%")
+
+    # 写法不同 ≠ 取值相同：这是四舍五入，必须继续判「没命中」
+    assert normalize("131万辆") != normalize("1313851")
+
+
+def test_a_chinese_numeral_inside_a_word_is_not_turned_into_a_number():
+    """一/百/万 大量出现在普通词里 —— 拆成数字去碰瓷就是「放松取值」（#60 两轴审查抓到）。
+
+    不加量词限定的那版会把「万一」转成 1、「百度」转成 100度、「一般」转成 1般，
+    而且「4次」会命中「十四次」。这里把那些反例钉住。
+    """
+    assert normalize("万一") == "万一"
+    assert normalize("一般") == "一般"
+    assert normalize("一致") == "一致"
+    assert normalize("百度") == "百度"
+    assert normalize("十分满意") == "十分满意"        # 「分」不是量词（「十分」= very）
+    assert normalize("万") == "万"                    # 单独一个「万」不是数
+
+
+def test_a_digit_fragment_must_not_glue_to_another_digit():
+    """数字片段不许粘在别的数字上 —— 不加这道边界，14 就会被当成 4 命中（#60）。"""
+    assert contains(normalize("4次"), normalize("加息4次"))
+    assert not contains(normalize("4次"), normalize("加息十四次"))   # 14 ≠ 4
+    assert not contains(normalize("21"), normalize("210"))
+    assert contains(normalize("21"), normalize("数据集包含21种果蔬"))
+    # 期望是裸数字、答案带单位：本来就该命中，别被归一化打断
+    assert contains(normalize("803.96"), normalize("803.96 亿元"))
+    assert not contains(normalize(""), normalize("随便什么"))         # 空串 `in` 恒真是隐性 bug
 
 
 def test_parser_inserted_spaces_do_not_break_the_hit():
