@@ -94,6 +94,121 @@ def test_the_runtime_singleton_is_built_only_once(monkeypatch):
     assert len({id(r) for r in got}) == 1       # 所有人拿到同一个
 
 
+def test_indexing_is_undone_when_the_document_was_deleted_mid_flight(client, monkeypatch, tmp_path):
+    """删除正好落在索引写入之后、状态提交之前 —— 撤不回来，删掉的文档就一直能被检索到。
+
+    时序在 `_index_units` 里精确制造（它写完索引、返回之后才轮到那个检查），
+    所以这条是确定性的，不靠线程碰运气。
+    """
+    from sqlalchemy import delete
+
+    from app.api.deps import get_runtime
+    from app.db.session import SessionLocal
+    from app.models.entities import Chunk, Document
+    from app.services import document_service
+    from tests.helpers import register_and_kb
+
+    _, uid, kb = register_and_kb(client, "ghost_doc")
+    rt = get_runtime()
+    path = tmp_path / "幽灵.txt"
+    path.write_text("绝密代号 GHOSTTOKEN9931 的营业收入。", encoding="utf-8")
+
+    db = SessionLocal()
+    try:
+        doc = Document(kb_id=kb, owner_id=uid, filename="幽灵.txt",
+                       file_path=str(path), status="processing")
+        db.add(doc)
+        db.commit()
+        db.refresh(doc)
+        doc_id = doc.id
+
+        real_index = document_service._index_units
+
+        def index_then_delete(rt_, units, d):
+            real_index(rt_, units, d)               # 先把索引写进去（真实顺序就是这样）
+            other = SessionLocal()                  # 就在这一刻，另一个请求把文档删了
+            try:
+                other.execute(delete(Chunk).where(Chunk.doc_id == doc_id))
+                other.delete(other.get(Document, doc_id))
+                other.commit()
+            finally:
+                other.close()
+
+        monkeypatch.setattr(document_service, "_index_units", index_then_delete)
+        document_service.process_document(db, rt, doc)      # 同步跑，确定性
+    finally:
+        db.close()
+
+    assert rt.vector_store.search([0.0] * 1024, top_k=10,
+                                  filter_meta={"doc_id": doc_id}) == []
+    assert rt.bm25.search("绝密代号", top_k=10) == []
+    follow = SessionLocal()
+    try:
+        assert follow.query(Chunk).filter(Chunk.doc_id == doc_id).count() == 0
+    finally:
+        follow.close()
+
+
+def test_progress_is_not_reported_as_done_for_an_unknown_document():
+    """内存表里没有 ≠ 做完了。重启前留下的 `processing` 曾经会被印成「100%」。"""
+    from app.services.document_service import get_progress
+
+    assert get_progress("从没见过的文档", "processing") == 0
+    assert get_progress("从没见过的文档", "failed") == 0
+    assert get_progress("从没见过的文档", "indexed") == 100
+
+
+def test_the_progress_table_does_not_grow_forever():
+    """只描述「本进程正在处理的」—— 终态要清掉，不然每个上传过的文档都留一条。"""
+    from app.services.document_service import _PROGRESS, _set_progress
+
+    _set_progress("tmp-doc-1", 35)
+    assert _PROGRESS["tmp-doc-1"] == 35
+    _set_progress("tmp-doc-1", 100)
+    assert "tmp-doc-1" not in _PROGRESS
+
+
+def test_the_capability_cache_does_not_remember_a_conservative_default():
+    """保守默认是**内部降级值**、不是结论：落进缓存 = 一次 4xx 永久关掉某人的代理（#64）。"""
+    from app.core.capability import CachedCapabilityProbe, ModelCapability, conservative_capability
+
+    class _Probe:
+        def __init__(self):
+            self.calls = 0
+
+        def probe_report(self, base_url, api_key, model):
+            self.calls += 1
+            return conservative_capability("探测被拒（HTTP 400）"), ""
+
+    inner = _Probe()
+    probe = CachedCapabilityProbe(inner)
+    probe.probe_report("https://a.example.com/v1", "k", "m")
+    probe.probe_report("https://a.example.com/v1", "k", "m")
+
+    assert inner.calls == 2                     # 没被缓存，第二次还会再探
+    assert probe.cached("https://a.example.com/v1", "k", "m") is None
+
+
+def test_the_capability_cache_does_remember_a_probed_conclusion():
+    from app.core.capability import CachedCapabilityProbe, ModelCapability
+
+    class _Probe:
+        def __init__(self):
+            self.calls = 0
+
+        def probe_report(self, base_url, api_key, model):
+            self.calls += 1
+            return ModelCapability(supports_tools=True, context_window=8192, source="probed"), ""
+
+    inner = _Probe()
+    probe = CachedCapabilityProbe(inner)
+    probe.probe_report("https://b.example.com/v1", "k", "m")
+    got, _ = probe.probe_report("https://b.example.com/v1", "k", "m")
+
+    assert inner.calls == 1                     # 真结论要缓存（不然每次问答都探一遍）
+    assert got.supports_tools is True
+
+
 def test_a_racing_first_message_reuses_the_session_inserted_by_the_other_request(client):
     """前端拿本地 UUID 当会话 id：同一条会话的第一句话并发进来时，两边都「查不到 → 去插」，
     后插的撞 UNIQUE 直接 500。撞了就该改用已经插进去的那条。"""

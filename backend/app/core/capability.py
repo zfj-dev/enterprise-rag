@@ -38,6 +38,9 @@ class ModelCapability:
     note: str = ""
 
 
+_CACHE_MAX = 256          # 探测结论缓存的条数上限（键是「地址+模型」，无界长下去就是个泄漏）
+
+
 def conservative_capability(note: str) -> ModelCapability:
     """探测不到时的落点：**不支持工具** + 写明为什么。"""
     return ModelCapability(supports_tools=False, context_window=None,
@@ -152,7 +155,12 @@ class CachedCapabilityProbe(CapabilityProbe):
                     model: str) -> tuple[ModelCapability | None, str]:
         """**绕开缓存读**，探一次并刷新缓存 —— 「测试连通性」要的是当下这一下。"""
         got, reason = self._inner.probe_report(base_url, api_key, model)
-        if got is not None:
+        # **只缓存探到的结论**：`conservative` 是内部降级值、不是结论 —— 落进缓存就等于
+        # 把「这一次没探到」永久记成「就是不支持工具」，一次 4xx（密钥写错 / 被限流）
+        # 能把某个用户的代理永久关掉（#64 批 2）。docstring 早就这么写了，代码没跟上。
+        if got is not None and got.source == "probed":
+            if len(self._cache) >= _CACHE_MAX:
+                self._cache.clear()          # 键是「地址 + 模型」，无界长下去本身就是个泄漏
             self._cache[self._cache_key(base_url, api_key, model)] = got
         return got, reason
 

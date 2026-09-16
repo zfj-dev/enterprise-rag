@@ -33,7 +33,7 @@ def _to_out(d: Document) -> DocumentOut:
         size = 0
     return DocumentOut(id=d.id, filename=d.filename, status=d.status,
                        page_count=d.page_count, chunk_count=d.chunk_count, error=d.error,
-                       progress=document_service.get_progress(d.id), size=size,
+                       progress=document_service.get_progress(d.id, d.status), size=size,
                        created_at=d.created_at.isoformat() if d.created_at else "")
 
 
@@ -94,12 +94,13 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
         f.write(content)
 
     if existing and overwrite:
-        db.execute(delete(Chunk).where(Chunk.doc_id == existing.id))
-        rt.vector_store.delete_by(doc_id=existing.id)
-        rt.bm25.remove_by(doc_id=existing.id)
-        old_path = existing.file_path
-        db.delete(existing)
-        db.commit()
+        with document_service.DOC_WRITE_LOCK:      # 与后台索引线程互斥（见 DOC_WRITE_LOCK 的说明）
+            db.execute(delete(Chunk).where(Chunk.doc_id == existing.id))
+            rt.vector_store.delete_by(doc_id=existing.id)
+            rt.bm25.remove_by(doc_id=existing.id)
+            old_path = existing.file_path
+            db.delete(existing)
+            db.commit()
         _drop_file(db, old_path)
 
     doc = Document(kb_id=kb_id, owner_id=user.id, filename=name,
@@ -180,11 +181,12 @@ def delete_doc(doc_id: str, user: User = Depends(get_current_user),
     doc = db.get(Document, doc_id)
     if not doc or doc.owner_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
-    db.execute(delete(Chunk).where(Chunk.doc_id == doc_id))
-    rt.vector_store.delete_by(doc_id=doc_id)
-    rt.bm25.remove_by(doc_id=doc_id)
-    path = doc.file_path
-    db.delete(doc)
-    db.commit()
+    with document_service.DOC_WRITE_LOCK:      # 与后台索引线程互斥（见 DOC_WRITE_LOCK 的说明）
+        db.execute(delete(Chunk).where(Chunk.doc_id == doc_id))
+        rt.vector_store.delete_by(doc_id=doc_id)
+        rt.bm25.remove_by(doc_id=doc_id)
+        path = doc.file_path
+        db.delete(doc)
+        db.commit()
     _drop_file(db, path)
     return {"ok": True}
