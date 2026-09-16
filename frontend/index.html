@@ -895,21 +895,26 @@ async function streamToConv(conv, q, aiIdx){
   const ctrl=new AbortController();conv.ctrl=ctrl;conv.isStreaming=true;conv.currentStreamText='';conv.lastSources=[];
   updateStopBtn();
   const cid=conv.id;
+  // 这条流自己的身份。被「重新生成」顶替掉的旧流还会继续收到事件，
+  // 不认身份就会两个流往同一份 conv 状态里互相覆盖。
+  const mine=()=>conv.ctrl===ctrl;
   try{
     const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:conv.kbId||KB.id,question:q,session_id:cid,stream:true,deep:!!DEEP}),signal:ctrl.signal});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;conv.messages[aiIdx].agent=!!ev.agent;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;}}}catch(e){}}}
+    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(!mine())continue;if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;conv.messages[aiIdx].agent=!!ev.agent;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;}if(typeof ev.answer==='string'&&ev.answer!==conv.currentStreamText){conv.currentStreamText=ev.answer;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);}}}catch(e){}}}
   }catch(e){ conv._failed=true; }
   finally{
-    conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
-    conv.messages[aiIdx]._partial=false;
-    conv._failed=false;
-    conv.messages[aiIdx].sources=conv.lastSources||[];
-    conv.ctrl=null;conv.isStreaming=false;
-    saveConv(conv);
-    if(activeConversationId===cid)renderChat();
-    updateStopBtn();autoGrow(document.getElementById('question'));
+    if(mine()){                     // 被顶替的旧流到此为止：状态已经归新流所有，别再回写
+      conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
+      conv.messages[aiIdx]._partial=false;
+      conv._failed=false;
+      conv.messages[aiIdx].sources=conv.lastSources||[];
+      conv.ctrl=null;conv.isStreaming=false;
+      saveConv(conv);
+      if(activeConversationId===cid)renderChat();
+      updateStopBtn();autoGrow(document.getElementById('question'));
+    }
   }
 
 }

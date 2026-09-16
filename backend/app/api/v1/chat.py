@@ -13,7 +13,7 @@ from app.config import get_settings
 from app.core.quota import check_quota
 from app.core.container import Runtime
 from app.core.schemas import ChatRequest
-from app.models.entities import ChatMessage, ChatSession, User
+from app.models.entities import ChatMessage, ChatSession, KnowledgeBase, User
 from app.services.chat_service import prepare, stream_answer
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -55,6 +55,14 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
         if s and s.user_id != user.id:
             from fastapi import HTTPException
             raise HTTPException(404, "会话不存在")
+
+    # 知识库同样按属主校验：检索本身按 owner 过滤、不会泄内容，但 kb_id 会一路进
+    # **语义缓存的键**（(question, kb_id) 不按属主隔离），拿别人的 kb_id 能命中别人的
+    # 缓存答案（#64）。不属主一律 404，不泄漏它存不存在。
+    kb = db.get(KnowledgeBase, body.kb_id)
+    if not kb or kb.owner_id != user.id:
+        from fastapi import HTTPException
+        raise HTTPException(404, "知识库不存在")
 
     # 预算硬拦（票 29）：判定在**生成之前**、依据此前已累计的用量 —— 所以拦截只对**下一个**
     # 请求生效，已在进行中的流不被打断；管理员豁免（用量照记）。

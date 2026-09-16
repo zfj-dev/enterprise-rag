@@ -18,6 +18,10 @@ from urllib.parse import urlsplit
 
 Resolver = Callable[[str], Sequence[str]]
 
+# 100.64.0.0/10（RFC 6598 运营商级 NAT 段）：`ipaddress` **不**把它算进 is_private，
+# 而有些云/集群把内部服务放在这一段 —— 漏了它就是留一条 SSRF 跳板（#64）。
+_CGNAT = ipaddress.ip_network("100.64.0.0/10")
+
 
 def default_resolver(host: str) -> list[str]:
     """默认解析器：走系统 DNS。拿不到就返回空表（调用方按「验不了 → 拒绝」处理）。"""
@@ -43,6 +47,8 @@ def _ip_is_blocked(ip: str) -> bool:
         return True
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
         addr = addr.ipv4_mapped
+    if isinstance(addr, ipaddress.IPv4Address) and addr in _CGNAT:
+        return True
     return (addr.is_private or addr.is_loopback or addr.is_link_local
             or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
 

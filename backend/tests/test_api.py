@@ -16,6 +16,79 @@ def test_health(client):
     assert r.json()["status"] == "ok"
 
 
+# ---------- 越权与文件隔离（#64）----------
+
+def _kb_for(client, H, name="K"):
+    r = client.post("/api/v1/knowledge", json={"name": name}, headers=H)
+    assert r.status_code == 200, r.text
+    return r.json()["id"]
+
+
+def test_two_users_uploading_the_same_filename_do_not_share_a_file(client):
+    """同名文件不许共用一个磁盘路径 —— 一方覆盖另一方、还把别人的字节发出去（#64）。
+
+    老代码按文件名存进一个全局目录，`/documents/{id}/file` 照着 file_path 直接发字节，
+    所以两个用户传同名文件 = 互相看到对方的文件。
+    """
+    HA = {"Authorization": f"Bearer {_token(client, 'same_a')}"}
+    HB = {"Authorization": f"Bearer {_token(client, 'same_b')}"}
+    ka, kb = _kb_for(client, HA, "A"), _kb_for(client, HB, "B")
+
+    da = client.post(f"/api/v1/documents?kb_id={ka}", headers=HA,
+                     files={"file": ("报表.txt", "ALICE_SECRET", "text/plain")}).json()
+    client.post(f"/api/v1/documents?kb_id={kb}", headers=HB,
+                files={"file": ("报表.txt", "BOB_SECRET", "text/plain")})
+
+    got = client.get(f"/api/v1/documents/{da['id']}/file", headers=HA)
+    assert got.status_code == 200
+    assert got.content == b"ALICE_SECRET"          # 不是 BOB_SECRET
+
+
+def test_skipping_a_same_name_upload_does_not_touch_the_stored_file(client):
+    """`overwrite=false` 走「跳过」分支时，盘上的原文件一个字节都不该动（#64）。"""
+    H = {"Authorization": f"Bearer {_token(client, 'skip_user')}"}
+    kb = _kb_for(client, H)
+    first = client.post(f"/api/v1/documents?kb_id={kb}", headers=H,
+                        files={"file": ("同名.txt", "原始内容", "text/plain")}).json()
+
+    again = client.post(f"/api/v1/documents?kb_id={kb}&overwrite=false", headers=H,
+                        files={"file": ("同名.txt", "覆盖内容", "text/plain")}).json()
+
+    assert again["id"] == first["id"]              # 确实走了跳过分支
+    got = client.get(f"/api/v1/documents/{first['id']}/file", headers=H)
+    assert got.content.decode("utf-8") == "原始内容"
+
+
+def test_feedback_cannot_be_written_onto_someone_elses_message(client):
+    """反馈只能打在自己会话的消息上 —— 只查「消息存在」是越权（#64）。"""
+    HA = {"Authorization": f"Bearer {_token(client, 'fb_a')}"}
+    HB = {"Authorization": f"Bearer {_token(client, 'fb_b')}"}
+    kb = _kb_for(client, HA)
+    client.post(f"/api/v1/documents?kb_id={kb}", headers=HA,
+                files={"file": ("a.txt", "比亚迪2025年营业收入为803.96亿元。", "text/plain")})
+    r = client.post("/api/v1/chat/stream", headers=HA,
+                    json={"kb_id": kb, "question": "营收多少", "stream": True})
+    mid = [e for e in sse_events(r.text) if e.get("type") == "done"][-1]["message_id"]
+
+    assert client.post("/api/v1/feedback", headers=HB,
+                       json={"message_id": mid, "rating": -1}).status_code == 404
+    assert client.post("/api/v1/feedback", headers=HA,
+                       json={"message_id": mid, "rating": 9999}).status_code == 400
+    assert client.post("/api/v1/feedback", headers=HA,
+                       json={"message_id": mid, "rating": 1}).status_code == 200
+
+
+def test_chatting_against_someone_elses_knowledge_base_is_not_found(client):
+    """拿别人的 kb_id 提问一律 404 —— kb_id 会进语义缓存的键，不隔离就是泄漏（#64）。"""
+    HA = {"Authorization": f"Bearer {_token(client, 'kb_a')}"}
+    HB = {"Authorization": f"Bearer {_token(client, 'kb_b')}"}
+    kb = _kb_for(client, HA)
+
+    r = client.post("/api/v1/chat/stream", headers=HB,
+                    json={"kb_id": kb, "question": "随便问问", "stream": True})
+    assert r.status_code == 404
+
+
 def test_auth_flow(client):
     tok = _token(client, "alice")
     assert tok
