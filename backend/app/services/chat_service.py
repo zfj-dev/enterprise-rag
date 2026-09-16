@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -64,15 +65,21 @@ def _maybe_rewrite(llm: LLM, question: str, history: list[dict]) -> str:
 
 def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str | None) -> ChatSession:
     if session_id:
-        sess = db.get(ChatSession, session_id)
-        if sess:
-            return sess
-        # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上
-        sess = ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title="")
-        db.add(sess)
-        db.commit()
-        db.refresh(sess)
-        return sess
+        # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上。
+        # **查了没有就插** 是 check-then-act：同一条会话的第一句话并发进来时两边都查不到、
+        # 都去插，后插的撞 UNIQUE 直接 500。撞了就用已经插进去的那条。
+        for _ in range(2):
+            sess = db.get(ChatSession, session_id)
+            if sess:
+                return sess
+            db.add(ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title=""))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()          # 另一条请求刚插进去 —— 下一轮取它的
+                continue
+            return db.get(ChatSession, session_id)
+        return db.get(ChatSession, session_id)
     sess = ChatSession(user_id=user.id, kb_id=kb_id, title="")
     db.add(sess)
     db.commit()

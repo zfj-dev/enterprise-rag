@@ -1,6 +1,8 @@
 """FastAPI 依赖：DB 会话 / Runtime 单例 / JWT 鉴权 / 角色。"""
 from __future__ import annotations
 
+import threading
+
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
@@ -12,12 +14,21 @@ from app.utils.security import decode_token
 
 _bearer = HTTPBearer(auto_error=False)
 _runtime: Runtime | None = None
+_runtime_lock = threading.Lock()
 
 
 def get_runtime() -> Runtime:
+    """懒加载单例。
+
+    不变量：**只建一个**。lifespan 里那次 `build_runtime()` 失败会被 `_reindex` 的
+    try/except 吞掉（`_runtime` 仍是 None），此后第一批并发请求会各建一个 Runtime ——
+    各自一份向量库与嵌入模型，检索结果互相看不见。锁 + 双重检查关掉它。
+    """
     global _runtime
     if _runtime is None:
-        _runtime = build_runtime()
+        with _runtime_lock:
+            if _runtime is None:
+                _runtime = build_runtime()
     return _runtime
 
 
