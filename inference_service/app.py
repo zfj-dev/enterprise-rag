@@ -4,13 +4,14 @@ Runs on the GPU box, listens on a PRIVATE network only (reachable by the orchest
 Replaces the local RTX 4050 dependency. ASCII only (PowerShell GBK caution).
 
 Run:  python -m uvicorn app:app --host 0.0.0.0 --port 9000
-Env:  INFERENCE_TOKEN (shared secret; empty = no auth)
+Env:  INFERENCE_TOKEN (**required**; the node refuses to start without a real one)
       EMBEDDING_MODEL (default BAAI/bge-large-zh-v1.5), RERANKER_MODEL (default BAAI/bge-reranker-large)
       INFER_DEVICE (cuda/cpu), INFER_CONCURRENCY (max parallel GPU inference, default 4)
 """
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import threading
 
@@ -19,7 +20,15 @@ from pydantic import BaseModel
 
 app = FastAPI(title="rag-inference-node", version="1.0")
 
-TOKEN = os.environ.get("INFERENCE_TOKEN", "")
+TOKEN = os.environ.get("INFERENCE_TOKEN", "").strip()
+# **没口令就拒绝启动**：这个服务监听 0.0.0.0、跑的是 GPU 推理，原来「口令为空 = 不校验」
+# 等于把算力敞开；而「只在私网」是一句注释，不是控制。占位值同样不算口令 ——
+# 否则人人都用同一个公开的"秘密"，看着像有鉴权其实没有。
+if not TOKEN or TOKEN == "replace_with_inference_token":
+    raise RuntimeError(
+        "必须设置 INFERENCE_TOKEN（且不能是占位值）才能启动推理节点："
+        "它在 0.0.0.0 上监听、跑 GPU 推理，没有口令就等于对全网敞开。")
+
 EMBEDDING_MODEL = os.environ.get("EMBEDDING_MODEL", "BAAI/bge-large-zh-v1.5")
 RERANKER_MODEL = os.environ.get("RERANKER_MODEL", "BAAI/bge-reranker-large")
 DEVICE = os.environ.get("INFER_DEVICE", "cuda")
@@ -35,7 +44,8 @@ _cache_lock = threading.Lock()
 
 
 def _enter_authed(x_inference_token: str | None) -> None:
-    if TOKEN and x_inference_token != TOKEN:
+    """恒定时间比对 —— `!=` 会按第一个不同的字符提前返回，是个计时侧信道。"""
+    if not hmac.compare_digest(str(x_inference_token or ""), TOKEN):
         raise HTTPException(401, "invalid inference token")
 
 

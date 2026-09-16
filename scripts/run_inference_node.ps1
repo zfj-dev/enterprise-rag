@@ -15,7 +15,10 @@ if (-not (Test-Path $py)) {
 }
 
 # ===== EDIT: shared secret must match the orchestrator's *_API_KEY =====
-$env:INFERENCE_TOKEN = "replace_with_inference_token"
+# Set INFERENCE_TOKEN in your environment, or replace the placeholder below.
+# The node REFUSES TO START without a real token, so leaving the placeholder fails fast
+# instead of quietly running with no auth (formerly empty token = no check at all).
+if (-not $env:INFERENCE_TOKEN) { $env:INFERENCE_TOKEN = "replace_with_inference_token" }
 $env:INFER_DEVICE = "cuda"
 $env:INFER_CONCURRENCY = "4"
 $env:EMBEDDING_MODEL = "BAAI/bge-large-zh-v1.5"
