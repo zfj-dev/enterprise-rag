@@ -14,10 +14,10 @@ services:
       - USE_REAL=false
       - EMBEDDING_PROVIDER=fake
       - RERANKER_PROVIDER=fake
-      - LLM_PROVIDER=openai
-      - LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
-      - LLM_API_KEY=replace_with_your_key
-      - LLM_MODEL=qwen-plus
+      # 演示模式 = 假模型。**这里不能填真 provider**：`USE_REAL` 只影响 /health 的显示，
+      # 真正决定调哪个模型的是 LLM_PROVIDER —— 写成 openai 会让每次提问真的去打外部 API，
+      # 配上占位 Key 就是 401，而流从中途断掉、前端只看到半句答案（看着像模型抽风）。
+      - LLM_PROVIDER=fake
       - VECTOR_STORE=inmemory
       - MAX_UPLOAD_MB=50
     volumes:
