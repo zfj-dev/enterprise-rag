@@ -21,7 +21,7 @@ class StubLLM:
         self.out = out
         self.prompts: list = []
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         self.prompts.append(messages)
         yield self.out
 

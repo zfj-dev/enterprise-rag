@@ -163,25 +163,33 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
         try:
             d2 = db.get(Document, doc.id)
             if d2:
-                d2.status = "failed"
-                d2.error = str(e)
+                _mark_failed(d2, str(e))
                 db.commit()
         except Exception as e2:
             logger.warning("process_document 标记失败状态异常: %s", e2)
     return doc
 
 
+def _mark_failed(doc: Document, reason: str) -> None:
+    """标失败并把原因一起写上 —— 状态和原因成对出现，读的人才知道要不要重传。"""
+    doc.status = "failed"
+    doc.error = reason
+
+
 def fail_stale_processing(db: Session) -> int:
     """把库里残留的 `processing` 标成 failed，返回改了几条 —— 启动时跑一次。
 
-    `processing` 只可能来自**上一次进程**：后台线程随进程一起没了，没人会再来收尾这些文档。
+    残留只可能来自**上一次进程**：后台线程随进程一起没了，没人会再来收尾这些文档。
     而 `reindex_all` 只认 `indexed`，于是它们既检索不到、也不会被重跑，永远卡在「处理中」——
     用户既等不到结果，也不知道要重传。如实标成失败并写明原因，才是这个状态该有的样子。
+
+    ⚠️ 这条假定**同一份库只有一个进程在写**（当前部署就是：`run_real.ps1` 与 Dockerfile 都没开
+    `--workers`）。多 worker 时每个 worker 都会跑一遍启动收尾，后起的会把别人**正在索引**的
+    文档标成失败；真要上多 worker，得改成按 worker 认领（例如加进程标识 / 心跳时间戳）。
     """
     rows = db.query(Document).filter(Document.status == "processing").all()
     for d in rows:
-        d.status = "failed"
-        d.error = "服务重启时这份文档还在处理中，没能跑完 —— 请重新上传。"
+        _mark_failed(d, "服务重启时这份文档还在处理中，没能跑完 —— 请重新上传。")
     if rows:
         db.commit()
         print(f"[doc] {len(rows)} 份文档上次没处理完，已标为失败（等重传）")

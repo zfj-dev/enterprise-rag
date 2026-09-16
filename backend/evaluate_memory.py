@@ -53,7 +53,7 @@ class DemoLLM:
     def __init__(self) -> None:
         self.prompts: list[str] = []
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         content = messages[-1]["content"]
         self.prompts.append(content)
         if "查询改写助手" in content:          # 恒等改写：保持检索 / 召回用的查询带关键词

@@ -4,8 +4,11 @@
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import threading
+
+import pytest
 
 from app.core.bm25 import InMemoryBm25
 from app.core.vector_store import InMemoryVectorStore, VectorItem
@@ -284,16 +287,61 @@ def test_a_document_left_processing_by_a_restart_is_marked_failed(client):
 
 # ---------- 客户端断开时的并发名额（#64 批 3）----------
 
-def test_the_stream_slot_is_freed_as_soon_as_the_client_disconnects(client, monkeypatch):
+def _drive_disconnect(resp, spec_version: str, check) -> None:
+    """按 ASGI 驱动一次请求，并让客户端在**第一段字节之后**走人 —— 两条分支各走各的。
+
+    - `spec_version < 2.4`：Starlette 起一个断连监听任务，靠 `receive` 收到
+      `http.disconnect` 把流取消掉；
+    - `>= 2.4`：没有那个任务，断连体现为「再往连接里写字节就抛 OSError」。
+
+    收尾路径不同（后者连 `background` 都到不了），所以两条都得真的跑一遍。
+    `check` 在响应**跑完但还没收掉悬着的异步生成器**时调用 —— 那正是名额该还回来的时刻，
+    晚了就分不清是「这条路径还的」还是「生成器被回收时顺带还的」。
+    """
+    from starlette.requests import ClientDisconnect
+
+    state = {"body": False, "chunks": 0, "gone": False}
+
+    async def receive():
+        if not state["body"]:
+            state["body"] = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        while state["chunks"] < 1:
+            await asyncio.sleep(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            state["chunks"] += 1
+            if spec_version != "2.3" and not state["gone"]:
+                state["gone"] = True
+                raise OSError("客户端已经走了：写不进去")
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": spec_version},
+             "http_version": "1.1", "method": "POST", "scheme": "http",
+             "path": "/api/v1/chat/stream", "raw_path": b"/api/v1/chat/stream",
+             "query_string": b"", "root_path": "", "headers": [],
+             "client": ("test", 1), "server": ("test", 80)}
+    loop = asyncio.new_event_loop()
+    try:
+        try:
+            loop.run_until_complete(resp(scope, receive, send))
+        except ClientDisconnect:
+            assert spec_version != "2.3"     # 只有 ≥2.4 那条分支会把断连变成异常
+        check()
+    finally:
+        loop.run_until_complete(loop.shutdown_asyncgens())   # 到这儿才轮到「回收」那条路
+        loop.close()
+
+
+@pytest.mark.parametrize("spec_version", ["2.3", "2.4"])
+def test_the_stream_slot_is_freed_as_soon_as_the_client_disconnects(client, monkeypatch, spec_version):
     """断开后名额要马上还回来 —— 只挂生成器的 `finally` 是不够的。
 
     Starlette 的线程池迭代被取消时**不会关闭**那个同步生成器，`finally` 要等它被回收才跑；
     表现出来就是「点了停止，几秒内再问就 429」。这里把响应对象捏在手里驱动一次断连：
     驱动完生成器仍然开着（下面断言了），名额却必须已经还回来。
     """
-    import asyncio
-    import json
-
     from starlette.responses import StreamingResponse
 
     from app.api.deps import get_runtime
@@ -326,35 +374,18 @@ def test_the_stream_slot_is_freed_as_soon_as_the_client_disconnects(client, monk
         db.close()
     assert isinstance(resp, StreamingResponse)
 
-    state = {"body": False, "chunks": 0}
-
-    async def receive():
-        if not state["body"]:
-            state["body"] = True
-            return {"type": "http.request", "body": b"", "more_body": False}
-        while state["chunks"] < 1:          # 等第一段真的发出去，再当客户端走人
-            await asyncio.sleep(0)
-        return {"type": "http.disconnect"}
-
-    async def send(message):
-        if message["type"] == "http.response.body" and message.get("body"):
-            state["chunks"] += 1
-
-    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
-             "http_version": "1.1", "method": "POST", "scheme": "http",
-             "path": "/api/v1/chat/stream", "raw_path": b"/api/v1/chat/stream",
-             "query_string": b"", "root_path": "", "headers": [],
-             "client": ("test", 1), "server": ("test", 80)}
-    asyncio.run(resp(scope, receive, send))
-
     guard = chat._stream_guard
-    assert closed == []                     # 生成器还开着 —— 名额不是靠它被回收才回来的
-    tokens = []
-    while len(tokens) <= guard.limit:       # 断连那一刻就该整份还回来，所以现在能占满
-        t = guard.try_acquire(uid)
-        if t is None:
-            break
-        tokens.append(t)
-    for t in tokens:
-        guard.release(uid, t)
-    assert len(tokens) == guard.limit
+
+    def _slots_are_all_back() -> None:
+        tokens = []
+        while len(tokens) <= guard.limit:   # 断连那一刻就该整份还回来，所以现在能占满
+            t = guard.try_acquire(uid)
+            if t is None:
+                break
+            tokens.append(t)
+        for t in tokens:
+            guard.release(uid, t)
+        assert len(tokens) == guard.limit
+        assert closed == []                 # 生成器还开着 —— 名额不是靠它被回收才回来的
+
+    _drive_disconnect(resp, spec_version, _slots_are_all_back)

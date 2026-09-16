@@ -104,7 +104,7 @@ def test_cloud_degrades_instead_of_raising_when_tools_are_refused():
         raise RuntimeError("tools unsupported")
 
     llm = _cloud(boom)
-    llm.stream = lambda messages: iter(["降级", "回答"])       # 降级后走的就是这条
+    llm.stream = lambda messages, usage=None: iter(["降级", "回答"])       # 降级后走的就是这条
 
     got = llm.chat_with_tools([{"role": "user", "content": "x"}], tools=[{"type": "function"}])
     assert got == {"content": "降级回答", "tool_calls": []}
@@ -115,7 +115,7 @@ def test_cloud_without_tools_never_touches_the_wire():
         raise AssertionError("没给工具就不该发带工具的请求")
 
     llm = _cloud(boom)
-    llm.stream = lambda messages: iter(["答"])
+    llm.stream = lambda messages, usage=None: iter(["答"])
     assert llm.chat_with_tools([{"role": "user", "content": "x"}])["tool_calls"] == []
 
 

@@ -82,7 +82,7 @@ class _NonFakeLLM:
 
     is_fake = False
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield ""
 
 

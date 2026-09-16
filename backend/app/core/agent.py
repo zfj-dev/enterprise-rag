@@ -96,13 +96,16 @@ def _shrink(messages: list, entries: list, take_ids) -> int:
     return n
 
 
-def _accumulate_usage(llm, totals: dict) -> None:
-    """把这一步 provider 返回的 usage 累进合计（票 27）。
+def _accumulate_usage(usage: dict | None, totals: dict) -> None:
+    """把**这一步调用**的 usage 累进合计（票 27）。
 
     代理一次问答要调好几轮模型 —— 只记最后一轮会把成本低报。provider 没给（或只给了半边）
     就把合计标记为不可信：**宁可报「不可用」，也不拿残缺数据凑一个数**。
+
+    `usage` 是这一步**自己的**桶（#64 批 3）：去读模型实例上的字段，就会被并发的另一次调用
+    （或上一条请求留下的后台抽取线程）改掉 —— 这一步的账记成了别人的。
     """
-    usage = getattr(llm, "last_usage", None) or {}
+    usage = usage or {}
     p_in, p_out = as_int(usage.get("prompt_tokens")), as_int(usage.get("completion_tokens"))
     if p_in is None or p_out is None:
         totals["complete"] = False
@@ -185,13 +188,14 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
                     "simulated": True}
 
     for _ in range(max(1, max_steps)):
+        step_usage: dict = {}
         try:
-            outcome = llm.chat_with_tools(messages, tools=tools)
+            outcome = llm.chat_with_tools(messages, tools=tools, usage=step_usage)
         except Exception as e:      # noqa: BLE001 —— 模型这一步出错也不能把整轮丢掉
             logger.warning("代理第 %d 步的模型调用失败：%s", len(steps) + 1, e)
             stopped = "llm_error"
             break
-        _accumulate_usage(llm, usage_totals)
+        _accumulate_usage(step_usage, usage_totals)
 
         calls = list(outcome.get("tool_calls") or [])
         answer = outcome.get("content") or answer
@@ -236,8 +240,10 @@ def run_agent(question: str, *, llm, transport, max_steps: int = DEFAULT_MAX_STE
     if stopped != "answered":
         # 没拿到终答（跑满上限 / 模型出错）也要收敛：再问一次但**不给工具**，逼它用手里的信息作答
         try:
-            answer = llm.chat_with_tools(messages, tools=None).get("content") or answer
-            _accumulate_usage(llm, usage_totals)
+            conv_usage: dict = {}
+            got = llm.chat_with_tools(messages, tools=None, usage=conv_usage)
+            answer = got.get("content") or answer
+            _accumulate_usage(conv_usage, usage_totals)
         except Exception as e:             # noqa: BLE001 —— 收敛这一步也失败，就把已有的返回
             logger.warning("收敛作答失败：%s", e)
 

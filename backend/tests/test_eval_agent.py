@@ -22,10 +22,10 @@ class ScriptedLLM:
             {"content": answer, "tool_calls": []},
         ]
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield self.answer          # verify_claims 走这条路（这里返回的不是 JSON，按降级处理）
 
-    def chat_with_tools(self, messages, tools=None):
+    def chat_with_tools(self, messages, tools=None, usage=None):
         if not tools:              # 收敛那一步：不给工具
             return {"content": self.answer, "tool_calls": []}
         if self.replies:

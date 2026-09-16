@@ -223,7 +223,7 @@ class GroundlessLLM:
 
     is_fake = False
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         prompt = messages[-1]["content"]
         if "是否被参考资料支撑" in prompt:
             yield '{"claims":[{"claim":"答案是 42。","supported":false}]}'

@@ -224,7 +224,7 @@ class RecordingLLM:
     def __init__(self):
         self.prompts = []
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         content = messages[-1]["content"]
         self.prompts.append(content)
         if "查询改写助手" in content:

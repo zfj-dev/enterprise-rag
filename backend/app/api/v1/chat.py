@@ -8,7 +8,6 @@ import uuid
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
-from starlette.background import BackgroundTask
 
 from app.api.deps import get_current_user, get_db, get_runtime
 from app.config import get_settings
@@ -24,9 +23,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class _StreamGuard:
     """每用户同时流式对话计数守卫。limit=每用户上限；超限 try_acquire 返回 None。
 
-    放行时发一个**令牌**，释放要带着它。名额有两条释放路径（生成器收尾、客户端断连时的
-    background 任务），令牌让「谁先到谁释放」变成幂等的 —— 若是按用户直接减计数，两条路
-    都跑到就会把**别人**正在用的名额一并放开。
+    放行时发一个**令牌**，释放要带着它。名额有两条释放路径（生成器收尾、响应 `__call__`
+    的收尾 —— 见 `_SlotReleasingStream`），令牌让「谁先到谁释放」变成幂等的 —— 若是按用户
+    直接减计数，两条路都跑到就会把**别人**正在用的名额一并放开。
     """
 
     def __init__(self, limit: int):
@@ -35,6 +34,8 @@ class _StreamGuard:
         self._lock = threading.Lock()
 
     def try_acquire(self, key: str) -> str | None:
+        if self.limit <= 0:      # 关掉限流时不许在表里留下空条目（那就是只涨不跌）
+            return None
         with self._lock:
             held = self._held.setdefault(key, set())
             if len(held) >= self.limit:
@@ -52,6 +53,26 @@ class _StreamGuard:
             held.discard(token)
             if not held:
                 self._held.pop(key, None)
+
+
+class _SlotReleasingStream(StreamingResponse):
+    """流结束（含客户端断连、取消、抛错）后一定把并发名额放掉。
+
+    为什么不是 `background=` 挂一个释放任务：Starlette 只在 `spec_version < 2.4` 那条分支里
+    await 它；按 ≥2.4 的分支，断连会直接抛 `ClientDisconnect` 走人，那次 await 根本到不了 ——
+    名额就只剩「等那个被弃置的同步生成器被回收」这条路，正是这一版要修的毛病。
+    `__call__` 是 ASGI 的入口，响应怎么结束都要从它的 finally 出去。
+    """
+
+    def __init__(self, content, *, on_close, **kwargs) -> None:
+        super().__init__(content, **kwargs)
+        self._on_close = on_close
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
 
 
 _stream_guard = _StreamGuard(get_settings().max_concurrent_streams_per_user)
@@ -91,13 +112,14 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
 
     prep = prepare(db, rt, user, body.kb_id, body.question, body.session_id)
 
-    token = _stream_guard.try_acquire(user.id)
+    uid = user.id      # 先取出来：收尾发生在请求作用域之外，那时 db 会话可能已经关了
+    token = _stream_guard.try_acquire(uid)
     if token is None:
         from fastapi import HTTPException
         raise HTTPException(429, "并发对话过多，请稍后再试")
 
     def _release_slot() -> None:
-        _stream_guard.release(user.id, token)
+        _stream_guard.release(uid, token)
 
     def gen():
         try:
@@ -110,11 +132,9 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
         finally:
             _release_slot()          # 正常收尾 / 抛异常
 
-    # 客户端断连时 Starlette 取消的是**线程池里那次异步迭代**，那个同步生成器不会被关闭 ——
-    # `gen` 的 finally 要等它被回收才跑，名额就攥在手里（「点了停止，几秒内再问就 429」）。
-    # background 在响应（含被取消）结束后一定会执行。两条路都调 `_release_slot`，令牌保证幂等。
-    return StreamingResponse(gen(), media_type="text/event-stream",
-                             background=BackgroundTask(_release_slot))
+    # 两条释放路径：生成器自己收尾（正常结束 / 抛错），以及响应 `__call__` 的 finally
+    # （客户端断连时同步生成器**不会被关闭**，这条才是保底的）。令牌让两条路幂等。
+    return _SlotReleasingStream(gen(), media_type="text/event-stream", on_close=_release_slot)
 
 
 @router.get("/sessions")
