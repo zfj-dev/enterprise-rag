@@ -22,7 +22,7 @@ import time
 
 from app.eval_compare import memory_guardrail_lines, render_compare, run_links
 from app.eval_core import Report
-from app.eval_setup import (drop_kb, ensure_schema, eval_user, ingest_file, new_kb,
+from app.eval_setup import (drop_kb, drop_memory, ensure_schema, eval_user, ingest_file, new_kb,
                             with_setting, write_report)
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
@@ -163,15 +163,6 @@ def _seed_extra(rt, user_id: str) -> list[str]:
     return facts
 
 
-def _drop_memory(rt, user_id: str) -> None:
-    """清掉这次评测留下的记忆 —— 不清的话每跑一次就多堆一批，召回数与护栏都会漂。"""
-    try:
-        for f in rt.memory_store.list(user_id):
-            rt.memory_store.delete(user_id, f["id"])
-    except Exception as e:      # noqa: BLE001 —— 清理失败不该毁掉已算出的报告
-        print("清记忆失败（不影响报告）：%s" % e)
-
-
 def _recall_count(rt, user_id: str, goldenset) -> tuple[int, int]:
     """数一遍「当前记忆对黄金集问题会召回几条」+ 召回失败的条数。
 
@@ -240,7 +231,7 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
     kb = None
     try:
         user = eval_user(db, USERNAME)
-        _drop_memory(rt, user.id)          # 从干净的记忆开始，报告才可复现
+        drop_memory(rt, user.id)          # 从干净的记忆开始，报告才可复现
         kb = new_kb(db, user.id, "跨会话记忆评测库")
         doc_id = ingest_file(db, rt, doc, user.id, kb.id)
         lines.append("")
@@ -285,7 +276,7 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
             note="两列跑的是同一条链路（本地确定性管线），只有记忆开关不同；抽取在护栏里关掉了，"
                  "所以差异只来自**召回与注入**。"))
     finally:
-        _drop_memory(rt, user.id)
+        drop_memory(rt, user.id)
         if kb is not None:
             try:
                 drop_kb(db, kb.id)

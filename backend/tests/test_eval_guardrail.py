@@ -204,3 +204,82 @@ def test_the_compress_switch_is_restored_after_the_run(tmp_path):
         assert get_settings().context_compress is before
     finally:
         get_settings().context_compress = before
+
+
+# ---------- 两条链路不许自己跟自己比（#64 批 4）----------
+
+def test_the_guardrail_never_goes_through_the_semantic_cache(tmp_path, monkeypatch):
+    """语义缓存按 (问题, kb) 存，而两条链路问的是同一批问题、用的是同一个 kb。
+
+    缓存开着时，第二列会直接命中第一列刚写下的答案 —— 「压缩前 vs 压缩后」于是恒等，
+    护栏永远「通过」，等于什么也没测。所以护栏跑的两列必须绕开缓存。
+    """
+    import evaluate_guardrail
+
+    from app.core.cache import SemanticCache
+
+    seen: list = []
+    monkeypatch.setattr(SemanticCache, "get",
+                        lambda self, question, kb_id: seen.append(("get", question)))
+    monkeypatch.setattr(SemanticCache, "put",
+                        lambda self, question, kb_id, answer: seen.append(("put", question)))
+
+    golden, doc, report = _inputs(tmp_path)
+    evaluate_guardrail.main(golden=golden, doc=doc, report=report)
+
+    assert seen == []
+
+
+def test_a_run_leaves_no_sessions_behind(tmp_path):
+    """护栏用固定 session_id 多轮跑，会话不清掉，下一次跑的「历史」就越滚越长。
+
+    历史一长，压缩前/后的两份数字就都不再可比（而且越跑越漂）—— 报告是要进交付物的。
+    """
+    import evaluate_guardrail
+
+    from app.db.session import SessionLocal
+    from app.eval_setup import eval_user
+    from app.models.entities import ChatMessage, ChatSession
+
+    golden, doc, report = _inputs(tmp_path)
+    evaluate_guardrail.main(golden=golden, doc=doc, report=report)
+
+    db = SessionLocal()
+    try:
+        user = eval_user(db, evaluate_guardrail.USERNAME)
+        assert db.query(ChatSession).filter(ChatSession.user_id == user.id).count() == 0
+    finally:
+        db.close()
+
+
+def test_the_report_says_what_was_switched_off(tmp_path):
+    """口径要写在数字旁边 —— 「两列为什么可比」这件事得让读者看得见。"""
+    import evaluate_guardrail
+
+    golden, doc, report = _inputs(tmp_path)
+    evaluate_guardrail.main(golden=golden, doc=doc, report=report)
+    text = _read(report)
+
+    assert "语义缓存" in text and "记忆" in text and "关掉" in text
+    # 头部与实际跑的那份 note 都要带上 —— 数字在哪一列，口径就跟到哪一列
+    assert text.count(evaluate_guardrail.ISOLATION_NOTE) == 2
+
+
+def test_the_guardrail_never_consults_cross_session_memory(tmp_path, monkeypatch):
+    """跨会话记忆按 `user_id` 存，而两条链路共用同一个评测用户 —— 和缓存是同一个坑。
+
+    真实模型下第一列会**异步抽出事实**落库，第二列把它召回进 prompt、还占掉一份上下文预算：
+    两列差的就不止压缩开关了，「压缩前后之比」被记忆搅浑（#64 批 4）。
+    """
+    import evaluate_guardrail
+
+    from app.core.container import Runtime
+
+    seen: list = []
+    monkeypatch.setattr(Runtime, "recall_memory",
+                        lambda self, user_id, question: seen.append(question) or [])
+
+    golden, doc, report = _inputs(tmp_path)
+    evaluate_guardrail.main(golden=golden, doc=doc, report=report)
+
+    assert seen == []

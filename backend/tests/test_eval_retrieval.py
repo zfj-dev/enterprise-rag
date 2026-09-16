@@ -4,6 +4,8 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app.eval_core import (Report, hit_recall_at_k, reciprocal_rank,
@@ -205,3 +207,81 @@ def test_gold_ids_match_on_content_and_page():
     assert _gold_ids(chunks, {"expect": "RTX 3060"}) == {"a", "b"}
     assert _gold_ids(chunks, {"expect": "RTX  3060", "page": 29}) == {"a"}   # 空格容错 + 页码过滤
     assert _gold_ids(chunks, {"expect": "没有这个"}) == set()
+
+
+def test_two_documents_do_not_share_chunk_ids(tmp_path):
+    """多文档评测：每份文档各自的 doc_id。
+
+    都写死 `evaldoc` 时，块 id（`{doc_id}_p{页}_{序}`）在两份文档间完全重合，
+    进内存向量库是**按 id 覆盖**（`_data[id] = ...`）—— 第二份文档直接把第一份盖掉，
+    报告里的检索数字于是只反映最后一份。用 EVAL_DOCS 跑多文档时这条必中（#64 批 4）。
+    """
+    from app.core.container import build_runtime
+    from evaluate_retrieval import KB_ID, OWNER_ID, _index_doc
+
+    a = tmp_path / "甲.txt"
+    a.write_text("甲公司的营业收入为100亿元。", encoding="utf-8")
+    b = tmp_path / "乙.txt"
+    b.write_text("乙公司的营业收入为200亿元。", encoding="utf-8")
+
+    rt = build_runtime()
+    ca = _index_doc(rt, str(a), "evaldoc_1")
+    cb = _index_doc(rt, str(b), "evaldoc_2")
+
+    assert ca and cb
+    assert {c["id"] for c in ca}.isdisjoint({c["id"] for c in cb})
+    hit = rt.vector_store.search(rt.embedding.encode(["营业收入"])[0], top_k=50,
+                                 filter_meta={"kb_id": KB_ID, "owner_id": OWNER_ID})
+    assert len(hit) == len(ca) + len(cb)          # 两份都在库里，谁也没盖掉谁
+
+    bm = rt.bm25.search("营业收入", top_k=50,                 # BM25 也是按 id 存的，同样要查
+                        filter_meta={"kb_id": KB_ID, "owner_id": OWNER_ID})
+    assert {c["id"] for c in ca} | {c["id"] for c in cb} <= {d["chunk_id"] for d in bm}
+
+
+def test_the_multi_doc_run_derives_a_distinct_doc_id_per_document(tmp_path, monkeypatch):
+    """跑真路径（`EVAL_DOCS` 逗号分隔）—— 只测 `_index_doc` 的入参，改回写死也照样绿。"""
+    import re
+
+    import evaluate_retrieval as ev
+
+    a = tmp_path / "甲.txt"
+    a.write_text("甲公司的营业收入为100亿元。", encoding="utf-8")
+    b = tmp_path / "乙.txt"
+    b.write_text("乙公司的营业收入为200亿元。", encoding="utf-8")
+    golden = tmp_path / "golden.json"
+    golden.write_text(json.dumps([{"question": "营收多少", "expect": "100亿元", "doc": "甲.txt"}],
+                                 ensure_ascii=False), encoding="utf-8")
+    report = tmp_path / "retrieval.log"
+
+    monkeypatch.setenv("EVAL_DOCS", "%s,%s" % (a, b))
+    monkeypatch.setattr(ev, "GOLDEN", str(golden))
+    monkeypatch.setattr(ev, "REPORT", str(report))
+    ev._main_body()
+
+    text = report.read_text(encoding="utf-8")
+    assert sorted(re.findall(r"doc_id=([^)\s]+)", text)) == ["evaldoc_1", "evaldoc_2"]
+
+
+def test_duplicate_filenames_are_reported_as_not_run(tmp_path, monkeypatch):
+    """两份 EVAL_DOCS 重名：黄金集按文件名认领文档，认不出就写「未跑」—— 不许猜一份接着算。"""
+    import evaluate_retrieval as ev
+
+    d1, d2 = tmp_path / "甲目录", tmp_path / "乙目录"
+    d1.mkdir()
+    d2.mkdir()
+    (d1 / "报告.txt").write_text("甲的营业收入为100亿元。", encoding="utf-8")
+    (d2 / "报告.txt").write_text("乙的营业收入为200亿元。", encoding="utf-8")
+    golden = tmp_path / "golden.json"
+    golden.write_text(json.dumps([{"question": "营收多少", "expect": "100亿元"}],
+                                 ensure_ascii=False), encoding="utf-8")
+    report = tmp_path / "retrieval.log"
+
+    monkeypatch.setenv("EVAL_DOCS", "%s,%s" % (d1 / "报告.txt", d2 / "报告.txt"))
+    monkeypatch.setattr(ev, "GOLDEN", str(golden))
+    monkeypatch.setattr(ev, "REPORT", str(report))
+    ev._main_body()
+
+    text = report.read_text(encoding="utf-8")
+    assert "未跑" in text and "重名" in text and "报告.txt" in text
+    assert "hit@" not in text           # 一个指标都没算出来，不许拿错的那份顶数
