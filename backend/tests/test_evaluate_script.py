@@ -10,9 +10,10 @@ import evaluate
 
 
 class _Resp:
-    def __init__(self, payload=None, text=""):
+    def __init__(self, payload=None, text="", status_code=200):
         self._payload = payload
         self.text = text
+        self.status_code = status_code        # 假对象要像真的：产品代码会看状态码（#64 批 4）
 
     def json(self):
         return self._payload

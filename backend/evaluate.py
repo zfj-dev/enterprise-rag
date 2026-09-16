@@ -93,6 +93,11 @@ def _answer_fn(client: httpx.Client, kb_id: str, headers: dict, session_id: str 
         if session_id:
             payload["session_id"] = session_id
         r = client.post("/api/v1/chat/stream", headers=headers, json=payload)
+        # **状态码必须看**：402（额度）/ 429（并发）/ 401 / 500 的响应体里没有 `data:` 行，
+        # 直接丢给 `_parse_sse` 得到的是 answer="" + sources=[] —— 报告于是把「这次压根没跑成」
+        # 印成「事实命中 0%」。宁可整段标「未跑」，也不产一个 0%（#64 批 4）。
+        if r.status_code != 200:
+            raise RuntimeError("问答接口返回 %d：%s" % (r.status_code, r.text[:200]))
         return _parse_sse(r.text)
     return ask
 

@@ -120,12 +120,26 @@ class RagasJudge:
 
     # ---- 四项 ----
 
+    def _statements_of(self, text: str) -> list:
+        """让裁判把一段文字拆成论断。
+
+        **拆不出来不算 0 分**：0 分是「一条都推不出来」这个**结论**，而空列表是
+        「压根没拆出来」（裁判拒答 / 被截断 / 回复为空）。两者混起来，就会把
+        「裁判挂了」印成 [未达标] —— 而 RAGAS 忠实度是报告里的一条目标线（#64 批 4）。
+        """
+        got = lines_of(self._ask(_STATEMENTS_PROMPT % text))
+        if not got and str(text or "").strip():
+            raise JudgeUnavailable("裁判没有把这段文字拆成任何论断（回复为空或被截断）")
+        return got
+
     def _faithfulness(self, answer: str, contexts: list) -> float:
-        return self._supported_ratio(lines_of(self._ask(_STATEMENTS_PROMPT % answer)), contexts)
+        return self._supported_ratio(self._statements_of(answer), contexts)
 
     def _answer_relevancy(self, question: str, answer: str) -> float:
         generated = lines_of(self._ask(_GENQ_PROMPT % (self._n, answer)))
         if not generated:
+            if str(answer or "").strip():
+                raise JudgeUnavailable("裁判没有从答案里反生成出任何问题（回复为空或被截断）")
             return 0.0
         qv = self._embedding.encode([question])[0]
         return sum(cosine(qv, v) for v in self._embedding.encode(generated)) / len(generated)
@@ -145,7 +159,7 @@ class RagasJudge:
     def _context_recall(self, reference: str, contexts: list) -> float:
         if not str(reference or "").strip():
             return 0.0               # 没给参考答案就没法算 context_recall，如实报 0
-        return self._supported_ratio(lines_of(self._ask(_STATEMENTS_PROMPT % reference)), contexts)
+        return self._supported_ratio(self._statements_of(reference), contexts)
 
     def _supported_ratio(self, claims: list, contexts: list) -> float:
         if not claims:

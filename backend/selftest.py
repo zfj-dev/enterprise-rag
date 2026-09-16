@@ -136,10 +136,12 @@ def main() -> None:
 
         # 8) cleanup
         try:
-            c.delete(f"/api/v1/knowledge/{kb_id}", headers=H)
-            step("cleanup", True, "")
-        except Exception:
-            pass
+            r = c.delete(f"/api/v1/knowledge/{kb_id}", headers=H)
+            step("cleanup", r.status_code == 200, "%d" % r.status_code)
+        except Exception as e:
+            # **失败也要记一项**：`except: pass` 会让这一项从分母里消失，
+            # 报告仍然打「N/N passed」—— 删不掉库这种问题就永远看不见（#64 批 4）。
+            step("cleanup", False, str(e))
 
         _write_report()
     except Exception:
