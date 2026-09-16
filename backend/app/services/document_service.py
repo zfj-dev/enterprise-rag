@@ -171,6 +171,23 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
     return doc
 
 
+def fail_stale_processing(db: Session) -> int:
+    """把库里残留的 `processing` 标成 failed，返回改了几条 —— 启动时跑一次。
+
+    `processing` 只可能来自**上一次进程**：后台线程随进程一起没了，没人会再来收尾这些文档。
+    而 `reindex_all` 只认 `indexed`，于是它们既检索不到、也不会被重跑，永远卡在「处理中」——
+    用户既等不到结果，也不知道要重传。如实标成失败并写明原因，才是这个状态该有的样子。
+    """
+    rows = db.query(Document).filter(Document.status == "processing").all()
+    for d in rows:
+        d.status = "failed"
+        d.error = "服务重启时这份文档还在处理中，没能跑完 —— 请重新上传。"
+    if rows:
+        db.commit()
+        print(f"[doc] {len(rows)} 份文档上次没处理完，已标为失败（等重传）")
+    return len(rows)
+
+
 def reindex_all(db: Session, rt: Runtime) -> int:
     """从数据库已入库的 child 分块重建内存向量库 + BM25 索引。返回重建的分块数。"""
     rows = (db.query(Chunk, Document)

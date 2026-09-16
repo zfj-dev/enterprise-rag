@@ -47,6 +47,7 @@ async def lifespan(app: FastAPI):
 
     ensure_sqlite_columns(engine)     # 已有库补上新增列（create_all 只会建表）
     _seed_admin()
+    _recover_stale_documents()
     _reindex()
     yield
 
@@ -122,6 +123,19 @@ def _seed_admin() -> None:
         if not db.query(User).filter(User.username == "admin").first():
             db.add(User(username="admin", password_hash=hash_password("admin123"), role="admin"))
             db.commit()
+    finally:
+        db.close()
+
+
+def _recover_stale_documents() -> None:
+    """把上一次进程留下的 `processing` 标成 failed —— 后台线程没了，没人会再来收尾。"""
+    db: Session = SessionLocal()
+    try:
+        from app.services.document_service import fail_stale_processing
+
+        fail_stale_processing(db)
+    except Exception as e:  # noqa
+        print(f"[recover] 跳过（{e}）")
     finally:
         db.close()
 

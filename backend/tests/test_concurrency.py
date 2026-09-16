@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import json
 import threading
 
 from app.core.bm25 import InMemoryBm25
@@ -245,3 +246,115 @@ def test_a_racing_first_message_reuses_the_session_inserted_by_the_other_request
         assert sess is not None and sess.id == sid
     finally:
         db.close()
+
+
+# ---------- 重启留下的残局（#64 批 3）----------
+
+def test_a_document_left_processing_by_a_restart_is_marked_failed(client):
+    """进程在处理到一半时重启：后台线程没了，文档就永远卡在 processing。
+
+    它既不会被重跑（线程没了）、也不会被重建索引（`reindex_all` 只看 `indexed`），
+    前端于是永远显示「处理中」—— 用户既等不到结果、也不知道该重传。
+    """
+    from app.db.session import SessionLocal
+    from app.models.entities import Document
+    from app.services.document_service import fail_stale_processing
+    from tests.helpers import register_and_kb
+
+    _, uid, kb = register_and_kb(client, "stale_processing")
+    db = SessionLocal()
+    try:
+        stale = Document(kb_id=kb, owner_id=uid, filename="半截.pdf",
+                         file_path="/nowhere/半截.pdf", status="processing")
+        done = Document(kb_id=kb, owner_id=uid, filename="好的.pdf",
+                        file_path="/nowhere/好的.pdf", status="indexed")
+        db.add_all([stale, done])
+        db.commit()
+
+        assert fail_stale_processing(db) == 1
+        db.refresh(stale)
+        db.refresh(done)
+
+        assert stale.status == "failed"
+        assert "重启" in stale.error          # 原因要写出来，不能只丢一个状态
+        assert done.status == "indexed"       # 已入库的一个也不许动
+    finally:
+        db.close()
+
+
+# ---------- 客户端断开时的并发名额（#64 批 3）----------
+
+def test_the_stream_slot_is_freed_as_soon_as_the_client_disconnects(client, monkeypatch):
+    """断开后名额要马上还回来 —— 只挂生成器的 `finally` 是不够的。
+
+    Starlette 的线程池迭代被取消时**不会关闭**那个同步生成器，`finally` 要等它被回收才跑；
+    表现出来就是「点了停止，几秒内再问就 429」。这里把响应对象捏在手里驱动一次断连：
+    驱动完生成器仍然开着（下面断言了），名额却必须已经还回来。
+    """
+    import asyncio
+    import json
+
+    from starlette.responses import StreamingResponse
+
+    from app.api.deps import get_runtime
+    from app.api.v1 import chat
+    from app.db.session import SessionLocal
+    from app.models.entities import User
+    from tests.helpers import register_and_kb
+
+    _, uid, kb = register_and_kb(client, "stream_disconnect")
+
+    closed: list = []
+
+    def fake_stream(*_a, **_k):
+        """永不停歇的流：断连之后它还开着，`finally` 也就还没跑。"""
+        def body():
+            try:
+                while True:
+                    yield {"type": "delta", "text": "x"}
+            finally:
+                closed.append(True)
+        return body()
+
+    monkeypatch.setattr(chat, "stream_answer", fake_stream)
+    db = SessionLocal()
+    try:
+        user = db.get(User, uid)
+        resp = chat.chat_stream(body=chat.ChatRequest(kb_id=kb, question="问", stream=True),
+                                user=user, db=db, rt=get_runtime())
+    finally:
+        db.close()
+    assert isinstance(resp, StreamingResponse)
+
+    state = {"body": False, "chunks": 0}
+
+    async def receive():
+        if not state["body"]:
+            state["body"] = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        while state["chunks"] < 1:          # 等第一段真的发出去，再当客户端走人
+            await asyncio.sleep(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.body" and message.get("body"):
+            state["chunks"] += 1
+
+    scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+             "http_version": "1.1", "method": "POST", "scheme": "http",
+             "path": "/api/v1/chat/stream", "raw_path": b"/api/v1/chat/stream",
+             "query_string": b"", "root_path": "", "headers": [],
+             "client": ("test", 1), "server": ("test", 80)}
+    asyncio.run(resp(scope, receive, send))
+
+    guard = chat._stream_guard
+    assert closed == []                     # 生成器还开着 —— 名额不是靠它被回收才回来的
+    tokens = []
+    while len(tokens) <= guard.limit:       # 断连那一刻就该整份还回来，所以现在能占满
+        t = guard.try_acquire(uid)
+        if t is None:
+            break
+        tokens.append(t)
+    for t in tokens:
+        guard.release(uid, t)
+    assert len(tokens) == guard.limit
