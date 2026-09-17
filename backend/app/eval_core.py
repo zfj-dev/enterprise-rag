@@ -24,6 +24,24 @@ JudgeFn = Callable[[str, str, list, str], dict]
 RAGAS_METRICS = ("faithfulness", "answer_relevancy", "context_precision", "context_recall")
 
 
+# ---- 明细区标记：一页报告只取「结论 + 口径」 ----
+# 逐题证据（哪题挂了、答案开头是什么）在**各段自己的报告文件**里读才有意义；一页报告里
+# 重复几百行就没人看了。用一对**显式标记**划出明细区，而不是靠「以 [FAIL] 开头的行」之类
+# 去猜形状 —— 猜形状会在有人改一行渲染文案时静默失效，那时一页报告多吐几百行没人会发现。
+DETAIL_BEGIN = "--- 逐题证据（只在本段自己的报告里看；一页报告不重复这一段）---"
+DETAIL_END = "--- 逐题证据结束 ---"
+
+
+def strip_detail(lines: list) -> list:
+    """去掉明细区（一页报告用）；标记不成对就**原样奉还** —— 宁可长，也别悄悄吃掉内容。"""
+    begins = [i for i, ln in enumerate(lines) if ln.strip() == DETAIL_BEGIN]
+    ends = [i for i, ln in enumerate(lines) if ln.strip() == DETAIL_END]
+    if len(begins) != len(ends) or any(b > e for b, e in zip(begins, ends)):
+        return list(lines)
+    drop = {i for b, e in zip(begins, ends) for i in range(b, e + 1)}
+    return [ln for i, ln in enumerate(lines) if i not in drop]
+
+
 def as_int(value) -> int | None:
     """把外来的 token 数收成 int —— bool 也是 int，别把 True 当 1 个 token。"""
     return value if isinstance(value, int) and not isinstance(value, bool) else None
@@ -461,6 +479,7 @@ class Report:
             % _REFUSAL_MAX_CHARS,
             "",
         ]
+        lines.append(DETAIL_BEGIN)
         for x in self.items:
             if x.negative:
                 lines.append("[%s] Q:%s | 负样本(期望拒答) | %s"
@@ -475,6 +494,7 @@ class Report:
                             x.question, x.expect or "(未写期望事实)",
                             x.fact_hit, x.grounded, tail))
             lines.append("    答案前90字: %s" % x.answer[:90].replace(chr(10), " / "))
+        lines.append(DETAIL_END)
         lines.append("")
         miss = ("；其中 %d 条黄金集条目未写期望事实，按未命中计" % self.missing_expect_count
                 if self.missing_expect_count else "")
@@ -727,6 +747,7 @@ class RetrievalMetrics:
 
         if self.rows:
             lines.append("")
+            lines.append(DETAIL_BEGIN)
             lines.append("--- 逐条明细（RR = 首个正确分块名次的倒数，全排名；0 = 一个都没捞到）---")
             for r in self.rows:
                 marks = "  ".join("%s=%.2f" % (l, r.rr.get(l, 0.0)) for l in self.labels)
@@ -735,6 +756,7 @@ class RetrievalMetrics:
                 lines.append("[%s] %sQ:%s | 期望:%s | 正确分块=%d 条 | %s"
                              % ("OK" if best > 0 else "MISS", where, r.question,
                                 r.expect or "(未写)", r.gold_count, marks))
+            lines.append(DETAIL_END)
         return lines
 
     def _negative_header(self) -> str:

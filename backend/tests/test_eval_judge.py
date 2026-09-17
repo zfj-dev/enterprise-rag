@@ -32,7 +32,7 @@ class ScriptedLLM:
         self.max_live = 0               # 见过的最大并发
         self._lock = threading.Lock()
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         prompt = messages[-1]["content"]
         with self._lock:
             self.prompts.append(prompt)
@@ -197,7 +197,7 @@ def test_llm_failure_becomes_judge_unavailable():
     class Boom:
         api_key = "k"
 
-        def stream(self, messages):
+        def stream(self, messages, usage=None):
             raise RuntimeError("网络断了")
             yield  # pragma: no cover
 

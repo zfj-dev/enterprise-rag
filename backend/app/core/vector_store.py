@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import threading
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -41,10 +42,15 @@ class VectorStore(ABC):
 class InMemoryVectorStore(VectorStore):
     def __init__(self) -> None:
         self._data: dict[str, tuple[list[float], dict]] = {}
+        # 后台索引线程在写、请求线程在读。`search` 是**边遍历边算相似度**，不加锁轻则
+        # `RuntimeError: dictionary changed size during iteration`（上传时提问就 500），
+        # 重则读到删到一半的库。
+        self._lock = threading.RLock()
 
     def add(self, items: Sequence[VectorItem]) -> None:
-        for it in items:
-            self._data[it.id] = (list(it.vector), dict(it.metadata))
+        with self._lock:
+            for it in items:
+                self._data[it.id] = (list(it.vector), dict(it.metadata))
 
     def _cosine(self, a: Sequence[float], b: Sequence[float]) -> float:
         if not a or not b:
@@ -63,20 +69,22 @@ class InMemoryVectorStore(VectorStore):
         return True
 
     def search(self, vector: Sequence[float], top_k: int = 10, filter_meta: dict | None = None) -> list[SearchHit]:
-        hits: list[SearchHit] = []
-        for cid, (vec, meta) in self._data.items():
-            if not self._match(meta, filter_meta):
-                continue
-            hits.append(SearchHit(id=cid, score=self._cosine(vector, vec), metadata=meta))
+        with self._lock:
+            hits: list[SearchHit] = []
+            for cid, (vec, meta) in self._data.items():
+                if not self._match(meta, filter_meta):
+                    continue
+                hits.append(SearchHit(id=cid, score=self._cosine(vector, vec), metadata=meta))
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:top_k]
 
     def delete_by(self, doc_id: str | None = None, kb_id: str | None = None) -> None:
-        keys = [k for k, (_, m) in self._data.items()
-                if (doc_id is None or m.get("doc_id") == doc_id)
-                and (kb_id is None or m.get("kb_id") == kb_id)]
-        for k in keys:
-            self._data.pop(k, None)
+        with self._lock:
+            keys = [k for k, (_, m) in self._data.items()
+                    if (doc_id is None or m.get("doc_id") == doc_id)
+                    and (kb_id is None or m.get("kb_id") == kb_id)]
+            for k in keys:
+                self._data.pop(k, None)
 
 
 class PgVectorStore(VectorStore):

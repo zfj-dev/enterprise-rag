@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+from app.core.llm import put_usage
 from app.core.pricing import Price, PriceTable, cost_of
 from tests.helpers import register_and_kb
 
@@ -111,11 +112,10 @@ class UsageLLM:
 
     def __init__(self, model: str):
         self.model = model
-        self.last_usage = None
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield "答案"
-        self.last_usage = {"prompt_tokens": 2000, "completion_tokens": 1000}
+        put_usage(usage, {"prompt_tokens": 2000, "completion_tokens": 1000})
 
 
 def _setup(client, name: str, *, model: str, table: PriceTable | None = None):

@@ -1,8 +1,11 @@
-"""LLM 抽象：`stream(messages)` 产出增量文本。含 Fake（离线 demo/测试）与云端 API（OpenAI 兼容）。
+"""LLM 抽象：`stream(messages, usage=None)` 产出增量文本。含 Fake（离线 demo/测试）与云端 API（OpenAI 兼容）。
 
-另有 `chat_with_tools(messages, tools)` —— 带工具的一轮对话（返回内容 + 工具调用列表）。
+另有 `chat_with_tools(messages, tools, usage=None)` —— 带工具的一轮对话（返回内容 + 工具调用列表）。
 **基类给了会降级的默认实现**：不支持工具的模型就当成普通一问一答，依赖方自然退化为单步回答。
-既有 `stream` 的签名与行为一个字没动。
+
+`usage` 见 `put_usage`：要记账的调用方每次传一个**自己的**空 dict，这次调用的账单口径写在那里。
+以前它挂在实例上（`last_usage`），而实例是进程级共享的 —— 并发请求、以及生成之后紧跟着的
+引用校验与事实抽取会互相覆盖，用量/费用就记到别人头上了（#64 批 3）。
 """
 from __future__ import annotations
 
@@ -76,36 +79,47 @@ FAKE_ANSWER = (
 )
 
 
+def put_usage(sink: dict | None, data) -> None:
+    """把**这一次调用**的账单口径写进调用方自己的桶（票 27 / #64 批 3）。
+
+    口径是该次调用的产出，不能挂在模型实例上：实例是进程级共享的，并发的请求（以及紧接着的
+    引用校验、事实抽取）会把它覆盖掉，于是这次问答记了别人的账。没给桶就是调用方不需要这个
+    数，直接不记。`data` 为空也不记 —— 空桶本身已经表示「这次拿不到」。
+    """
+    if sink is None or not data:
+        return
+    sink.clear()
+    sink.update(data)
+
+
 class LLM(ABC):
     is_fake: bool = False   # 演示/测试用的假模型；真实模型为 False
-    # 上一次调用 provider 返回的 usage（`{prompt_tokens, completion_tokens}`）；拿不到就是 None。
-    # 记账（票 27）优先用它 —— 那是与账单一致的口径；没有才回退本地分词器。
-    last_usage: dict | None = None
 
     @abstractmethod
-    def stream(self, messages: list[dict]) -> Iterator[str]:
-        ...
+    def stream(self, messages: list[dict], usage: dict | None = None) -> Iterator[str]:
+        """产出增量文本。`usage` 见 `put_usage` —— 要记账的调用方自己传一个空 dict 进来。"""
 
     def chat_with_tools(self, messages: list[dict],
-                        tools: Sequence[dict] | None = None) -> dict:
+                        tools: Sequence[dict] | None = None,
+                        usage: dict | None = None) -> dict:
         """带工具的一轮对话：返回 {"content": str, "tool_calls": [ToolCall, ...]}。
 
         **默认实现明确降级**：把消息当普通一问一答，工具调用为空 —— 不支持工具的模型
         （含演示用的 Fake）不会抛穿，依赖方自然退化成单步回答。
         """
-        return {"content": "".join(self.stream(messages)), "tool_calls": []}
+        return {"content": "".join(self.stream(messages, usage=usage)), "tool_calls": []}
 
 
 class FakeLLM(LLM):
     is_fake = True
 
-    def stream(self, messages: list[dict]) -> Iterator[str]:
+    def stream(self, messages: list[dict], usage: dict | None = None) -> Iterator[str]:
         # 演示用假模型**自报**一份「模拟用量」（票 30 要求 demo 下也能演示计量链路）——
         # 打的标记是 simulated，记账那边据此标成**模拟口径**，绝不冒充 provider 账单。
         prompt = "".join(str(m.get("content") or "") for m in messages)
-        self.last_usage = {"prompt_tokens": approx_token_count(prompt),
-                           "completion_tokens": approx_token_count(FAKE_ANSWER),
-                           "simulated": True}
+        put_usage(usage, {"prompt_tokens": approx_token_count(prompt),
+                          "completion_tokens": approx_token_count(FAKE_ANSWER),
+                          "simulated": True})
         delay = get_settings().fake_llm_delay
         for piece in _chunk_text(FAKE_ANSWER, 20):
             if delay:
@@ -138,8 +152,9 @@ class CloudLLM(LLM):
             payload["tools"] = list(tools)
         return payload
 
-    def _stream_lines(self, url: str, payload: dict, headers: dict) -> Iterator[str]:
-        """跑一次流式请求，逐 chunk 解析（顺带把 usage 记到 `last_usage`）。
+    def _stream_lines(self, url: str, payload: dict, headers: dict,
+                      usage: dict | None = None) -> Iterator[str]:
+        """跑一次流式请求，逐 chunk 解析（顺带把 usage 写进调用方的桶）。
 
         `timeout` 封的是**连接**与**两次数据之间的等待**（httpx 的 read 是「等下一个 chunk」），
         **不封整段生成的墙钟时间** —— 一个长回答本来就该慢慢流完，掐掉它才是错的。
@@ -160,14 +175,14 @@ class CloudLLM(LLM):
                         continue
                     # 带 usage 的那个 chunk 通常 choices 为空 —— 先取 usage，再看有没有正文
                     if chunk.get("usage"):
-                        self.last_usage = chunk["usage"]
+                        put_usage(usage, chunk["usage"])
                     choices = chunk.get("choices") or []
                     delta = choices[0].get("delta", {}).get("content") if choices else None
                     if delta:
                         yield delta
 
-    def stream(self, messages: list[dict]) -> Iterator[str]:
-        self.last_usage = None
+    def stream(self, messages: list[dict], usage: dict | None = None) -> Iterator[str]:
+        # 不需要「先清掉上一次」了：桶是调用方按次给的，天生就是空的
         if not self.api_key:
             yield "服务配置缺失（未设置 LLM API Key）。"
             return
@@ -177,7 +192,7 @@ class CloudLLM(LLM):
         # 让 OpenAI 兼容的 provider 在最后一个 chunk 里带上 usage（与账单同口径）
         payload["stream_options"] = {"include_usage": True}
         try:
-            yield from self._stream_lines(url, payload, headers)
+            yield from self._stream_lines(url, payload, headers, usage)
             return
         except self._httpx.HTTPStatusError as e:
             if not (400 <= e.response.status_code < 500):
@@ -185,24 +200,23 @@ class CloudLLM(LLM):
             # provider 不认这个字段 —— 去掉它重来一次（这一次拿不到 usage，记账回退本地口径）。
             # 状态码是在吐第一个字之前就检查的，所以重试不会把正文吐两遍。
             logger.warning("provider 拒绝了 stream_options（%s），去掉后重试：本次拿不到账单口径", e)
-        self.last_usage = None
         payload.pop("stream_options", None)
-        yield from self._stream_lines(url, payload, headers)
+        yield from self._stream_lines(url, payload, headers, usage)
 
     def chat_with_tools(self, messages: list[dict],
-                        tools: Sequence[dict] | None = None) -> dict:
+                        tools: Sequence[dict] | None = None,
+                        usage: dict | None = None) -> dict:
         """带工具的一轮（非流式）。没配 Key / 没给工具 / 调用失败，都**降级**成一问一答。
 
         降级后若连普通回答也失败（provider 整个不可用），异常照常上抛 ——
         那是模型本身挂了，不是「不支持工具」，不该在这里被吞掉。
         """
         if not tools or not self.api_key:
-            return super().chat_with_tools(messages, tools)
+            return super().chat_with_tools(messages, tools, usage)
 
         url = f"{self.base_url}/chat/completions"
         payload = self._post_payload(messages, tools=tools, stream=False)
         headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-        self.last_usage = None
         try:
             with self._httpx.Client(timeout=self.timeout) as client:
                 resp = client.post(url, json=payload, headers=headers)
@@ -211,9 +225,9 @@ class CloudLLM(LLM):
                 message = body["choices"][0]["message"]
         except Exception as e:   # noqa: BLE001 —— 不支持工具的 provider 会在这里炸，降级而不是抛穿
             logger.warning("带工具对话失败，降级为普通回答：%s", e)
-            return super().chat_with_tools(messages, tools)
+            return super().chat_with_tools(messages, tools, usage)
 
-        self.last_usage = body.get("usage")      # 非流式响应里 usage 在顶层（与账单同口径）
+        put_usage(usage, body.get("usage"))      # 非流式响应里 usage 在顶层（与账单同口径）
         return {"content": message.get("content") or "",
                 "tool_calls": parse_tool_calls(message.get("tool_calls"))}
 

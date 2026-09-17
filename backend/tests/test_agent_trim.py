@@ -26,10 +26,10 @@ class ScriptedLLM:
         self.calls: list[dict] = []
         self.live: list | None = None
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield self.fallback
 
-    def chat_with_tools(self, messages, tools=None):
+    def chat_with_tools(self, messages, tools=None, usage=None):
         self.calls.append({"messages": list(messages), "tools": tools})
         self.live = messages
         if not tools:                                   # 收敛那一步：不给工具

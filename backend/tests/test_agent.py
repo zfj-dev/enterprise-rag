@@ -17,10 +17,10 @@ class ScriptedLLM:
         self.fallback = fallback
         self.calls = []
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield self.fallback
 
-    def chat_with_tools(self, messages, tools=None):
+    def chat_with_tools(self, messages, tools=None, usage=None):
         self.calls.append({"messages": list(messages), "tools": tools})
         if not tools:
             # 与真实现的降级路径一致：不给工具就是普通一问一答（收敛那一步走这里）
@@ -160,10 +160,10 @@ def test_llm_blowing_up_mid_loop_does_not_raise():
     class Boom:
         is_fake = False
 
-        def stream(self, messages):
+        def stream(self, messages, usage=None):
             yield ""
 
-        def chat_with_tools(self, messages, tools=None):
+        def chat_with_tools(self, messages, tools=None, usage=None):
             raise RuntimeError("模型挂了")
 
     got = run_agent("问", llm=Boom(), transport=_calc_transport())
@@ -180,10 +180,10 @@ def test_llm_blowing_up_only_at_the_convergence_step_still_returns():
         def __init__(self):
             self.n = 0
 
-        def stream(self, messages):
+        def stream(self, messages, usage=None):
             yield ""
 
-        def chat_with_tools(self, messages, tools=None):
+        def chat_with_tools(self, messages, tools=None, usage=None):
             self.n += 1
             if tools:                                     # 循环内照常给工具调用
                 return {"content": "", "tool_calls": [_calc_call("1+1")]}
@@ -249,7 +249,7 @@ def _kb_then_answer(answer, *ids):
 class VerdictLLM(ScriptedLLM):
     """stream 返回逐句校验的 JSON —— 让 verify_claims 走真实分支（不是降级）。"""
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield '{"claims":[{"claim":"比亚迪2025年营业收入为803.96亿元。","supported":true}]}'
 
 

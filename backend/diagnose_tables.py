@@ -10,7 +10,7 @@ if BACKEND not in sys.path:
 for k, v in {
     "HF_HUB_OFFLINE": "0", "HF_ENDPOINT": "https://hf-mirror.com",
     "HF_HUB_DISABLE_SYMLINKS": "1", "HF_HUB_DISABLE_XET": "1",
-    "USE_REAL": "true", "EMBEDDING_PROVIDER": "bge", "RERANKER_PROVIDER": "bge",
+    "EMBEDDING_PROVIDER": "bge", "RERANKER_PROVIDER": "bge",
     "EMBEDDING_DEVICE": "cuda", "RERANKER_DEVICE": "cuda", "VECTOR_STORE": "inmemory",
 }.items():
     os.environ.setdefault(k, v)

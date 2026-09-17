@@ -23,6 +23,7 @@ def _resolves_to(*ips):
     "127.0.0.1", "10.0.0.5", "192.168.1.1", "172.16.9.9",      # 回环 + 私网
     "169.254.169.254",                                          # 链路本地（云元数据那个）
     "0.0.0.0", "224.0.0.1", "240.0.0.1",                        # 未指定 / 组播 / 保留
+    "100.64.0.1", "100.127.255.254",                            # 运营商级 NAT 段（#64）
     "[::1]", "[fe80::1]", "[fc00::1]",                          # IPv6 回环 / 链路本地 / 私有（URL 里带方括号）
     "[::ffff:127.0.0.1]",                                       # IPv4-mapped 也得挡
 ])
@@ -30,6 +31,12 @@ def test_internal_addresses_are_rejected(host):
     reason = check_base_url("https://%s/v1" % host, resolve=_resolves_to(PUBLIC))
 
     assert reason and "内网/回环" in reason          # 说清是地址不合规，不是「连不上」
+
+
+@pytest.mark.parametrize("host", ["100.63.255.255", "100.128.0.1"])   # 100.64/10 的界外
+def test_the_cgnat_range_boundaries_are_not_over_blocked(host):
+    """挡的是 100.64.0.0/10 本身，不是「100 开头的都挡」—— 别把公网地址一起误杀。"""
+    assert check_base_url("https://%s/v1" % host, resolve=_resolves_to(PUBLIC)) is None
 
 
 def test_a_public_address_is_allowed():

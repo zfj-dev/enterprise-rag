@@ -7,6 +7,11 @@
 跑法固定**多轮**（同一会话连着问）：单轮每题新开会话，压根没有可压的历史，
 那份「护栏」就是空的 —— 压缩要有历史可压才谈得上。
 
+两条链路还要**关掉语义缓存与跨会话记忆**（见 `ISOLATION_NOTE`）：缓存按（问题, 知识库）存、
+记忆按用户存，而两条链路问的是同一批问题、同一个库、同一个评测用户 —— 留着任何一条，
+第二列就会吃到第一列刚产出的东西，两列恒等，「压缩前后之比」什么也没测出来，
+护栏永远「通过」（#64 批 4）。
+
 用法:  cd backend && python evaluate_guardrail.py   （或 scripts/evaluate_guardrail.ps1）
 环境:  EVAL_GOLDEN / EVAL_DOC 同 evaluate.py；报告路径 EVAL_GUARDRAIL_REPORT
 报告:  logs/compression-guardrail.log（助手可读）
@@ -18,8 +23,8 @@ import os
 
 from app.eval_agent import deterministic_answer_fn
 from app.eval_compare import guardrail_lines, render_compare, run_links
-from app.eval_setup import (drop_kb, ensure_schema, eval_user, ingest_file, new_kb,
-                            with_setting, write_report)
+from app.eval_setup import (drop_kb, drop_memory, drop_sessions, ensure_schema, eval_user,
+                            ingest_file, new_kb, with_setting, write_report)
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 REPORT = os.environ.get("EVAL_GUARDRAIL_REPORT",
@@ -27,6 +32,12 @@ REPORT = os.environ.get("EVAL_GUARDRAIL_REPORT",
 GOLDEN = os.environ.get("EVAL_GOLDEN", os.path.join(BACKEND, "data", "golden_set_paper.json"))
 DOC = os.environ.get("EVAL_DOC", os.path.join(BACKEND, "paper.pdf"))
 USERNAME = "__guardrail_eval__"
+
+# 两条链路只差压缩这一个开关 —— 别的共用状态一律关掉。写进报告，读者才知道这两列凭什么可比。
+ISOLATION_NOTE = ("口径: **两条链路只差压缩这一个开关** —— 语义缓存与跨会话记忆都关掉："
+                  "缓存按（问题, 知识库）存、记忆按用户存，两条链路问的是同一批问题、同一个库、"
+                  "同一个评测用户，留着任何一条都会让第二列吃到第一列刚产出的东西 —— "
+                  "两列恒等，护栏等于没测")
 
 
 def _config_lines() -> list[str]:
@@ -40,6 +51,16 @@ def _config_lines() -> list[str]:
     ]
 
 
+def _link(ask, compress: bool):
+    """一条链路：只差压缩这一个开关，其余一律相同 —— 顺带关掉缓存与记忆（见 `ISOLATION_NOTE`）。
+
+    三层嵌套的 `with_setting` 各自只扳自己那一个开关、问完立刻还原，两条链路才只差压缩。
+    """
+    return with_setting(with_setting(with_setting(ask, "semantic_cache", False),
+                                     "memory_enabled", False),
+                        "context_compress", compress)
+
+
 def main(golden: str | None = None, doc: str | None = None, report: str | None = None) -> None:
     golden = golden or GOLDEN
     doc = doc or DOC
@@ -48,7 +69,8 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
              "黄金集: %s" % golden,
              "文档: %s" % doc,
              "报告: %s" % report,
-             "跑法: 多轮（同一会话连着问，历史累积才压得起来 —— 单轮每题新开会话没有可压的历史）"]
+             "跑法: 多轮（同一会话连着问，历史累积才压得起来 —— 单轮每题新开会话没有可压的历史）",
+             ISOLATION_NOTE]
     lines += _config_lines()
 
     if not os.path.exists(golden) or not os.path.exists(doc):
@@ -74,8 +96,12 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
     lines.append("")
     db = SessionLocal()
     kb = None
+    user = None
     try:
         user = eval_user(db, USERNAME)
+        # 固定 session_id 多轮跑：上一次的会话留着，历史与滚动摘要就会接着上一次滚
+        drop_sessions(db, user.id)
+        drop_memory(rt, user.id)
         kb = new_kb(db, user.id, "压缩护栏评测库")
         doc_id = ingest_file(db, rt, doc, user.id, kb.id)
         lines.append("文档已入库：doc_id=%s" % doc_id)
@@ -85,19 +111,20 @@ def main(golden: str | None = None, doc: str | None = None, report: str | None =
         lines.append("")
 
         links = {
-            "压缩前": with_setting(
-                deterministic_answer_fn(db, rt, user, kb.id, "guardrail-off"),
-                "context_compress", False),
-            "压缩后": with_setting(
-                deterministic_answer_fn(db, rt, user, kb.id, "guardrail-on"),
-                "context_compress", True),
+            "压缩前": _link(deterministic_answer_fn(db, rt, user, kb.id, "guardrail-off"), False),
+            "压缩后": _link(deterministic_answer_fn(db, rt, user, kb.id, "guardrail-on"), True),
         }
         reports, spans = run_links(goldenset, links)
         lines.extend(guardrail_lines(reports["压缩前"], reports["压缩后"]))
         lines.extend(render_compare(
-            reports, spans,
-            note="两条**配置**跑的是同一条链路，只有压缩开关不同 —— 差异归因才干净。"))
+            reports, spans, note=ISOLATION_NOTE))
     finally:
+        if user is not None:
+            try:
+                drop_sessions(db, user.id)
+            except Exception as e:      # noqa: BLE001 —— 清理失败不该毁掉已算出的报告
+                print("清会话失败（不影响报告）：%s" % e)
+            drop_memory(rt, user.id)
         if kb is not None:
             try:
                 drop_kb(db, kb.id)

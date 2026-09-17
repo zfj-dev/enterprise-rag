@@ -108,3 +108,32 @@ def ingest_file(db, rt, path: str, owner_id: str, kb_id: str) -> str:
     if doc.status != "indexed":
         raise RuntimeError("文档未入库（status=%s）：%s" % (doc.status, doc.error or path))
     return doc.id
+
+
+def drop_sessions(db, user_id: str) -> None:
+    """删掉该用户落库的会话与消息 —— 评测脚本用**固定 session_id** 多轮跑（护栏要历史才压得起来）。
+
+    会话不清掉，上一次跑的消息还挂在同一条会话上、滚动摘要游标也跟着前进：下一次跑的「历史」
+    越滚越长，同一份黄金集两次跑出来的数字不一样，还越漂越远（#64 批 4）。
+    """
+    from app.models.entities import ChatMessage, ChatSession
+
+    ids = [s.id for s in db.query(ChatSession).filter(ChatSession.user_id == user_id).all()]
+    if not ids:
+        return
+    db.query(ChatMessage).filter(ChatMessage.session_id.in_(ids)).delete(synchronize_session=False)
+    db.query(ChatSession).filter(ChatSession.id.in_(ids)).delete(synchronize_session=False)
+    db.commit()
+
+
+def drop_memory(rt, user_id: str) -> None:
+    """清掉该用户这个评测用户留下的跨会话记忆 —— 不清就会一次比一次多，召回数与护栏都跟着漂。
+
+    记忆按 `user_id` 存，而一个评测脚本的所有链路共用同一个评测用户：上一条链路刚抽出的事实，
+    下一条链路能召回进 prompt、还占掉一份上下文预算（#64 批 4）。
+    """
+    try:
+        for f in rt.memory_store.list(user_id):
+            rt.memory_store.delete(user_id, f["id"])
+    except Exception as e:      # noqa: BLE001 —— 清理失败不该毁掉已算出的报告
+        print("清记忆失败（不影响报告）：%s" % e)

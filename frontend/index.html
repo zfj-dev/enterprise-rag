@@ -895,21 +895,26 @@ async function streamToConv(conv, q, aiIdx){
   const ctrl=new AbortController();conv.ctrl=ctrl;conv.isStreaming=true;conv.currentStreamText='';conv.lastSources=[];
   updateStopBtn();
   const cid=conv.id;
+  // 这条流自己的身份。被「重新生成」顶替掉的旧流还会继续收到事件，
+  // 不认身份就会两个流往同一份 conv 状态里互相覆盖。
+  const mine=()=>conv.ctrl===ctrl;
   try{
     const resp=await fetch(`${API}/chat/stream`,{method:'POST',headers:h({}),body:JSON.stringify({kb_id:conv.kbId||KB.id,question:q,session_id:cid,stream:true,deep:!!DEEP}),signal:ctrl.signal});
     if(!resp.ok)throw new Error('HTTP '+resp.status);
     const reader=resp.body.getReader();const dec=new TextDecoder();let buf='';
-    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;conv.messages[aiIdx].agent=!!ev.agent;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;}}}catch(e){}}}
+    while(true){const{done,value}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});const lines=buf.split('\n\n');buf=lines.pop();for(const line of lines){if(!line.startsWith('data:'))continue;const payload=line.slice(5).trim();if(payload==='[DONE]')continue;try{const ev=JSON.parse(payload);if(!mine())continue;if(ev.type==='sources'){conv.lastSources=ev.data;loadSessions()}else if(ev.type==='delta'){conv.currentStreamText+=ev.text;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);var _n=Date.now();if(!conv._saveT||_n-conv._saveT>500){conv._saveT=_n;conv.messages[aiIdx].content=conv.currentStreamText;conv.messages[aiIdx]._partial=true;saveConv(conv);}}else if(ev.type==='done'){lastMsgId=ev.message_id;conv.messages[aiIdx].agent=!!ev.agent;if(ev.agent_skipped){conv.messages[aiIdx].note=ev.agent_skipped;}if(typeof ev.answer==='string'&&ev.answer!==conv.currentStreamText){conv.currentStreamText=ev.answer;if(activeConversationId===cid)updateAiDOM(cid,aiIdx,conv.currentStreamText);}}}catch(e){}}}
   }catch(e){ conv._failed=true; }
   finally{
-    conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
-    conv.messages[aiIdx]._partial=false;
-    conv._failed=false;
-    conv.messages[aiIdx].sources=conv.lastSources||[];
-    conv.ctrl=null;conv.isStreaming=false;
-    saveConv(conv);
-    if(activeConversationId===cid)renderChat();
-    updateStopBtn();autoGrow(document.getElementById('question'));
+    if(mine()){                     // 被顶替的旧流到此为止：状态已经归新流所有，别再回写
+      conv.messages[aiIdx].content=conv.currentStreamText||(conv._failed?'⚠️ 网络错误或请求中断':'');
+      conv.messages[aiIdx]._partial=false;
+      conv._failed=false;
+      conv.messages[aiIdx].sources=conv.lastSources||[];
+      conv.ctrl=null;conv.isStreaming=false;
+      saveConv(conv);
+      if(activeConversationId===cid)renderChat();
+      updateStopBtn();autoGrow(document.getElementById('question'));
+    }
   }
 
 }
@@ -936,7 +941,7 @@ function renderDocList(){
   const box=document.getElementById('docList');
   const list=DOCS.filter(d=>!kw||(d.filename||'').toLowerCase().includes(kw.toLowerCase()));
   document.getElementById('docCount').textContent='共 '+DOCS.length+' 篇';
-  box.innerHTML=list.map(d=>{const st=d.status==='indexed'?'<span class="st ok">✓ 已解析</span>':d.status==='failed'?'<span class="st fail">✗ 失败</span>':'<span class="st run">… '+(d.progress||0)+'%</span>';
+  box.innerHTML=list.map(d=>{const st=d.status==='indexed'?'<span class="st ok">✓ 已解析</span>':d.status==='failed'?'<span class="st fail" title="'+esc(d.error||'')+'">✗ 失败</span>':'<span class="st run">… '+(d.progress||0)+'%</span>';
     return `<div class="doc-item ${SEL_DOC===d.id?'selected':''}" onclick="selectDoc('${d.id}')" ondblclick="previewDoc('${d.id}')"><div class="doc-nm">${esc(d.filename)}</div><div class="doc-meta"><span>${d.page_count||'?'}页 · ${fmtSize(d.size)} · ${relTime(d.created_at)||''}</span>${st}<span class="doc-actions"><span class="doc-del" title="重命名" onclick="event.stopPropagation();renameDoc('${d.id}')">✏️</span><span class="doc-del" title="删除" onclick="event.stopPropagation();deleteDoc('${d.id}')">🗑</span></span></div></div>`;
   }).join('')||'<div class="preview-empty">暂无文档</div>';
 }
@@ -960,9 +965,9 @@ async function previewDoc(id){
 }
 function pickFile(){document.getElementById('fileIn').click()}
 async function doUpload(input){const file=input.files[0];input.value='';if(!file)return;if(!KB){toast('请先创建/选择知识库');return}const dup=DOCS.find(d=>d.filename===file.name);let overwrite=false;if(dup){if(!confirm('已有同名文档「'+file.name+'」\n【确定】=覆盖重传'))return;overwrite=true}const fd=new FormData();fd.append('file',file);const r=await fetch(`${API}/documents?kb_id=${KB.id}&overwrite=${overwrite}`,{method:'POST',headers:{'Authorization':'Bearer '+TOKEN},body:fd});const d=await r.json();if(d.status==='indexed'){toast('已入库 '+d.filename);loadDocs()}else if(d.status==='processing'||d.status==='pending'){loadDocs();pollDoc(d.id)}else if(d.error)toast('处理失败：'+d.error)}
-function pollDoc(id){const t=setInterval(async()=>{await loadDocs();const doc=DOCS.find(x=>x.id===id);if(!doc||doc.status==='indexed'||doc.status==='failed'){clearInterval(t);if(doc&&doc.status==='indexed')toast('已入库 '+doc.filename);if(doc&&doc.status==='failed')toast('处理失败')}},2000)}
+function pollDoc(id){const t=setInterval(async()=>{await loadDocs();const doc=DOCS.find(x=>x.id===id);if(!doc||doc.status==='indexed'||doc.status==='failed'){clearInterval(t);if(doc&&doc.status==='indexed')toast('已入库 '+doc.filename);if(doc&&doc.status==='failed')toast('处理失败'+(doc.error?'：'+doc.error:''))}},2000)}
 function docIcon(name){const e=(name||'').split('.').pop().toLowerCase();if(e==='pdf')return['pdf','📕'];if(e==='docx'||e==='doc')return['docx','📘'];if(e==='xlsx'||e==='xls'||e==='csv')return['xlsx','📗'];return['txt','📄']}
-async function loadDocs(){if(!KB)return;const r=await api('/documents?kb_id='+KB.id);const arr=r.data||[];const seen={};DOCS=[];for(const d of arr){if(!seen[d.filename]){seen[d.filename]=true;DOCS.push(d)}}const box=document.getElementById('docsBox');box.innerHTML=DOCS.map(d=>{const[cls,ic]=docIcon(d.filename);const st=d.status==='indexed'?`<span class="st ok">✓</span>`:d.status==='failed'?`<span class="st fail">✗</span>`:`<span class="st run">…${d.progress||0}%</span>`;return`<div class="doc-card"><div class="doc-icon ${cls}">${ic}</div><div class="doc-info"><div class="nm" title="${esc(d.filename)}">${esc(d.filename)}</div><div class="meta">${d.page_count||'?'}页 · ${st}</div></div><span class="doc-more" onclick="deleteDoc('${d.id}')">🗑</span></div>`}).join('')||'<div class="upload-hint">暂无文档</div>';if(document.getElementById('docView').style.display!=='none')renderDocList()}
+async function loadDocs(){if(!KB)return;const r=await api('/documents?kb_id='+KB.id);const arr=r.data||[];const seen={};DOCS=[];for(const d of arr){if(!seen[d.filename]){seen[d.filename]=true;DOCS.push(d)}}const box=document.getElementById('docsBox');box.innerHTML=DOCS.map(d=>{const[cls,ic]=docIcon(d.filename);const st=d.status==='indexed'?`<span class="st ok">✓</span>`:d.status==='failed'?`<span class="st fail" title="${esc(d.error||'')}">✗</span>`:`<span class="st run">…${d.progress||0}%</span>`;return`<div class="doc-card"><div class="doc-icon ${cls}">${ic}</div><div class="doc-info"><div class="nm" title="${esc(d.filename)}">${esc(d.filename)}</div><div class="meta">${d.page_count||'?'}页 · ${st}</div></div><span class="doc-more" onclick="deleteDoc('${d.id}')">🗑</span></div>`}).join('')||'<div class="upload-hint">暂无文档</div>';if(document.getElementById('docView').style.display!=='none')renderDocList()}
 async function renameDoc(id){const d=DOCS.find(x=>x.id===id);if(!d)return;const name=(prompt('重命名文档',d.filename)||'').trim();if(!name||name===d.filename)return;const r=await api('/documents/'+id,{method:'PATCH',body:{filename:name}});if(r.ok){toast('已重命名');await loadDocs();renderDocList()}else toast('重命名失败：'+((r.data&&r.data.detail)||''))}
 async function deleteDoc(id){if(!confirm('确定删除该文档？'))return;const r=await api('/documents/'+id,{method:'DELETE'});if(r.ok){await loadDocs();renderDocList()}else toast('删除失败')}
 

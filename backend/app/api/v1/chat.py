@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import threading
+import uuid
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -13,35 +14,65 @@ from app.config import get_settings
 from app.core.quota import check_quota
 from app.core.container import Runtime
 from app.core.schemas import ChatRequest
-from app.models.entities import ChatMessage, ChatSession, User
+from app.models.entities import ChatMessage, ChatSession, KnowledgeBase, User
 from app.services.chat_service import prepare, stream_answer
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 class _StreamGuard:
-    """每用户同时流式对话计数守卫。limit=每用户上限；超限 try_acquire 返回 False。"""
+    """每用户同时流式对话计数守卫。limit=每用户上限；超限 try_acquire 返回 None。
+
+    放行时发一个**令牌**，释放要带着它。名额有两条释放路径（生成器收尾、响应 `__call__`
+    的收尾 —— 见 `_SlotReleasingStream`），令牌让「谁先到谁释放」变成幂等的 —— 若是按用户
+    直接减计数，两条路都跑到就会把**别人**正在用的名额一并放开。
+    """
 
     def __init__(self, limit: int):
         self.limit = limit
-        self._counts: dict[str, int] = {}
+        self._held: dict[str, set] = {}
         self._lock = threading.Lock()
 
-    def try_acquire(self, key: str) -> bool:
+    def try_acquire(self, key: str) -> str | None:
+        if self.limit <= 0:      # 关掉限流时不许在表里留下空条目（那就是只涨不跌）
+            return None
         with self._lock:
-            n = self._counts.get(key, 0)
-            if n >= self.limit:
-                return False
-            self._counts[key] = n + 1
-            return True
+            held = self._held.setdefault(key, set())
+            if len(held) >= self.limit:
+                return None
+            token = uuid.uuid4().hex
+            held.add(token)
+            return token
 
-    def release(self, key: str) -> None:
+    def release(self, key: str, token: str) -> None:
+        """按令牌释放；同一个令牌再来一次是 no-op。"""
         with self._lock:
-            n = self._counts.get(key, 1)
-            if n <= 1:
-                self._counts.pop(key, None)
-            else:
-                self._counts[key] = n - 1
+            held = self._held.get(key)
+            if not held:
+                return
+            held.discard(token)
+            if not held:
+                self._held.pop(key, None)
+
+
+class _SlotReleasingStream(StreamingResponse):
+    """流结束（含客户端断连、取消、抛错）后一定把并发名额放掉。
+
+    为什么不是 `background=` 挂一个释放任务：Starlette 只在 `spec_version < 2.4` 那条分支里
+    await 它；按 ≥2.4 的分支，断连会直接抛 `ClientDisconnect` 走人，那次 await 根本到不了 ——
+    名额就只剩「等那个被弃置的同步生成器被回收」这条路，正是这一版要修的毛病。
+    `__call__` 是 ASGI 的入口，响应怎么结束都要从它的 finally 出去。
+    """
+
+    def __init__(self, content, *, on_close, **kwargs) -> None:
+        super().__init__(content, **kwargs)
+        self._on_close = on_close
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._on_close()
 
 
 _stream_guard = _StreamGuard(get_settings().max_concurrent_streams_per_user)
@@ -55,6 +86,14 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
         if s and s.user_id != user.id:
             from fastapi import HTTPException
             raise HTTPException(404, "会话不存在")
+
+    # 知识库同样按属主校验：检索本身按 owner 过滤、不会泄内容，但 kb_id 会一路进
+    # **语义缓存的键**（(question, kb_id) 不按属主隔离），拿别人的 kb_id 能命中别人的
+    # 缓存答案（#64）。不属主一律 404，不泄漏它存不存在。
+    kb = db.get(KnowledgeBase, body.kb_id)
+    if not kb or kb.owner_id != user.id:
+        from fastapi import HTTPException
+        raise HTTPException(404, "知识库不存在")
 
     # 预算硬拦（票 29）：判定在**生成之前**、依据此前已累计的用量 —— 所以拦截只对**下一个**
     # 请求生效，已在进行中的流不被打断；管理员豁免（用量照记）。
@@ -73,9 +112,14 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
 
     prep = prepare(db, rt, user, body.kb_id, body.question, body.session_id)
 
-    if not _stream_guard.try_acquire(user.id):
+    uid = user.id      # 先取出来：收尾发生在请求作用域之外，那时 db 会话可能已经关了
+    token = _stream_guard.try_acquire(uid)
+    if token is None:
         from fastapi import HTTPException
         raise HTTPException(429, "并发对话过多，请稍后再试")
+
+    def _release_slot() -> None:
+        _stream_guard.release(uid, token)
 
     def gen():
         try:
@@ -86,9 +130,11 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
                 yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
             yield "data: [DONE]\n\n"
         finally:
-            _stream_guard.release(user.id)
+            _release_slot()          # 正常收尾 / 抛异常
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+    # 两条释放路径：生成器自己收尾（正常结束 / 抛错），以及响应 `__call__` 的 finally
+    # （客户端断连时同步生成器**不会被关闭**，这条才是保底的）。令牌让两条路幂等。
+    return _SlotReleasingStream(gen(), media_type="text/event-stream", on_close=_release_slot)
 
 
 @router.get("/sessions")

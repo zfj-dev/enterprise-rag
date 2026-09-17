@@ -9,6 +9,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterator
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -64,15 +65,21 @@ def _maybe_rewrite(llm: LLM, question: str, history: list[dict]) -> str:
 
 def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str | None) -> ChatSession:
     if session_id:
-        sess = db.get(ChatSession, session_id)
-        if sess:
-            return sess
-        # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上
-        sess = ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title="")
-        db.add(sess)
-        db.commit()
-        db.refresh(sess)
-        return sess
+        # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上。
+        # **查了没有就插** 是 check-then-act：同一条会话的第一句话并发进来时两边都查不到、
+        # 都去插，后插的撞 UNIQUE 直接 500。撞了就用已经插进去的那条。
+        for _ in range(2):
+            sess = db.get(ChatSession, session_id)
+            if sess:
+                return sess
+            db.add(ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title=""))
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()          # 另一条请求刚插进去 —— 下一轮取它的
+                continue
+            return db.get(ChatSession, session_id)
+        return db.get(ChatSession, session_id)
     sess = ChatSession(user_id=user.id, kb_id=kb_id, title="")
     db.add(sess)
     db.commit()
@@ -530,6 +537,7 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
         hit = rt.semantic_cache.get(prep.question, prep.kb_id)
         if hit:
             cache_hit = True
+    gen_usage: dict = {}
     if cache_hit:
         # 缓存命中：仍走"流式外观"——把答案切成小块逐条下发，前端逐段追加；禁止整块一次性插入
         answer = apply_no_source_no_claim(hit["answer"], prep._ccit)
@@ -540,7 +548,8 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
             time.sleep(0.01)
     else:
         chunks: list[str] = []
-        for piece in prep.llm.stream([{"role": "user", "content": prep.prompt}]):
+        for piece in prep.llm.stream([{"role": "user", "content": prep.prompt}],
+                                     usage=gen_usage):
             if prep.trace["ttft_ms"] is None:
                 # 首字延迟：从开始生成到吐出第一个增量
                 prep.trace["ttft_ms"] = (time.perf_counter() - t_generate) * 1000
@@ -550,9 +559,9 @@ def stream_answer(db: Session, rt: Runtime, prep: Prep, *,
             rt.semantic_cache.put(prep.question, prep.kb_id, "".join(chunks))
         answer = apply_no_source_no_claim("".join(chunks), prep._ccit)
 
-    # 把**本次生成**的 provider usage 立刻快照下来（票 27）：后面的引用校验与事实抽取都会调同一个
-    # 模型实例，`last_usage` 会被它们覆盖（甚至被后台线程清掉）—— 那时再读，记的就是别人的账了。
-    prep.trace["llm_usage"] = None if cache_hit else getattr(prep.llm, "last_usage", None)
+    # 本次生成的 provider usage 由**这次调用自己的桶**接住（票 27 / #64 批 3）。挂在模型实例上
+    # 就不是「马上读一下」能救的了：后面的引用校验、事实抽取、以及并发请求都会覆盖它。
+    prep.trace["llm_usage"] = None if cache_hit else (gen_usage or None)
 
     yield from _finish(db, rt, prep, answer, cache_hit=cache_hit, t_generate=t_generate)
 

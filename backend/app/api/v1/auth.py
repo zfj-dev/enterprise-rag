@@ -18,19 +18,36 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # 登录限流(单 worker 假设,进程内滑动窗口)
 _login_attempts: dict[str, list[float]] = {}
 _login_lock = threading.Lock()
+_LOGIN_WINDOW = 60.0
+# 这张表的键是**攻击者可控的用户名**：不清就是个只涨不跌的内存泄漏
+# （拿一万个随机用户名登录一万次就够了）。
+_LOGIN_MAX_KEYS = 4096
 
 
 def _login_allowed(username: str, limit: int) -> bool:
     """60 秒滑动窗口内允许 limit 次;超限返回 False。"""
     now = time.time()
     with _login_lock:
-        ts = [t for t in _login_attempts.get(username, []) if now - t < 60]
+        ts = [t for t in _login_attempts.get(username, []) if now - t < _LOGIN_WINDOW]
         if len(ts) >= limit:
             _login_attempts[username] = ts
             return False
         ts.append(now)
+        if len(_login_attempts) >= _LOGIN_MAX_KEYS and username not in _login_attempts:
+            _prune_login_attempts(now)
         _login_attempts[username] = ts
         return True
+
+
+def _prune_login_attempts(now: float) -> None:
+    """先清过期的窗口；还满就按「最后尝试时间」丢掉最旧的一半。调用方须已持 `_login_lock`。"""
+    for key in [k for k, v in _login_attempts.items()
+                if not v or now - v[-1] >= _LOGIN_WINDOW]:
+        _login_attempts.pop(key, None)
+    if len(_login_attempts) >= _LOGIN_MAX_KEYS:
+        stale = sorted(_login_attempts, key=lambda k: _login_attempts[k][-1])
+        for key in stale[: _LOGIN_MAX_KEYS // 2]:
+            _login_attempts.pop(key, None)
 
 
 @router.get("/health")

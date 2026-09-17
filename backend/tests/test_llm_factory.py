@@ -23,7 +23,7 @@ class StubLLM(LLM):
         self.tag = tag
         self.calls: list = []
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         self.calls.append(messages)
         yield self.tag
 

@@ -7,6 +7,7 @@
 用法:  cd backend && python evaluate_retrieval.py
 报告:  logs/retrieval-eval-report.log
 环境:  EMBEDDING_PROVIDER=bge 时才是真质量(FakeEmbedding 仅演示管线)。
+       EVAL_DOCS=甲.pdf,乙.pdf 时按多文档跑，每条题用黄金集里的 doc 字段认领自己的文档。
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ import time
 
 from app.eval_core import contains, embedding_label, normalize, run_retrieval_eval
 from app.eval_index import index_chunks
+from app.eval_setup import write_report
 
 BACKEND = os.path.dirname(os.path.abspath(__file__))
 
@@ -26,8 +28,13 @@ KB_ID, OWNER_ID = "eval_kb", "eval_owner"
 K_LIST = (3, 5, 10)  # 评估 hit-rate/recall/MRR 的 top-k
 
 
-def _index_doc(rt, path: str) -> list[dict]:
-    """解析→按页分块→只取 child→向量+BM25 入库。返回 child 块列表(含 id/content/page/type)。"""
+def _index_doc(rt, path: str, doc_id: str) -> list[dict]:
+    """解析→按页分块→只取 child→向量+BM25 入库。返回 child 块列表(含 id/content/page/type)。
+
+    `doc_id` 由调用方**按文档各不相同**地给：块 id 是 `{doc_id}_p{页}_{序}`，多份文档共用
+    同一个 doc_id 时 id 会完全重合，而向量库与 BM25 都是**按 id 覆盖**（`_data[id] = ...`）——
+    后一份直接把前一份盖掉，多文档评估的数字只剩最后一份（#64 批 4）。
+    """
     parsed = rt.parser.parse(path, os.path.basename(path))
     if parsed.metadata.get("error"):
         raise RuntimeError(f"解析失败: {parsed.metadata['error']}")
@@ -36,13 +43,13 @@ def _index_doc(rt, path: str) -> list[dict]:
     for pidx, page_text in enumerate(page_texts, start=1):
         if not page_text.strip():
             continue
-        for c in rt.chunker.chunk(page_text, doc_id="evaldoc", page_num=pidx):
+        for c in rt.chunker.chunk(page_text, doc_id=doc_id, page_num=pidx):
             if c["chunk_type"] == "child":
                 child_chunks.append({**c, "page_num": pidx})
 
     index_chunks(rt, [
         {"id": c["id"], "content": c["content"],
-         "metadata": {"kb_id": KB_ID, "owner_id": OWNER_ID, "doc_id": "evaldoc",
+         "metadata": {"kb_id": KB_ID, "owner_id": OWNER_ID, "doc_id": doc_id,
                       "doc_name": os.path.basename(path), "page_num": c["page_num"],
                       "content": c["content"]}}
         for c in child_chunks])
@@ -117,7 +124,6 @@ def main() -> None:
 
 
 def _main_body() -> None:
-    os.makedirs(os.path.dirname(REPORT), exist_ok=True)
     os.environ.setdefault("PARSER_USE_DOCLING", "false")
     from app.config import get_settings
     from app.core.container import build_runtime
@@ -131,14 +137,25 @@ def _main_body() -> None:
         "嵌入: %s | 文档数: %d" % (embedding_label(), len(docs)),
         "黄金集: %s" % GOLDEN,
     ]
+    # 黄金集用**文件名**（doc 字段）认领文档，重名就认不出哪份是哪份 —— 与其猜一份，
+    # 不如当场写「未跑」：数字记到错的那份文档上，比没有数字更坏。
+    names = [os.path.basename(p) for p in docs]
+    dup = sorted({n for n in names if names.count(n) > 1})
+    if dup:
+        lines += ["", "未跑：EVAL_DOCS 里有重名文件 %s。" % "、".join(dup),
+                  "  黄金集按文件名认领文档（doc 字段），重名时认不出指的是哪一份。先改名再跑。"]
+        write_report(REPORT, lines)
+        return
+
     rt = build_runtime()
 
     chunks_by_doc: dict[str, list[dict]] = {}
     t0 = time.time()
-    for path in docs:
+    for i, path in enumerate(docs, start=1):
         name = os.path.basename(path)
-        chunks_by_doc[name] = _index_doc(rt, path)
-        lines.append("索引 %s: %d child" % (name, len(chunks_by_doc[name])))
+        doc_id = "evaldoc_%d" % i          # 每份文档各自的 doc_id —— 共用会让块 id 相互覆盖
+        chunks_by_doc[name] = _index_doc(rt, path, doc_id)
+        lines.append("索引 %s: %d child (doc_id=%s)" % (name, len(chunks_by_doc[name]), doc_id))
     lines.append("索引耗时 %.1fs" % (time.time() - t0))
     lines.append("")
 
@@ -159,9 +176,7 @@ def _main_body() -> None:
                                  threshold=get_settings().min_relevance)
     lines.extend(metrics.to_lines())
 
-    with open(REPORT, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
-    print(REPORT)
+    write_report(REPORT, lines)
     try:
         print("\n".join(lines))
     except UnicodeEncodeError:

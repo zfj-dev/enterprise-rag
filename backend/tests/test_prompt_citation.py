@@ -38,7 +38,7 @@ def test_no_source_no_claim():
 
 
 class _FakeVerifyLLM:
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield '{"claims":[{"claim":"比亚迪2025年营业收入为803.96亿元","supported":true},{"claim":"这是不支持的论断","supported":false}]}'
 
 
@@ -61,12 +61,12 @@ def test_verify_claims_no_sources():
 # ---------- 覆盖率守门（票 B）----------
 
 class _BoomVerifyLLM:
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         raise RuntimeError("网络挂了")
 
 
 class _GarbageVerifyLLM:
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield "这不是 JSON"
 
 
@@ -101,7 +101,7 @@ def test_an_unparseable_verifier_reply_is_unverified_not_zero():
 
 
 class _ParaphrasingVerifyLLM:
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield '{"claims":[{"claim":"裁判自己缩写了这句话","supported":false}]}'
 
 

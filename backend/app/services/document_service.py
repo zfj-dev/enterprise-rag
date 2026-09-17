@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from app.core.container import Runtime
@@ -22,14 +24,65 @@ _PROGRESS: dict[str, int] = {}
 
 
 def _set_progress(doc_id: str, val: int) -> None:
-    _PROGRESS[doc_id] = val
+    """记进度。**终态不留档** —— 这张表只描述「本进程正在处理的」，
+    不清理就是个只涨不跌的字典（每个上传过的文档都留一条）。"""
+    if val >= 100 or val <= 0:
+        _PROGRESS.pop(doc_id, None)
+    else:
+        _PROGRESS[doc_id] = val
 
 
-def get_progress(doc_id: str) -> int:
-    """返回处理进度；非处理中（indexed/failed/不存在）返回 100/0。"""
+def get_progress(doc_id: str, status: str | None = None) -> int:
+    """处理进度。
+
+    内存表里没有时**不许一律报 100**：那只能说明「这个进程没在处理它」——
+    可能是重启前留下的 `processing`，此时报 100 会印出「处理中 100%」这种自相矛盾的东西。
+    按文档状态给：indexed 才是做完，其余一律 0。
+    """
     if doc_id in _PROGRESS:
         return _PROGRESS[doc_id]
-    return 100
+    return 100 if status == "indexed" else 0
+
+
+# 后台索引线程与「删除 / 覆盖文档」互斥。删除可能正好落在索引写入的中途：它删的时候
+# 这些还没写进去，于是删完内容又被写回来 —— 已删的文档仍然能被检索到（#64 批 2）。
+# 进门后各自**再确认一次文档还在不在**，光互斥是不够的。
+DOC_WRITE_LOCK = threading.RLock()
+
+
+def _doc_still_exists(doc_id: str) -> bool:
+    """用**独立 session** 问一句「这行还在吗」。
+
+    不用处理线程自己那个 session：它手里那个 `doc` 还挂在 identity map 上，
+    问不出真话（要么拿到旧对象，要么 ObjectDeletedError）。
+    """
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        return db.get(Document, doc_id) is not None
+    finally:
+        db.close()
+
+
+def _abandon_deleted_document(rt: Runtime, doc_id: str) -> None:
+    """处理途中文档被删了 —— 把我们已经写进去的**撤回**。
+
+    删除接口跑的时候这些还没入库，所以只有这里来得及清。不清的话，删掉的文档
+    会一直留在向量库 / BM25 / 关系库里被检索到，直到进程重启。
+    """
+    rt.vector_store.delete_by(doc_id=doc_id)
+    rt.bm25.remove_by(doc_id=doc_id)
+    from app.db.session import SessionLocal
+
+    db = SessionLocal()
+    try:
+        db.execute(delete(Chunk).where(Chunk.doc_id == doc_id))
+        db.commit()
+    except Exception as e:      # noqa: BLE001 —— 收拾残局失败只能记，不能把线程打死
+        logger.warning("清理已删文档的残留失败(%s): %s", doc_id, e)
+    finally:
+        db.close()
 
 
 def _index_units(rt: Runtime, child_units: list[dict], doc: Document) -> None:
@@ -86,12 +139,19 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
         import time as _t
         t0 = _t.time()
         _set_progress(doc.id, 70)
-        _index_units(rt, child_units, doc)
+        _index_units(rt, child_units, doc)      # 乐观写入：写完之后再确认文档还在不在
         print(f"[doc] {doc.filename}: embed+index {len(child_units)} chunks in {_t.time()-t0:.1f}s")
         _set_progress(doc.id, 95)
-        doc.chunk_count = len(child_units)
-        doc.status = "indexed"
-        db.commit()
+        with DOC_WRITE_LOCK:
+            if not _doc_still_exists(doc.id):
+                # 处理途中文档被删了。撤回刚写进去的东西，**不要**再去 commit `doc`
+                # （那行已经没了，commit 会抛 PendingRollbackError，而残留照样留在索引里）。
+                _abandon_deleted_document(rt, doc.id)
+                _set_progress(doc.id, 100)
+                return doc
+            doc.chunk_count = len(child_units)
+            doc.status = "indexed"
+            db.commit()
         _set_progress(doc.id, 100)
     except Exception as e:  # noqa
         print(f"[doc] {doc.filename} FAILED: {e}")
@@ -103,12 +163,37 @@ def process_document(db: Session, rt: Runtime, doc: Document) -> Document:
         try:
             d2 = db.get(Document, doc.id)
             if d2:
-                d2.status = "failed"
-                d2.error = str(e)
+                _mark_failed(d2, str(e))
                 db.commit()
         except Exception as e2:
             logger.warning("process_document 标记失败状态异常: %s", e2)
     return doc
+
+
+def _mark_failed(doc: Document, reason: str) -> None:
+    """标失败并把原因一起写上 —— 状态和原因成对出现，读的人才知道要不要重传。"""
+    doc.status = "failed"
+    doc.error = reason
+
+
+def fail_stale_processing(db: Session) -> int:
+    """把库里残留的 `processing` 标成 failed，返回改了几条 —— 启动时跑一次。
+
+    残留只可能来自**上一次进程**：后台线程随进程一起没了，没人会再来收尾这些文档。
+    而 `reindex_all` 只认 `indexed`，于是它们既检索不到、也不会被重跑，永远卡在「处理中」——
+    用户既等不到结果，也不知道要重传。如实标成失败并写明原因，才是这个状态该有的样子。
+
+    ⚠️ 这条假定**同一份库只有一个进程在写**（当前部署就是：`run_real.ps1` 与 Dockerfile 都没开
+    `--workers`）。多 worker 时每个 worker 都会跑一遍启动收尾，后起的会把别人**正在索引**的
+    文档标成失败；真要上多 worker，得改成按 worker 认领（例如加进程标识 / 心跳时间戳）。
+    """
+    rows = db.query(Document).filter(Document.status == "processing").all()
+    for d in rows:
+        _mark_failed(d, "服务重启时这份文档还在处理中，没能跑完 —— 请重新上传。")
+    if rows:
+        db.commit()
+        print(f"[doc] {len(rows)} 份文档上次没处理完，已标为失败（等重传）")
+    return len(rows)
 
 
 def reindex_all(db: Session, rt: Runtime) -> int:
@@ -133,8 +218,6 @@ def reindex_all(db: Session, rt: Runtime) -> int:
     rt.bm25.add(bm25_entries)
     return len(chunks)
 
-
-import threading
 
 _processing_lock = threading.Lock()  # 串行处理：避免并发上传时 bm25/向量库/GPU 争用
 

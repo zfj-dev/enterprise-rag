@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-from app.core.llm import ToolCall
+from app.core.llm import ToolCall, put_usage
 from app.core.usage import (SOURCE_LOCAL, SOURCE_PROVIDER, SOURCE_UNAVAILABLE, build_usage)
 from tests.helpers import register_and_kb
 
@@ -111,20 +111,25 @@ def test_the_streaming_call_asks_for_usage_and_parses_the_final_chunk(monkeypatc
     monkeypatch.setattr(httpx, "Client", FakeClient)
     llm = CloudLLM(base_url="https://x/v1", api_key="k", model="m")
 
-    assert "".join(llm.stream([{"role": "user", "content": "hi"}])) == "你好"
-    assert llm.last_usage == {"prompt_tokens": 11, "completion_tokens": 2}
+    box: dict = {}
+    assert "".join(llm.stream([{"role": "user", "content": "hi"}], usage=box)) == "你好"
+    assert box == {"prompt_tokens": 11, "completion_tokens": 2}
     assert sent[0]["stream_options"] == {"include_usage": True}     # 不主动要，provider 不会给
 
 
-def test_a_failed_call_clears_the_previous_usage(monkeypatch):
-    """没配 Key 时不该把**上一次**的 usage 留在身上 —— 那会被记到这一次头上。"""
+def test_a_call_that_got_nothing_leaves_the_bucket_empty(monkeypatch):
+    """拿不到口就像实地留空 —— 空桶就是「这次没有」，记账自会回退本地口径。
+
+    （以前要把实例上的 `last_usage` 显式清掉，否则上一次的数会被记到这一次头上；
+    桶是按次给的，这件事结构上就不会发生了 —— #64 批 3）
+    """
     from app.core.llm import CloudLLM
 
     llm = CloudLLM(base_url="https://x/v1", api_key="", model="m")
-    llm.last_usage = {"prompt_tokens": 99, "completion_tokens": 99}
+    box: dict = {}
 
-    assert "".join(llm.stream([{"role": "user", "content": "hi"}]))
-    assert llm.last_usage is None
+    assert "".join(llm.stream([{"role": "user", "content": "hi"}], usage=box))
+    assert box == {}
 
 
 # ---------- 接进问答链路 ----------
@@ -137,11 +142,10 @@ class UsageLLM:
     def __init__(self, usage=None, model="qwen-plus"):
         self.model = model
         self._usage = usage
-        self.last_usage = None
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         yield "答案"
-        self.last_usage = self._usage
+        put_usage(usage, self._usage)
 
 
 def _setup(client, name: str, *, llm=None, counter=None):
@@ -244,12 +248,14 @@ def test_the_agent_sums_the_provider_usage_over_steps():
             self.n = 0
             self.last_usage = None
 
-        def stream(self, messages):
+        def stream(self, messages, usage=None):
             yield ""
 
-        def chat_with_tools(self, messages, tools=None):
+        def chat_with_tools(self, messages, tools=None, usage=None):
             self.n += 1
-            self.last_usage = {"prompt_tokens": 10, "completion_tokens": 5}
+            put_usage(usage, {"prompt_tokens": 10, "completion_tokens": 5})
+            # 同一个实例上紧接着的别的调用 —— 去读实例字段的话，这里就会把别人的账算进来
+            self.last_usage = {"prompt_tokens": 999, "completion_tokens": 999}
             if tools:
                 return {"content": "", "tool_calls": [ToolCall(id="c1", name="Calculator",
                                                                arguments={"expression": "1+1"})]}
@@ -261,7 +267,8 @@ def test_the_agent_sums_the_provider_usage_over_steps():
     got = run_agent("1+1", llm=StepLLM(), transport=InProcessTransport(ToolRegistry(tools=[tool])),
                     max_steps=2)
 
-    assert got["trace"]["llm_usage"]["prompt_tokens"] == 30      # 三轮各 10
+    # 三轮各 10/5 —— 每一步都从**自己那个桶**里取，不是从实例上被人改过的字段取
+    assert got["trace"]["llm_usage"]["prompt_tokens"] == 30
     assert got["trace"]["llm_usage"]["completion_tokens"] == 15
 
 
@@ -277,18 +284,17 @@ class TwoPhaseLLM:
 
     def __init__(self):
         self.model = "qwen-plus"
-        self.last_usage = None
 
-    def stream(self, messages):
+    def stream(self, messages, usage=None):
         content = messages[-1]["content"]
         if "查询改写助手" in content:                      # 问题改写（prepare 里先跑）
-            self.last_usage = {"prompt_tokens": 5, "completion_tokens": 2}
+            put_usage(usage, {"prompt_tokens": 5, "completion_tokens": 2})
             yield content.rsplit("当前问题：", 1)[-1].strip()
         elif "【用户问题】" in content:                    # 真正的生成
-            self.last_usage = {"prompt_tokens": 100, "completion_tokens": 20}
+            put_usage(usage, {"prompt_tokens": 100, "completion_tokens": 20})
             yield "答案"
         else:                                              # 引用校验 / 事实抽取等
-            self.last_usage = {"prompt_tokens": 999, "completion_tokens": 999}
+            put_usage(usage, {"prompt_tokens": 999, "completion_tokens": 999})
             yield "{}"
 
 
@@ -359,6 +365,55 @@ def test_a_provider_that_rejects_stream_options_still_answers(monkeypatch):
     monkeypatch.setattr(httpx, "Client", FakeClient)
     llm = CloudLLM(base_url="https://x/v1", api_key="k", model="m")
 
-    assert "".join(llm.stream([{"role": "user", "content": "hi"}])) == "好"
+    box: dict = {}
+    assert "".join(llm.stream([{"role": "user", "content": "hi"}], usage=box)) == "好"
     assert attempts == [True, False]          # 先带、被拒、去掉再来
-    assert llm.last_usage is None             # 这次拿不到账单口径 —— 记账会回退本地
+    assert box == {}                          # 这次拿不到账单口径 —— 记账会回退本地
+
+
+# ---------- 账单口径属于「这一次调用」（#64 批 3）----------
+
+def test_the_recorded_usage_is_the_one_this_call_produced(client):
+    """生成之后还会再调同一个模型实例（引用校验、事实抽取）。
+
+    口径挂在实例上的话，那条后续调用会把字段覆盖掉 —— 这次问答就记了别人的账。
+    桶由调用方自己持有，就没有这条缝。
+    """
+    from app.services import chat_service
+
+    class DecoyAfterMeLLM:
+        """我这次 120/30；但同一个实例上紧接着又有一次调用写了 999/999。"""
+
+        is_fake = False
+        model = "qwen-plus"
+
+        def __init__(self):
+            self.last_usage = None
+
+        def stream(self, messages, usage=None):
+            yield "答案"
+            put_usage(usage, {"prompt_tokens": 120, "completion_tokens": 30})
+            self.last_usage = {"prompt_tokens": 999, "completion_tokens": 999}
+
+    _, uid, kb, user, db, rt = _setup(client, "usage_own_call", llm=DecoyAfterMeLLM())
+    try:
+        chat_service.answer(db, rt, user, kb, "文档里写了什么？")
+        rows = rt.usage_store.list(uid)
+    finally:
+        db.close()
+
+    assert (rows[0]["input_tokens"], rows[0]["output_tokens"]) == (120, 30)
+
+
+def test_each_call_gets_its_own_empty_bucket():
+    """`usage` 由调用方给：没给桶就不必记（调用方不需要这个数），给了就是干净的一个新桶。"""
+    from app.core.llm import FakeLLM
+
+    llm = FakeLLM()
+    box: dict = {}
+    # 先灌一个旧值，确认这次调用是**覆盖**而不是往上加
+    box.update({"prompt_tokens": 1, "completion_tokens": 1})
+    "".join(llm.stream([{"role": "user", "content": "甲乙"}], usage=box))
+
+    assert box["prompt_tokens"] == 2          # 本轮 prompt 的字数
+    assert "simulated" in box                  # 假模型的标记还在，记账那边据此标「模拟口径」
