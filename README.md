@@ -45,6 +45,11 @@ python -m uvicorn app.main:app --reload --port 8000
 | 启动 | `docker compose up -d` | `scripts\run_real.ps1` | `scripts\run_cloud.ps1` |
 | 需要 | 无 | GPU + `requirements-real.txt` + API Key | 私有 GPU 节点 + API Key |
 
+> ②③ 的启动脚本都有前置：先跑一次 `scripts\setup_real.ps1`（建 venv + 装 torch/bge 那一套），
+> 再跑 `scripts\run_real.ps1`。而 **`run_cloud.ps1` 目前只是个模板**（`run_cloud.ps1.example`）——
+> 里面要填你自己的私有推理节点地址与 DashScope Key，所以**先复制成 `run_cloud.ps1` 再改**，
+> 别把 Key 提交上来。
+
 形态之间只切环境变量（见 [.env.example](.env.example)）：
 `USE_REAL` / `EMBEDDING_PROVIDER` / `RERANKER_PROVIDER` / `LLM_PROVIDER` / `VECTOR_STORE`。
 
@@ -104,11 +109,13 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 
 - SSE 流式输出，逐 token 打字效果。
 - **no source → no claim**：无来源不得断言；生成后**逐句 LLM 引用校验**（该论断是否真被来源支撑），聚合出**引用覆盖率**。
+  一句依据都推不出来的回答会**直接换成拒答** —— 覆盖率不只是日志里的一个数，它是一条防线。
 - 引用可点击 → 右栏**原文预览**：按页渲染全文、滚动定位到引用页、命中片段高亮闪烁。
 
 **工程**
 
 - **异步上传**：`POST /documents` 秒回 `processing`，后台线程串行解析 + 嵌入（大文档不阻塞浏览器），前端轮询状态至 `indexed` / `failed`。
+- **重启收尾**：启动时把上一次进程留下的 `processing` 标成 `failed` 并写明「请重新上传」—— 后台线程已随进程消失，留着那个状态只会永远显示「处理中」，用户既等不到结果也不知道要重传。
 - **语义缓存**：bge 相似度 > 0.92 命中（内存版默认，`REDIS_URL` 可切 Redis）；**含精确编号的问题跳过缓存**，否则「表 3.1」与「表 3.3」向量高度相似会互相串台。
 - **鉴权与限流**：JWT + RBAC（`admin` / `uploader` / `viewer`）、登录限流、**SSE 每用户并发上限**。
 - **可观测**：per-query 全链路 trace + 调试面板（`/api/v1/debug/query`）；全局异常与前端 JS 错误落盘 `logs/error.log`。
@@ -127,7 +134,7 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 
 ## 评测
 
-三套脚本，全部「跑一条命令 → 读报告文件」，不需要人工比对：
+这些脚本全部「跑一条命令 → 读报告文件」，不需要人工比对：
 
 | 脚本 | 测什么 | 报告 |
 |---|---|---|
@@ -135,9 +142,9 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 | [backend/evaluate_retrieval.py](backend/evaluate_retrieval.py) | **离线检索**：混合 / 纯向量 / 纯 BM25 的 hit@k、recall@k、MRR + 负样本拒答 | `backend/logs/retrieval-eval-report.log` |
 | [backend/evaluate_latency.py](backend/evaluate_latency.py) | **并发延迟**：N 并发同时打 `/chat/stream`，检索 / 重排 / 生成分三段 + TTFT（含检索与重排） | `backend/logs/latency-report.log` |
 | [backend/evaluate_rgb.py](backend/evaluate_rgb.py) | **RGB 中文四能力**：噪声鲁棒 / 否定拒绝 / 信息集成 / 反事实鲁棒 | `backend/logs/rgb-eval-report.log` |
-| [backend/evaluate_agent.py](backend/evaluate_agent.py) | **代理链路**：开了代理开关后事实命中 / 延迟的**变化** | `backend/logs/agent-eval-report.log` |
-| [backend/evaluate_guardrail.py](backend/evaluate_guardrail.py) | **压缩质量护栏**：压缩前后同跑，事实命中不下降 | `backend/logs/guardrail-report.log` |
-| [backend/evaluate_memory.py](backend/evaluate_memory.py) | **跨会话召回**：记忆注入的示例与覆盖率 | `backend/logs/memory-eval-report.log` |
+| [backend/evaluate_agent.py](backend/evaluate_agent.py) | **代理链路**：开了代理开关后事实命中 / 延迟的**变化** | `backend/logs/agent-vs-baseline.log` |
+| [backend/evaluate_guardrail.py](backend/evaluate_guardrail.py) | **压缩质量护栏**：压缩前后同跑，事实命中不下降 | `backend/logs/compression-guardrail.log` |
+| [backend/evaluate_memory.py](backend/evaluate_memory.py) | **跨会话召回**：记忆注入的示例与覆盖率 | `backend/logs/memory-cross-session.log` |
 | [backend/selftest.py](backend/selftest.py) | **全链路自检**：health / 登录 / 建库 / 上传 / 异步入库 / 真实 LLM / 引用 / 反馈 / 调试 / 清理 | `backend/logs/selftest-report.log` |
 
 [backend/evaluate_all.py](backend/evaluate_all.py)（`scripts\evaluate_all.ps1`）把它们合成**一页报告** → `backend/logs/eval-summary.log`，开头附配置快照与目标线。
@@ -170,7 +177,7 @@ FastAPI (无状态)  -- 鉴权 / 知识库 / 文档 / 问答 / 反馈 / 调试 /
 
 ```bash
 cd backend
-python -m pytest tests/ -q        # 601 passed, 3 skipped（单元 + API 集成 + 回归契约，约 150s）
+python -m pytest tests/ -q        # 760 passed, 3 skipped（单元 + API 集成 + 回归契约，约 3 分钟）
 ```
 
 3 项 skip 对应明确未实现的功能：refresh token、登出黑名单、pgvector（需 `TEST_PG_URL` 指向真实库）。
@@ -183,7 +190,8 @@ npm install && npx playwright install
 npm run e2e
 ```
 
-也可用 `make test` / `make test-regression` / `make test-e2e`。
+也可用 `make test` / `make test-regression`。注意 `make test-e2e` 跑的是仓库根 `e2e/` 那套
+**接口冒烟与扫描**，不是 Playwright —— 浏览器那套用上面的 `npm run e2e`。
 
 ---
 
@@ -230,21 +238,28 @@ enterprise-rag/
 ├── backend/
 │   ├── app/
 │   │   ├── api/v1/        # auth / knowledge / documents / chat / feedback / debug / metrics
-│   │   ├── core/          # parser / chunker / embedding / retriever / reranker / llm
+│   │   │                  #   / memory / llm（自带 Key 的配置与能力回显）
+│   │   ├── core/          # parser / chunker / embedding / retriever / reranker / llm / agent
 │   │   │                  #   / citation / cache / prompt / vector_store / bm25 / container
+│   │   │                  #   / context（压缩）/ memory / tools / usage / cost / pricing
+│   │   │                  #   / quota / byok / capability / balance / ssrf / tokenizer
+│   │   ├── mcp/           # 工具挂成 MCP server（stdio / 可选 HTTP）
+│   │   ├── eval_*.py      # 评测核心（判据 / 对比 / 裁判 / 索引），脚本与单测共用
 │   │   ├── models/        # SQLAlchemy ORM 实体
 │   │   ├── services/      # document_service / chat_service
 │   │   └── db/  utils/  config.py  main.py
-│   ├── data/              # 黄金集（样本文档由 scripts/gen_sample_docs.py 生成）
+│   ├── data/              # 黄金集（样本文档由 backend/scripts/gen_sample_docs.py 生成）
+│   ├── scripts/           # gen_sample_docs.py（造样本文档）
 │   ├── tests/             # pytest（单元 + API 集成 + 回归契约）
-│   ├── evaluate.py  evaluate_retrieval.py  selftest.py  verify_*.py  diagnose_*.py
+│   ├── selftest.py  verify_*.py  diagnose_*.py   # 自检 / 真机验证 / 排障
+│   ├── evaluate*.py       # 评测脚本（端到端 / 检索 / 延迟 / RGB / 代理 / 护栏 / 记忆）
 │   └── requirements.txt  requirements-real.txt  requirements-prod.txt  Dockerfile
 ├── frontend/              # index.html 单文件 UI + e2e/ (Playwright)
 ├── deploy/                # docker-compose.yml / .prod.yml / Caddyfile
 ├── inference_service/     # 私有 GPU 推理节点
 ├── scripts/               # PowerShell 一键脚本（setup_real / run_real / run_cloud / evaluate ...）
 ├── e2e/                   # 接口扫描与端到端冒烟
-├── docs/                  # ROADMAP 等
+├── docs/                  # ROADMAP / specs（6 份设计）/ tickets（垂直切片票）/ agents（流程约定）
 └── CONTEXT.md  CLAUDE.md  # 领域词汇表 / 项目记忆
 ```
 
@@ -256,7 +271,7 @@ enterprise-rag/
 - **为什么 pgvector 而不是 Milvus？** 单机、<1000 万向量、且已在跑 Postgres 时，pgvector 零新增基建、一套备份。保留 `VectorStore` 适配层，规模化后再按接口切 Milvus / Qdrant —— **做对取舍比堆基建更体现工程能力**。
 - **为什么核心链路不用 LangChain？** 高频路径（检索 / 重排 / 生成）用原生 SDK，抽象透明、生产可排障；只在需要跨多工具编排时才参考图式编排思想。
 - **为什么异步不用 Celery？** 单机文档量下后台线程足够，省掉 broker / worker / DLQ 三件套；留了换队列的抽象。
-- **砍掉过度设计**：GraphRAG / 多模态 / Agentic / 多租户 —— 等到**有失败模式数据支撑**才往上爬（见 [docs/ROADMAP.md](docs/ROADMAP.md)）。
+- **砍掉过度设计**：GraphRAG 大改 / 多模态 / 多代理 / 微调 / CRUD-RAG —— 等到**有失败模式数据支撑**才往上爬（见 [docs/ROADMAP.md](docs/ROADMAP.md) 的「明确不做」）。单代理 ReAct 已经做了，不在这一列。
 
 ---
 
