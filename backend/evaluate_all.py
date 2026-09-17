@@ -121,6 +121,24 @@ def _target_lines(report) -> list:
     return out
 
 
+def _slim(name: str, body: list, log_path: str) -> list:
+    """一页报告里的那一段：标题 + 瘦身后的正文 + 「哪去了」的说明。
+
+    **逐题证据不往一页里抄**：那段（标记见 `app.eval_core.strip_detail`）在各段自己的报告
+    文件里读才有意义，抄进来一页就变成几百行、没人看。结论与口径一个字不动，只在末了写明
+    略去多少行、去哪看。标记不成对时 `strip_detail` 原样奉还 —— 宁可长，也别悄悄吃掉内容。
+    """
+    from app.eval_core import strip_detail
+
+    slim = strip_detail(body)
+    out = ["", "=== %s ===" % name]
+    out.extend(slim)
+    if len(slim) < len(body):
+        out.append("（上面略去 %d 行逐题证据 —— 它们在 %s 里）"
+                   % (len(body) - len(slim), log_path))
+    return out
+
+
 def _section(name: str, main_fn, log_path: str) -> list:
     """跑一段（`main_fn` 是个可调用对象），收的是它自己落盘的报告 —— 口径只在那一处。"""
     out = ["", "=== %s ===" % name]
@@ -140,8 +158,8 @@ def _section(name: str, main_fn, log_path: str) -> list:
         out.append("跑完了但没有落盘报告（%s）" % log_path)
         return out
     with open(log_path, encoding="utf-8") as f:
-        out.extend(f.read().splitlines())
-    return out
+        body = f.read().splitlines()
+    return _slim(name, body, log_path)
 
 
 def main() -> None:
@@ -164,13 +182,19 @@ def main() -> None:
     else:
         try:
             report, upload = evaluate.run_online()
-            gen = ["", "=== 生成层指标 ===",
-                   "黄金集: %s" % evaluate.GOLDEN, "被评文档: %s" % evaluate.DOC,
-                   evaluate._upload_line(upload),      # 同一份格式只在 evaluate.py 里写
-                   ]
-            gen.extend(evaluate._rerank_line(report))   # 同一份文案只在 evaluate.py 里写
-            gen.append("")
-            gen.extend(report.to_lines())
+            body = ["黄金集: %s" % evaluate.GOLDEN, "被评文档: %s" % evaluate.DOC,
+                    evaluate._upload_line(upload),      # 同一份格式只在 evaluate.py 里写
+                    ]
+            body.extend(evaluate._rerank_line(report))   # 同一份文案只在 evaluate.py 里写
+            body.append("")
+            body.extend(report.to_lines())
+            # 这一段也**落自己的盘**：以前只有 evaluate.py 的 main() 会写这个文件，跑一页报告
+            # 时它根本没被更新 —— 于是「削掉的明细去哪看」指向的是一份上一次单独跑的旧数字。
+            # 落盘的那份带个标题（`evaluate.py main()` 写出来也长这样），一页报告里不加 ——
+            # 它已经有「=== 生成层指标 ===」这个段落标题了，再来一行是同义重复。
+            with open(evaluate.REPORT, "w", encoding="utf-8") as f:
+                f.write("\n".join(["=== RAG 黄金集评估报告 ==="] + body) + "\n")
+            gen = _slim("生成层指标", body, evaluate.REPORT)
         except Exception as e:   # noqa: BLE001 —— 服务没起也不该让整页报告消失
             gen = ["", "=== 生成层指标 ===",
                    "未跑：%s: %s（生成层与延迟都要服务在跑）" % (type(e).__name__, e)]

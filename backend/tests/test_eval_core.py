@@ -558,3 +558,59 @@ def test_a_refusal_with_real_sources_is_not_flagged():
     r = Report(items=[_item(negative=True, refused=True, source_count=3)])
 
     assert "一条来源都没检索到" not in chr(10).join(r.to_lines())
+
+
+# ---------- 明细区标记（一页报告只取结论 + 口径）----------
+
+def _generation_report():
+    from app.eval_core import Report
+    return Report(items=[_item(question="Q1", expect="甲", answer="甲", fact_hit=True),
+                         _item(question="Q2", expect="乙", answer="丙", fact_hit=False)])
+
+
+def test_the_generation_report_marks_its_per_item_evidence():
+    """逐题证据要有一对显式标记 —— 一页报告靠它划界，不靠猜行形状。"""
+    from app.eval_core import DETAIL_BEGIN, DETAIL_END
+
+    lines = _generation_report().to_lines()
+
+    assert lines.count(DETAIL_BEGIN) == 1 and lines.count(DETAIL_END) == 1
+    assert lines.index(DETAIL_BEGIN) < lines.index(DETAIL_END)
+    # 逐条那几行确实在标记之间（结论行不在）
+    body = lines[lines.index(DETAIL_BEGIN) + 1:lines.index(DETAIL_END)]
+    assert any("[FAIL] Q:Q2" in ln for ln in body)
+    assert any(ln.startswith("结果: ") for ln in lines)
+    assert not any(ln.startswith("结果: ") for ln in body)
+
+
+def test_strip_detail_keeps_the_conclusions_and_drops_only_the_evidence():
+    from app.eval_core import strip_detail
+
+    lines = _generation_report().to_lines()
+    slim = strip_detail(lines)
+
+    assert len(slim) < len(lines)
+    assert any(ln.startswith("结果: ") for ln in slim)          # 结论还在
+    assert not any("[FAIL] Q:Q2" in ln for ln in slim)           # 逐题证据没了
+    assert not any("答案前90字" in ln for ln in slim)
+
+
+def test_unpaired_markers_hand_the_lines_back_untouched():
+    """标记没成对就原样奉还 —— 宁可长，也别悄悄吃掉一段内容。"""
+    from app.eval_core import DETAIL_BEGIN, strip_detail
+
+    lines = ["结论", DETAIL_BEGIN, "证据"]
+    assert strip_detail(lines) == lines
+
+
+def test_the_retrieval_report_marks_its_per_item_evidence():
+    from app.eval_core import DETAIL_BEGIN, DETAIL_END, run_retrieval_eval
+
+    m = run_retrieval_eval([{"question": "Q1", "expect": "甲", "gold_ids": {"g1"}}],
+                           lambda q: {"ranks": {"hybrid": ["g1"]}, "top1": 0.9}, ks=(3,))
+    lines = m.to_lines()
+
+    assert lines.count(DETAIL_BEGIN) == 1 and lines.count(DETAIL_END) == 1
+    slim = __import__("app.eval_core", fromlist=["x"]).strip_detail(lines)
+    assert any("hybrid" in ln for ln in slim)          # 指标表还在
+    assert not any(ln.startswith("[OK] ") for ln in slim)

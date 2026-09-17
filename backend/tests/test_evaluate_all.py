@@ -288,3 +288,56 @@ def test_the_banner_sits_above_the_first_number(tmp_path, monkeypatch):
 
     assert "不代表回答质量" in text
     assert text.index("不代表回答质量") < text.index("=== 目标线")
+
+
+def test_the_page_drops_the_per_item_evidence_and_points_at_the_file(tmp_path):
+    """一页报告不把逐题证据再抄一遍 —— 明细本来就在各段自己的报告里，重复几百行就没人看了。"""
+    from app.eval_core import DETAIL_BEGIN, DETAIL_END
+
+    log = tmp_path / "sub.log"
+
+    def fake_main():
+        log.write_text(chr(10).join(["结论 100%", DETAIL_BEGIN, "[FAIL] Q:甲", DETAIL_END, "尾注"]),
+                       encoding="utf-8")
+
+    out = chr(10).join(evaluate_all._section("某段", fake_main, str(log)))
+
+    assert "结论 100%" in out and "尾注" in out          # 结论与口径一个字不少
+    assert "[FAIL] Q:甲" not in out                       # 逐题证据不重复
+    assert "略去" in out and str(log) in out              # 但要说清楚它去哪了
+
+
+def test_a_section_without_markers_is_taken_as_is(tmp_path):
+    """没标明细的段（延迟这种本来就短的）原样带过来，不许被削。"""
+    log = tmp_path / "short.log"
+
+    def fake_main():
+        log.write_text("分段 P50 P95" + chr(10) + "检索 99 139", encoding="utf-8")
+
+    out = chr(10).join(evaluate_all._section("某段", fake_main, str(log)))
+
+    assert "分段 P50 P95" in out and "检索 99 139" in out
+    assert "略去" not in out
+
+
+def test_the_generation_section_also_lands_in_its_own_file(tmp_path, monkeypatch):
+    """生成层的落盘一直是 `evaluate.py` 自己 `main()` 干的 —— 跑一页报告时那份文件根本没被更新。
+
+    于是「一页里削掉的明细去哪看」就成了空头支票：文件里是上一次单独跑的旧数字。
+    现在这一段也落盘（明细留在里面），摘要只取结论。
+    """
+    rep = Report(items=[_item(True), _item(False)])
+    monkeypatch.setattr(evaluate, "run_online",
+                        lambda *a, **k: (rep, {"status": "indexed", "chunk_count": 1, "page_count": 1}))
+    monkeypatch.setattr(evaluate, "GOLDEN", "g.json")
+    monkeypatch.setattr(evaluate, "DOC", "d.pdf")
+    gen_log = tmp_path / "gen.log"
+    monkeypatch.setattr(evaluate, "REPORT", str(gen_log))
+    _stub_sections(monkeypatch, tmp_path)
+
+    text = _run(monkeypatch, tmp_path)
+
+    detail = gen_log.read_text(encoding="utf-8")
+    assert "[FAIL] Q:Q" in detail                 # 逐题证据落在这份里
+    assert "[FAIL] Q:Q" not in text               # 一页报告里不重复
+    assert str(gen_log) in text                   # 并且指了路
