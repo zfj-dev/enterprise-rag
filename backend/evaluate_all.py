@@ -33,6 +33,32 @@ TARGETS = (
 )
 
 
+# 三个「假模型」开关与它们在报告里的叫法 —— 报告要说人话，就得有个中文名
+_FAKE_KEYS = (("llm_provider", "LLM"), ("embedding_provider", "嵌入"),
+              ("reranker_provider", "重排"))
+
+
+def _demo_banner() -> list:
+    """演示档就把话说在前面：这些数字说的是链路，不是质量。
+
+    假模型（FakeLLM）对任何问题都只回同一段固定文本 —— 事实命中率天然是 0、拒答率也是 0。
+    不点破的话，「答案含期望事实 0% [未达标]」会被当成真实结果读（生成层的 RAGAS 段也只是
+    写「未接裁判」，没有把原因归到「假模型」上）。**谁假就说谁**，别只写一句笼统的。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    fake = ["%s=%s" % (name, getattr(s, key, "")) for key, name in _FAKE_KEYS
+            if str(getattr(s, key, "")).lower() == "fake"]
+    if not fake:
+        return []
+    return ["⚠️ 本次跑的是**演示档**：%s。" % "、".join(fake),
+            "   假模型给的是固定文本 —— 这些数字只证明链路跑得通，**不代表回答质量**"
+            "（事实命中率天然为 0，拒答率同理）。",
+            "   要拿可比数字，按 README 配真实模式（托管嵌入或本机 GPU + 云端 LLM）再跑。",
+            ""]
+
+
 def _config_snapshot() -> list:
     """配置快照：模型 / 开关 / 关键参数 —— 没有它，两份报告的数字没法比。"""
     from app.config import get_settings
@@ -127,8 +153,9 @@ def main() -> None:
     skip = {s.strip() for s in os.environ.get("EVAL_SKIP", "").split(",") if s.strip()}
     lines = ["=== RAG 评测一页报告 ===",
              "生成时间: %s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-             "",
-             "=== 配置快照 ==="]
+             ""]
+    lines += _demo_banner()          # 排在**任何数字之前** —— 排在后面就等于没说
+    lines += ["=== 配置快照 ==="]
     lines.extend(_config_snapshot())
 
     report = None

@@ -239,3 +239,52 @@ def test_a_stale_report_from_a_previous_run_is_not_left_behind(tmp_path, monkeyp
     assert any("未跑" in line for line in out)
     assert not stale.exists()          # 旧的那份不许留着骗人
 
+
+
+# ---------- 演示档要说清楚「这些数字不是质量」（#64 批 3 复核）----------
+
+def test_a_demo_run_says_up_front_that_the_numbers_are_not_about_quality(monkeypatch):
+    """假模型跑出来的 0% 与 [未达标] 说的是「链路通不通」，不是回答质量。
+
+    没有这句，读者（尤其是拿到仓库的面试官）会把「答案含期望事实 0%」当成真实结果 ——
+    假模型对任何问题都只给同一段固定文本，命中率天然是 0。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_provider", "fake")
+    monkeypatch.setattr(s, "embedding_provider", "fake")
+    monkeypatch.setattr(s, "reranker_provider", "fake")
+
+    text = "\n".join(evaluate_all._demo_banner())
+
+    assert "演示" in text and "不代表回答质量" in text
+    for name in ("LLM=fake", "嵌入=fake", "重排=fake"):
+        assert name in text               # 谁假就说谁，别只写一句笼统的
+
+
+def test_a_real_run_gets_no_banner(monkeypatch):
+    """全是真的就别加这句 —— 提示一多就成了噪音。"""
+    from app.config import get_settings
+
+    s = get_settings()
+    monkeypatch.setattr(s, "llm_provider", "dashscope")
+    monkeypatch.setattr(s, "embedding_provider", "bge")
+    monkeypatch.setattr(s, "reranker_provider", "bge")
+
+    assert evaluate_all._demo_banner() == []
+
+
+def test_the_banner_sits_above_the_first_number(tmp_path, monkeypatch):
+    """它得排在**任何数字之前** —— 排在后面就等于没说。"""
+    rep = Report(items=[_item(True)])
+    monkeypatch.setattr(evaluate, "run_online",
+                        lambda *a, **k: (rep, {"status": "indexed", "chunk_count": 1, "page_count": 1}))
+    monkeypatch.setattr(evaluate, "GOLDEN", "g.json")
+    monkeypatch.setattr(evaluate, "DOC", "d.pdf")
+    _stub_sections(monkeypatch, tmp_path)
+
+    text = _run(monkeypatch, tmp_path)
+
+    assert "不代表回答质量" in text
+    assert text.index("不代表回答质量") < text.index("=== 目标线")
