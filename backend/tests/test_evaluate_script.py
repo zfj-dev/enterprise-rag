@@ -9,6 +9,10 @@ import json
 import evaluate
 
 
+# 真实服务的每条流末尾都发它 —— 假对象要像真的（评测靠它判断「这条流跑完了」）
+DONE = chr(10) + chr(10) + "data: [DONE]" + chr(10) + chr(10)
+
+
 class _Resp:
     def __init__(self, payload=None, text="", status_code=200):
         self._payload = payload
@@ -32,7 +36,7 @@ class _FakeClient:
         if url.endswith("/auth/login"):
             return _Resp({"access_token": "t"})
         if url.endswith("/chat/stream"):
-            return _Resp(text='data: {"type": "delta", "text": "甲"}')
+            return _Resp(text='data: {"type": "delta", "text": "甲"}' + DONE)
         if url.startswith("/api/v1/knowledge"):
             return _Resp({"id": "kb1"})
         if url.startswith("/api/v1/documents"):
@@ -80,7 +84,7 @@ def test_answer_fn_asks_the_running_service():
 
         def post(self, url, headers=None, json=None):
             self.calls.append((url, json))
-            return _Resp(text='data: {"type": "delta", "text": "甲"}')
+            return _Resp(text='data: {"type": "delta", "text": "甲"}' + DONE)
 
     c = C()
     assert evaluate._answer_fn(c, "kb1", {})("问")["answer"] == "甲"
@@ -132,7 +136,7 @@ def test_the_multi_turn_run_keeps_every_question_in_one_session():
 
         def post(self, url, headers=None, json=None):
             self.calls.append(json)
-            return _Resp(text='data: {"type": "delta", "text": "甲"}')
+            return _Resp(text='data: {"type": "delta", "text": "甲"}' + DONE)
 
     c = C()
     evaluate._answer_fn(c, "kb1", {}, "eval-multi-turn")("问")
@@ -209,3 +213,29 @@ def test_a_upload_that_did_not_land_aborts_the_section(monkeypatch):
         ev.run_online()
 
     assert "没入库" in str(e.value) and "字体表缺失" in str(e.value)
+
+
+def test_a_stream_that_breaks_mid_way_is_not_counted_as_a_miss():
+    """状态码 200、但**流中途断了**（比如生成模型没权限）—— 那一次不作数，不能记成「没命中」。
+
+    实测踩过：生成模型换成 403 的模型后，每问都以 200 开头、吐完 sources 就断，
+    `_parse_sse` 只拿到 answer=""，报告会印出一个**假的 0%** —— 与 #64 批 4 修的那条同一类。
+    """
+    import pytest
+
+    class C:
+        def post(self, url, headers=None, json=None):
+            return _Resp(text='data: {"type": "sources", "data": []}')     # 没有 [DONE]
+
+    with pytest.raises(RuntimeError) as e:
+        evaluate._answer_fn(C(), "kb1", {})("问")
+
+    assert "没跑完" in str(e.value)
+
+
+def test_a_complete_stream_still_parses_normally():
+    class C:
+        def post(self, url, headers=None, json=None):
+            return _Resp(text='data: {"type": "delta", "text": "甲"}' + DONE)
+
+    assert evaluate._answer_fn(C(), "kb1", {})("问")["answer"] == "甲"

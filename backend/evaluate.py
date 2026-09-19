@@ -98,6 +98,12 @@ def _answer_fn(client: httpx.Client, kb_id: str, headers: dict, session_id: str 
         # 印成「事实命中 0%」。宁可整段标「未跑」，也不产一个 0%（#64 批 4）。
         if r.status_code != 200:
             raise RuntimeError("问答接口返回 %d：%s" % (r.status_code, r.text[:200]))
+        # 状态码 200 ≠ 这一问跑成了：**流可能中途断掉**（生成模型报错、连接被掐）。那时
+        # `_parse_sse` 只拿到残缺的 answer，报告照样印成「事实命中 0%」—— 与上面那条同一类
+        # 假数字（实测踩过：生成模型换成没权限的，每问都吐完 sources 就断）。
+        # 服务端每条正常结束的流都以 `data: [DONE]` 收尾，拿它当「跑完了」的凭据。
+        if "data: [DONE]" not in r.text:
+            raise RuntimeError("问答流没跑完（没收到 [DONE]）—— 这一问不作数，别当成没命中")
         return _parse_sse(r.text)
     return ask
 
