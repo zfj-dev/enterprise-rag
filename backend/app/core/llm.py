@@ -212,8 +212,8 @@ class CloudLLM(LLM):
                 if (code in _RETRYABLE_STATUSES and not emitted
                         and attempt < _STREAM_ATTEMPTS - 1):
                     wait = _RETRY_BACKOFF * (attempt + 1)
-                    logger.warning("provider 暂时不可用（%s），%.0f 秒后重试（第 %d 次）",
-                                   e, wait, attempt + 1)
+                    logger.warning("provider 暂时不可用（model=%s，%s），%.0f 秒后重试（第 %d 次）",
+                                   self.model, e, wait, attempt + 1)
                     time.sleep(wait)
                     continue
                 if code != 400 or dropped:
@@ -223,8 +223,9 @@ class CloudLLM(LLM):
                     # 排查时根本看不出真因（#66 复核，真机上就是这么被误导的）。
                     raise
                 # 400 才是「这个字段我不认」的信号 —— 去掉它重来一次（这一次拿不到账单口径）
-                logger.warning("provider 用 400 拒了带 stream_options 的请求（%s），去掉后重试："
-                               "本次拿不到账单口径（若是别的原因，重试会照原样再失败）", e)
+                logger.warning("provider 用 400 拒了带 stream_options 的请求（model=%s，%s），"
+                               "去掉后重试：本次拿不到账单口径（若是别的原因，重试会照原样再失败）",
+                               self.model, e)
                 payload.pop("stream_options", None)
                 dropped = True
 

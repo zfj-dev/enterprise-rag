@@ -508,3 +508,18 @@ def test_a_real_unsupported_field_still_falls_back(monkeypatch):
 
     assert "".join(llm.stream([{"role": "user", "content": "hi"}])) == "好"
     assert "stream_options" in seen[0] and "stream_options" not in seen[1]
+
+
+def test_the_warning_names_the_model(monkeypatch, caplog):
+    """不限流了就没人查日志；一旦要查，得先知道是哪个模型被限了（真机排查时缺的就是这个）。"""
+    import logging
+
+    llm, _ = _llm_with(monkeypatch, [429, 429, 429])
+
+    with caplog.at_level(logging.WARNING, logger="app.core.llm"):
+        try:
+            "".join(llm.stream([{"role": "user", "content": "hi"}]))
+        except Exception:  # noqa: BLE001 —— 这里只关心日志
+            pass
+
+    assert "model=m" in caplog.text
