@@ -227,7 +227,8 @@ def _slow_judge(n_claims, delay=0.05, concurrency=None):
                        SUPPORT: ["true"] * n_claims, GENQ: "一问", CTX_REL: ["true"]},
                       delay=delay)
     kw = {} if concurrency is None else {"concurrency": concurrency}
-    return RagasJudge(llm, StubEmbedding(), **kw), llm
+    # 这一段只测「并发度」；匀速发是另一条独立策略，见下面那两条 pacing 用例
+    return RagasJudge(llm, StubEmbedding(), min_interval=0, **kw), llm
 
 
 def test_verdicts_are_judged_in_parallel():
@@ -275,3 +276,47 @@ def test_a_single_call_does_not_spin_up_a_pool():
     judge("问", "答", [{"text": "ctx"}])
 
     assert llm.max_live == 1
+
+
+# ---------- 匀速发，别突发（#66 复核：真机被 429 挡住）----------
+
+def test_the_judge_paces_its_calls_instead_of_bursting(monkeypatch):
+    """百炼的限流是「每分钟请求数 + 秒级突发」两档，而裁判**一条问答**就能发出几十次小调用
+    （一次一条论断、一段上下文）。4 路并发一起打就是一波突发 —— 实测被 429 挡住；而 1-2 秒的
+    退避对「按分钟算」的限流没用（窗口还没过去）。评测是离线的，慢一点无所谓：匀速发就不撞。
+    """
+    import app.eval_judge as ej
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "ragas_judge_min_interval", 1.0)
+    clock = {"t": 100.0}
+    slept: list = []
+    monkeypatch.setattr(ej.time, "monotonic", lambda: clock["t"])
+
+    def fake_sleep(sec):
+        slept.append(sec)
+        clock["t"] += sec
+
+    monkeypatch.setattr(ej.time, "sleep", fake_sleep)
+
+    j = RagasJudge(ScriptedLLM({"拆": "一条"}), StubEmbedding())
+    for _ in range(3):
+        j._ask("拆")
+
+    assert slept == [1.0, 1.0]          # 第一次不用等；之后每次都要等满间隔
+
+
+def test_pacing_can_be_switched_off(monkeypatch):
+    """间隔设 0 = 不限速（今天的行为），别把老跑法悄悄改慢。"""
+    import app.eval_judge as ej
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "ragas_judge_min_interval", 0.0)
+    slept: list = []
+    monkeypatch.setattr(ej.time, "sleep", lambda s: slept.append(s))
+
+    j = RagasJudge(ScriptedLLM({"拆": "一条"}), StubEmbedding())
+    for _ in range(3):
+        j._ask("拆")
+
+    assert slept == []
