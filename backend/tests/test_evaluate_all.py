@@ -4,12 +4,26 @@
 """
 from __future__ import annotations
 
+import os
+
+import pytest
+
 import evaluate
 import evaluate_all
 import evaluate_latency
 import evaluate_retrieval
 import evaluate_rgb
 from app.eval_core import ItemResult, Report
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_eval_skip(monkeypatch):
+    """开发者 shell 里若带着 `EVAL_SKIP`，跑出来的段就不一样了 —— 默认清掉。
+
+    本模块要测 skip 的用例自己 `monkeypatch.setenv`，那是在这个 fixture 之后生效的。
+    （写在 `_run_into` 里就错了：它会把那些用例的前提一起删掉，测试变成空断言。）
+    """
+    monkeypatch.delenv("EVAL_SKIP", raising=False)
 
 
 def _item(fact: bool) -> ItemResult:
@@ -23,6 +37,9 @@ def _stub_sections(monkeypatch, tmp_path):
     报告由**这段自己的 `main()` 写**（真脚本就是这样）—— 一页报告开跑前会先清掉上一轮的
     旧报告（票 39 / #48），所以夹具不能靠预先放一个文件。
     """
+    # 生成层也**落自己的盘**了（#65 复核），所以它的路径同样要指到临时目录 ——
+    # 否则跑测试会把仓库里的 logs/eval-report.log 覆盖成桩数据（这个坑真踩了）。
+    monkeypatch.setattr(evaluate, "REPORT", str(tmp_path / "generation.log"))
     for mod, name in ((evaluate_retrieval, "retrieval"), (evaluate_rgb, "rgb"),
                       (evaluate_latency, "latency")):
         path = tmp_path / ("%s.log" % name)
@@ -237,7 +254,8 @@ def test_a_stale_report_from_a_previous_run_is_not_left_behind(tmp_path, monkeyp
     out = evaluate_all._section("RGB 中文四能力（离线）", evaluate_rgb.main, str(stale))
 
     assert any("未跑" in line for line in out)
-    assert not stale.exists()          # 旧的那份不许留着骗人
+    assert "上一轮的正常数字" not in stale.read_text(encoding="utf-8")   # 不许留着骗人
+    assert "没跑完" in stale.read_text(encoding="utf-8")                 # 但要留个交代
 
 
 
@@ -332,8 +350,8 @@ def test_the_generation_section_also_lands_in_its_own_file(tmp_path, monkeypatch
     monkeypatch.setattr(evaluate, "GOLDEN", "g.json")
     monkeypatch.setattr(evaluate, "DOC", "d.pdf")
     gen_log = tmp_path / "gen.log"
-    monkeypatch.setattr(evaluate, "REPORT", str(gen_log))
     _stub_sections(monkeypatch, tmp_path)
+    monkeypatch.setattr(evaluate, "REPORT", str(gen_log))   # 桩装好之后再指，否则被覆盖
 
     text = _run(monkeypatch, tmp_path)
 
@@ -341,3 +359,147 @@ def test_the_generation_section_also_lands_in_its_own_file(tmp_path, monkeypatch
     assert "[FAIL] Q:Q" in detail                 # 逐题证据落在这份里
     assert "[FAIL] Q:Q" not in text               # 一页报告里不重复
     assert str(gen_log) in text                   # 并且指了路
+
+
+# ---------- 长任务要看得见进度（#65 复核：跑 40 分钟、终端一片空白）----------
+
+def _run_into(monkeypatch, tmp_path, out, hook=None):
+    """跑一遍一页报告；`hook` 在桩装好之后、main() 之前执行（用来替换其中某一段）。"""
+    monkeypatch.setattr(evaluate_all, "REPORT", str(out))
+    rep = Report(items=[_item(True)])
+    monkeypatch.setattr(evaluate, "run_online",
+                        lambda *a, **k: (rep, {"status": "indexed", "chunk_count": 1, "page_count": 1}))
+    monkeypatch.setattr(evaluate, "GOLDEN", "g.json")
+    monkeypatch.setattr(evaluate, "DOC", "d.pdf")
+    _stub_sections(monkeypatch, tmp_path)
+    if hook is not None:
+        hook()
+    evaluate_all.main()
+
+
+def test_the_page_is_written_while_later_sections_are_still_running(tmp_path, monkeypatch):
+    """一段接一段跑，报告要**逐段落盘** —— 这样才能 tail 着看，中途被打断也不至于整页没有。"""
+    out = tmp_path / "summary.log"
+    during: dict = {}
+
+    def peek_rgb():
+        during["text"] = out.read_text(encoding="utf-8")     # RGB 正在跑的那一刻，盘上有什么
+        (tmp_path / "rgb.log").write_text("子报告 rgb\n", encoding="utf-8")
+
+    _run_into(monkeypatch, tmp_path, out,
+              hook=lambda: monkeypatch.setattr(evaluate_rgb, "main", peek_rgb))
+
+    text = during["text"]
+    assert "=== 生成层指标 ===" in text and "=== 检索层（离线） ===" in text   # 跑完的已经在盘上
+    assert "还没跑完" in text and "延迟（并发）" in text                        # 且写明后面还有谁
+
+
+def test_the_progress_footer_disappears_once_everything_has_run(tmp_path, monkeypatch):
+    out = tmp_path / "summary.log"
+    _run_into(monkeypatch, tmp_path, out)
+
+    assert "还没跑完" not in out.read_text(encoding="utf-8")
+
+
+def test_a_skipped_section_is_not_reported_as_still_pending(tmp_path, monkeypatch):
+    """按 EVAL_SKIP 跳过的段落算跑过了 —— 不该留在「还没跑完」里吓人。"""
+    monkeypatch.setenv("EVAL_SKIP", "rgb")
+    out = tmp_path / "summary.log"
+    _run_into(monkeypatch, tmp_path, out)
+
+    assert "还没跑完" not in out.read_text(encoding="utf-8")
+
+
+def test_a_run_that_dies_partway_still_leaves_the_sections_that_finished(tmp_path, monkeypatch):
+    """Ctrl+C 那种收场：最后一段抛 BaseException，前面跑完的几段必须已经在盘上。"""
+    import pytest
+
+    class Boom(BaseException):
+        pass
+
+    def boom():
+        raise Boom()
+
+    out = tmp_path / "summary.log"
+
+    with pytest.raises(Boom):
+        _run_into(monkeypatch, tmp_path, out,
+                  hook=lambda: monkeypatch.setattr(evaluate_latency, "main", boom))
+
+    text = out.read_text(encoding="utf-8")
+    assert "=== 检索层（离线） ===" in text and "=== RGB 中文四能力（离线） ===" in text
+    assert "还没跑完" in text
+
+
+def test_running_the_tests_never_touches_the_real_log_files(tmp_path, monkeypatch):
+    """测试桩会把页面写进 `evaluate.REPORT` —— 那条路径必须被指到临时目录。
+
+    没指的话跑一次测试就把仓库里的 `logs/eval-report.log` 覆盖成「d.pdf / g.json」这种
+    桩数据：真实跑出来的报告悄悄没了，而且没有任何测试会红（#65 复核时真踩了这个）。
+    """
+    out = tmp_path / "summary.log"
+    _run_into(monkeypatch, tmp_path, out)
+
+    assert evaluate.REPORT != os.path.join(evaluate.BACKEND, "logs", "eval-report.log")
+    assert str(tmp_path) in evaluate.REPORT
+
+
+def test_the_footer_names_the_section_that_is_running(tmp_path, monkeypatch):
+    """只说「尚未开始」是不够的：正在跑的那一段会被人当成还没开始。
+
+    （实测就是这么骗人的 —— RGB 跑了 40 分钟，文件上一直写着它「尚未开始」。）
+    """
+    out = tmp_path / "summary.log"
+    during: dict = {}
+
+    def peek_rgb():
+        during["text"] = out.read_text(encoding="utf-8")
+        (tmp_path / "rgb.log").write_text("子报告 rgb\n", encoding="utf-8")
+
+    _run_into(monkeypatch, tmp_path, out,
+              hook=lambda: monkeypatch.setattr(evaluate_rgb, "main", peek_rgb))
+
+    text = during["text"]
+    assert "正在跑：RGB 中文四能力（离线）" in text
+    assert "RGB 中文四能力（离线）" not in text.split("尚未开始：")[-1].split(chr(10))[0]
+
+
+def test_the_footer_says_when_it_was_last_written(tmp_path, monkeypatch):
+    """没有「最后更新」，读的人分不出「还在跑」和「早就死了」。"""
+    out = tmp_path / "summary.log"
+    during: dict = {}
+
+    def peek_rgb():
+        during["text"] = out.read_text(encoding="utf-8")
+        (tmp_path / "rgb.log").write_text("子报告 rgb\n", encoding="utf-8")
+
+    _run_into(monkeypatch, tmp_path, out,
+              hook=lambda: monkeypatch.setattr(evaluate_rgb, "main", peek_rgb))
+
+    assert "最后更新：" in during["text"]
+
+
+def test_a_section_that_never_finishes_leaves_a_note_in_its_own_report(tmp_path):
+    """跑到一半被 Ctrl+C 时，那一段自己的报告里也该留下痕迹 —— 否则干干净净，看不出跑过。"""
+    class Boom(BaseException):
+        pass
+
+    log = tmp_path / "sub.log"
+
+    def dies():
+        raise Boom()
+
+    import pytest
+
+    with pytest.raises(Boom):
+        evaluate_all._section("某段", dies, str(log))
+
+    assert "没跑完" in log.read_text(encoding="utf-8")
+
+
+def test_a_section_that_writes_nothing_is_still_reported_as_missing(tmp_path):
+    """占位那行不许冒充报告 —— 跑完了却什么都没写，就得按「没有落盘报告」报。"""
+    log = tmp_path / "sub.log"
+    out = evaluate_all._section("某段", lambda: None, str(log))
+
+    assert any("没有落盘报告" in ln for ln in out)

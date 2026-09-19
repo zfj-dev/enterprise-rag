@@ -36,3 +36,36 @@ def test_the_passthrough_does_not_invent_missing_fields(monkeypatch):
     got = evaluate_rgb._answer_fn(db=None, rt=None, user=None)("kb-1", "问题")
 
     assert got == {"answer": "乙", "sources": []}
+
+
+# ---------- 长任务要看得见进度（#65 复核：200 题、终端一片空白）----------
+
+def test_the_progress_heartbeat_fires_every_20_steps_and_on_the_last_one(capsys):
+    from evaluate_rgb import _progress
+
+    for done in range(1, 41):
+        _progress("答题", done, 40)
+
+    assert capsys.readouterr().out.splitlines() == ["[rgb] 答题 20/40", "[rgb] 答题 40/40"]
+
+
+def test_the_heartbeat_still_fires_on_a_last_step_that_is_not_a_round_number(capsys):
+    from evaluate_rgb import _progress
+
+    _progress("答题", 7, 7)
+
+    assert "[rgb] 答题 7/7" in capsys.readouterr().out
+
+
+def test_the_answering_cursor_tells_you_where_it_is(capsys):
+    """每题十几秒、两百题 —— 不打印进度，外面看就是「卡死」。"""
+    from evaluate_rgb import _answer_cursor
+
+    entries = [{"question": "Q%d" % i} for i in range(25)]
+    kbs = ["kb%d" % i for i in range(25)]
+    ask = _answer_cursor(entries, kbs, lambda kb, q: {"answer": "a", "sources": []})
+    for e in entries:
+        ask(e["question"])
+
+    out = capsys.readouterr().out
+    assert "[rgb] 答题 20/25" in out and "[rgb] 答题 25/25" in out
