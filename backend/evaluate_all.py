@@ -149,6 +149,13 @@ def _section(name: str, main_fn, log_path: str) -> list:
             os.remove(log_path)
     except OSError:
         pass
+    # 先放一行占位再跑：这一段跑到一半被 Ctrl+C 时，它自己的报告里也有个交代 ——
+    # 否则磁盘上干干净净，事后完全看不出它跑过。
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(_PENDING_NOTE + "\n")
+    except OSError:
+        pass
     try:
         main_fn()
     except Exception as e:   # noqa: BLE001 —— 这段没跑成要明说，不能当没这回事
@@ -159,7 +166,41 @@ def _section(name: str, main_fn, log_path: str) -> list:
         return out
     with open(log_path, encoding="utf-8") as f:
         body = f.read().splitlines()
+    if body and body[0] == _PENDING_NOTE:      # 占位还在 = 它压根没写成报告
+        out.append("跑完了但没有落盘报告（%s）" % log_path)
+        return out
     return _slim(name, body, log_path)
+
+
+_PENDING_NOTE = "（这一段还在跑。看到这行说明它**没跑完** —— 跑完会写成完整报告。）"
+
+
+def _flush(lines: list, pending: list, running: str | None = None) -> None:
+    """把**当前进度**落进报告 —— 长任务要能 tail 着看，中途被打断也不至于整页都没有。
+
+    ⚠️ 两件事都得写清楚，否则半截文件会被当成跑完的：
+    - **正在跑的那一段要点名**（只说「尚未开始」的话，它明明已经在跑了 —— 实测 RGB 跑
+      40 分钟，文件上一直写着它「尚未开始」）；
+    - **最后更新时间**：没有它，读的人分不清「还在跑」和「早就死了」。
+    """
+    out = list(lines)
+    if pending or running:
+        parts = []
+        if running:
+            parts.append("正在跑：%s" % running)
+        if pending:
+            parts.append("尚未开始：%s" % "、".join(pending))
+        out += ["", "=== 进度 ===",
+                "本页还没跑完 —— " + "；".join(parts),
+                "最后更新：%s" % datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "跑完所有段后这几行会消失。"]
+    os.makedirs(os.path.dirname(REPORT), exist_ok=True)
+    # **先写临时文件再原子替换**：就地 `open(..., "w")` 会先截断，写到一半被 Ctrl+C
+    # 就只剩个空文件 —— 那正是这个功能要防的事。
+    tmp = REPORT + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("\n".join(out) + "\n")
+    os.replace(tmp, REPORT)
 
 
 def main() -> None:
@@ -176,10 +217,17 @@ def main() -> None:
     lines += ["=== 配置快照 ==="]
     lines.extend(_config_snapshot())
 
+    # 还没跑的段：逐段落盘时用它点名（跑完一段划掉一段）
+    pending = ["生成层指标", "检索层（离线）", "RGB 中文四能力（离线）", "延迟（并发）"]
+    print("报告会随进度写到：%s" % REPORT, flush=True)
+    _flush(lines, pending)           # 先落一版：连配置快照都还没跑完时也有个东西可看
+
     report = None
     if "generation" in skip or "生成层" in skip:
         gen = ["", "=== 生成层指标 ===", "按 EVAL_SKIP 跳过"]
     else:
+        print("[eval-all] 生成层指标 ...", flush=True)
+        _flush(lines, [p for p in pending if p != "生成层指标"], running="生成层指标")
         try:
             report, upload = evaluate.run_online()
             body = ["黄金集: %s" % evaluate.GOLDEN, "被评文档: %s" % evaluate.DOC,
@@ -202,6 +250,8 @@ def main() -> None:
     lines += ["", "=== 目标线（只作参照，不卡发版）==="]
     lines.extend(_target_lines(report))
     lines += gen
+    pending = [p for p in pending if p != "生成层指标"]
+    _flush(lines, pending)
 
     for key, name, main_fn, log_path in (
         ("retrieval", "检索层（离线）", evaluate_retrieval.main, evaluate_retrieval.REPORT),
@@ -210,12 +260,15 @@ def main() -> None:
     ):
         if key in skip or name in skip or name.split("（")[0] in skip:
             lines += ["", "=== %s ===" % name, "按 EVAL_SKIP 跳过"]
+            pending = [p for p in pending if p != name]     # 跳过算跑过了，别再报「没跑完」
+            _flush(lines, pending)
             continue
+        pending = [p for p in pending if p != name]
+        print("[eval-all] %s ..." % name, flush=True)
+        _flush(lines, pending, running=name)
         lines.extend(_section(name, main_fn, log_path))
+        _flush(lines, pending)
 
-    os.makedirs(os.path.dirname(REPORT), exist_ok=True)
-    with open(REPORT, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines) + "\n")
     print(REPORT)
 
 

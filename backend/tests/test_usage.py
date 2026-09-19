@@ -417,3 +417,109 @@ def test_each_call_gets_its_own_empty_bucket():
 
     assert box["prompt_tokens"] == 2          # 本轮 prompt 的字数
     assert "simulated" in box                  # 假模型的标记还在，记账那边据此标「模拟口径」
+
+
+# ---------- 4xx 不是一个东西：限流不是「字段不支持」（#66 复核，真机上踩到）----------
+
+def _llm_with(monkeypatch, replies):
+    """造一个照剧本应答的 CloudLLM；`replies` 是每次请求的 (状态码, 正文行) 序列。"""
+    import httpx
+
+    from app.core.llm import CloudLLM
+
+    seen: list = []
+
+    class FakeResp:
+        def __init__(self, status):
+            self.status_code = status
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise httpx.HTTPStatusError("boom", request=httpx.Request("POST", "https://x/v1"),
+                                            response=self)
+
+        def iter_lines(self):
+            return iter(['data: {"choices":[{"delta":{"content":"好"}}]}', "data: [DONE]"])
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    class FakeClient:
+        def __init__(self, *a, **k): pass
+
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def stream(self, *a, **k):
+            body = k.get("json") or {}
+            seen.append(dict(body))
+            status = replies[min(len(seen) - 1, len(replies) - 1)]
+            return FakeResp(status)
+
+    monkeypatch.setattr(httpx, "Client", FakeClient)
+    monkeypatch.setattr("app.core.llm._RETRY_BACKOFF", 0)      # 测试别真等
+    return CloudLLM(base_url="https://x/v1", api_key="k", model="m"), seen
+
+
+def test_a_rate_limit_is_not_mistaken_for_an_unsupported_field(monkeypatch):
+    """429 是「等会儿再来」，不是「这个字段我不认」。
+
+    以前任何 4xx 都会被当成后者：删掉 stream_options 重发一遍 —— 对已经在限流的端点
+    又打一次，还把警告写成「provider 拒绝了 stream_options」，排查时完全看不出真因。
+    """
+    import httpx
+
+    import pytest
+
+    from app.core.llm import CloudLLM
+
+    llm, seen = _llm_with(monkeypatch, [429, 429, 429, 429, 429])
+    with pytest.raises(httpx.HTTPStatusError):
+        "".join(llm.stream([{"role": "user", "content": "hi"}]))
+
+    assert all("stream_options" in b for b in seen)      # 字段一直留着，没被误删
+
+
+def test_a_rate_limit_is_retried_and_then_succeeds(monkeypatch):
+    """限流重试是「等会儿再来」的正确做法 —— 但只在**还没吐字**的时候重试。"""
+    llm, seen = _llm_with(monkeypatch, [429, 429, 200])
+
+    assert "".join(llm.stream([{"role": "user", "content": "hi"}])) == "好"
+    assert len(seen) == 3                                 # 两次限流 + 一次成功
+    assert all("stream_options" in b for b in seen)
+
+
+def test_an_auth_failure_is_not_retried(monkeypatch):
+    """401/403 重试多少次都一样（比如免费额度用尽）—— 别浪费请求也别拖时间。"""
+    import httpx
+
+    import pytest
+
+    llm, seen = _llm_with(monkeypatch, [403, 403, 403, 403, 403])
+    with pytest.raises(httpx.HTTPStatusError):
+        "".join(llm.stream([{"role": "user", "content": "hi"}]))
+
+    assert len(seen) == 1
+
+
+def test_a_real_unsupported_field_still_falls_back(monkeypatch):
+    """400 才是「这个字段我不认」的信号 —— 去掉它重试一次，仍要能答上来。"""
+    llm, seen = _llm_with(monkeypatch, [400, 200])
+
+    assert "".join(llm.stream([{"role": "user", "content": "hi"}])) == "好"
+    assert "stream_options" in seen[0] and "stream_options" not in seen[1]
+
+
+def test_the_warning_names_the_model(monkeypatch, caplog):
+    """不限流了就没人查日志；一旦要查，得先知道是哪个模型被限了（真机排查时缺的就是这个）。"""
+    import logging
+
+    llm, _ = _llm_with(monkeypatch, [429, 429, 429])
+
+    with caplog.at_level(logging.WARNING, logger="app.core.llm"):
+        try:
+            "".join(llm.stream([{"role": "user", "content": "hi"}]))
+        except Exception:  # noqa: BLE001 —— 这里只关心日志
+            pass
+
+    assert "model=m" in caplog.text

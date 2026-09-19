@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     # 裁判逐条判定的并发度（#55）：一条一问把正确性换回来了，但调用次数 ×N，
     # 而这些判定彼此独立、串行等网络就是白等。设 1 退回串行（排障用）。
     ragas_judge_concurrency: int = 4
+    # 裁判两次调用之间的最小间隔（秒）。百炼按「每分钟请求数 + 秒级突发」限流，而裁判
+    # 一条问答就能发出几十次小调用 —— 并发一起打就是一波突发（实测被 429 挡）。
+    # 评测是离线的，慢一点无所谓；设 0 = 不限速。
+    ragas_judge_min_interval: float = 1.2
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
     login_rate_limit_per_min: int = 10  # 登录限流:每用户名每分钟最多尝试次数,超限 429

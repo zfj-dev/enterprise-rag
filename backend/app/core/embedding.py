@@ -11,6 +11,7 @@ import hashlib
 import logging
 import math
 import re
+import time
 from abc import ABC, abstractmethod
 from typing import Sequence
 
@@ -75,6 +76,38 @@ class BgeEmbedding(EmbeddingModel):
         return self.model.encode(list(texts), normalize_embeddings=True, batch_size=32).tolist()
 
 
+# 托管嵌入的**临时**故障（超时 / 限流 / 5xx）要重试 —— 参数错、维度错这类不会自愈的立刻抛
+_EMBED_ATTEMPTS = 3
+_EMBED_BACKOFF = 2.0        # 秒；第 n 次重试等 n * backoff
+_RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
+
+
+def _post_with_retry(client, url: str, payload: dict, headers: dict, httpx_mod):
+    """发一批嵌入请求，临时的失败退避重试。
+
+    实测踩过：SiliconFlow 一次读超时（120s）就把上传打成了 `failed`，而那份文档的**解析
+    明明已经成功** —— 38 个批次里任何一次网络抖动都能毁掉整份文档（真机上因此废掉一整轮评测）。
+    条数对不上、维度不对这类属于逻辑错，`raise_for_status` 之外的地方抛，不在重试范围。
+    """
+    last = None
+    for attempt in range(_EMBED_ATTEMPTS):
+        try:
+            r = client.post(url, json=payload, headers=headers)
+            r.raise_for_status()
+            return r
+        except (httpx_mod.TimeoutException, httpx_mod.TransportError) as e:
+            last = e
+        except httpx_mod.HTTPStatusError as e:
+            if getattr(e.response, "status_code", None) not in _RETRYABLE_STATUSES:
+                raise
+            last = e
+        if attempt < _EMBED_ATTEMPTS - 1:
+            logger.warning("嵌入请求失败（%s），%.0f 秒后重试（第 %d 次）",
+                           last, _EMBED_BACKOFF * (attempt + 1), attempt + 1)
+            time.sleep(_EMBED_BACKOFF * (attempt + 1))
+    raise last
+
+
 class ApiEmbedding(EmbeddingModel):
     """通过私有推理节点(云 GPU)嵌入：POST {base}/embed {texts:[...]} -> {vectors:[[...]]}。
 
@@ -103,8 +136,8 @@ class ApiEmbedding(EmbeddingModel):
         with self._httpx.Client(timeout=120) as client:
             for i in range(0, len(texts), self.batch_size):
                 batch = list(texts[i:i + self.batch_size])
-                r = client.post(f"{self.base}/embed", json={"texts": batch}, headers=headers)
-                r.raise_for_status()
+                r = _post_with_retry(client, f"{self.base}/embed", {"texts": batch},
+                                     headers, self._httpx)
                 out.extend(r.json().get("vectors", []))
         return out
 
@@ -142,9 +175,8 @@ class SiliconFlowEmbedding(EmbeddingModel):
         with self._httpx.Client(timeout=120) as client:
             for i in range(0, len(texts), self.batch_size):
                 batch = list(texts[i:i + self.batch_size])
-                r = client.post("%s/embeddings" % self.base,
-                                json={"model": self.model, "input": batch}, headers=headers)
-                r.raise_for_status()
+                r = _post_with_retry(client, "%s/embeddings" % self.base,
+                                     {"model": self.model, "input": batch}, headers, self._httpx)
                 got = _ordered_embeddings(r.json(), len(batch))
                 self._check_dim(got)
                 out.extend(got)
