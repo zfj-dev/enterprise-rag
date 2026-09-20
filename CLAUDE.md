@@ -14,7 +14,7 @@ AI 求职 + 真给身边人用的**自托管 RAG 文档问答**，单人独立�
 - 解析：PyMuPDF / python-docx / openpyxl（已实现）+ Docling / PP-Structure（预留路由）
 - 前端：`frontend/index.html` 单文件，FastAPI 托管，SSE 流式
 - 部署：`deploy/docker-compose.yml`（演示模式：sqlite+内存向量+假模型，开箱即用）
-- 测试：`pytest`（20 项：单元 + API 集成，全绿）
+- 测试：`pytest`（单元 + API + 回归契约）；钩子 `.githooks/pre-commit` 每次提交自动跑全量（约 3 分钟），**别 `--no-verify`**。
 
 ## 核心架构
 - 分层：前端 → FastAPI（api/core/services/models/db）→ RAG 管线 → 存储
@@ -31,18 +31,22 @@ AI 求职 + 真给身边人用的**自托管 RAG 文档问答**，单人独立�
 - 注册默认 `viewer`；seed 管理员 `admin/admin123`。
 - 演示模式 `FakeLLM` 返回固定"（模拟回答）..."，做全链路演示；真实模式需 API Key。
 
-## 当前进度（2026-09-12）
+## 当前进度（2026-09-20）
 - ✅ **`docs/specs/0001-0006` 全部落地**：评测 / Agentic+MCP / 上下文压缩 / 跨会话记忆 / 成本面板 / 自带 Key（BYOK）。
-- 测试：后端 **612 passed / 3 skipped**（约 2.5 分钟，pre-commit 钩子自动跑，别 --no-verify）；Playwright e2e **55 passed / 2 skipped**。
+- 测试：后端 **798 passed / 3 skipped**（约 3 分钟，pre-commit 钩子自动跑，别 --no-verify）；
+  Playwright e2e **55 passed / 2 skipped**（2026-09-12 口径，未复测 —— 要跑需先起服务）。
 - 演示模式**完整可用**；真实模式（GPU bge + Docling + DashScope）已在真机跑通全链路。
 - **票做完了**：`ready-for-agent` 队列为空（`gh issue list --label ready-for-agent`）。剩下的是**交付物**。
 
-## 下一步（交付物，需要用户真机出手）
-- **一页评测报告（带数字）**：`scripts/evaluate_all.ps1` → `backend/logs/eval-summary.log`。三条前置缺一不可 ——
+## 交付物（2026-09-20）
+- ✅ **一页评测报告（带数字）**：[`docs/eval-report.md`](docs/eval-report.md) —— 2026-09-19 四段同口径真机整跑，
+  原始报告在 `backend/logs/`（**在 .gitignore 里，不入库**）。复现 `scripts/evaluate_all.ps1`，三条前置缺一不可 ——
   生成层与延迟要**服务在跑**；RGB 要**官方数据集**（`github.com/chen700564/RGB` 的 `data/` → `backend/data/rgb/`）；
   并发要先调高 `MAX_CONCURRENT_STREAMS_PER_USER`。**缺前置一律写「未跑」，绝不产假数字。**
   ⚠️ `backend/data/` 是**入库目录**（黄金集在里面），RGB 数据有几十 MB —— 放进去前先想好要不要真入库（或先加 `.gitignore`）。
-- **在线 Demo 地址 + 2 分钟演示视频**：尚未上线。
+  ⚠️ 报告里**三个「忠实度」不是一回事**：`引用忠实度 100%` 是**检索侧**判据（期望事实在不在来源里），
+  **不等于「答案 100% 有据」**；真实支撑水平看**引用覆盖率 59% / RAGAS faithfulness 0.698**。
+- ❌ **在线 Demo 地址 + 2 分钟演示视频**：尚未上线（需用户出手）。
 - 面试讲法：混合检索+RRF+重排；引用校验；检索时权限过滤；BYOK 的 SSRF/加密/能力探测；工程取舍（pgvector/Celery/混合/砍 GraphRAG）。
 
 ## 近期修复（2026-08-27，用户真机演示反馈）
@@ -117,6 +121,18 @@ AI 求职 + 真给身边人用的**自托管 RAG 文档问答**，单人独立�
 - **UI 改动要真机验**：`mcp__Claude_Preview__*`（临时写 `.claude/launch.json` → `preview_start` → `preview_eval` 断言 DOM →
   验完删掉 launch.json 与它**生成在仓库根**的 `rag.db`）。⚠️ **别删 `backend/rag.db`** —— 那是用户数据。
   另：同一个页面刚加载完的第一次 eval 常报 `Inspected target navigated or closed`，重试一次即可。
+
+### 2026-09-19：真机评测踩出的操作坑
+- **改了 `app/` 下的代码，必须重启服务才生效。** 评测进程每次新起会带新代码，但**上传/生成跑在常驻的 `uvicorn` 进程里** ——
+  用户重跑评测却没重启服务，修了等于没修（这条咬过两次）。
+- **`$env:EVAL_SKIP` 是 PowerShell 会话变量**，会一直留在那个窗口：有人为单独重跑生成层设过一次，
+  之后连续 4 次整跑都只跑了生成层。排障**先 `echo "[$env:EVAL_SKIP]"`**，或让用户**新开一个窗口**。
+- **评测会往用户真实的 `backend/rag.db` 写**（建临时 `__eval__` 库 + 上传文档）。排查时**别拿用户的库试** ——
+  另开 `DATABASE_URL=sqlite:////tmp/xxx.db`，且**先 `create_all` 建表**（否则 RGB 段会因缺表而挂）。
+- **别在用户跑长任务时做重活**：完整运行时 + RGB 200 条索引占 3GB+，与用户的评测同时跑时用户进程曾**无声消失**
+  （机器 15GB 内存，两边各 3GB+；时间窗完全重合，无法证实但引以为戒）。
+- **动「会写文件」的产品代码时，先查测试有没有隔离那些路径**：`evaluate_all` 让生成层写 `evaluate.REPORT`，
+  而测试没隔离 → 跑一次测试就把 `logs/eval-report.log` 覆盖成桩数据。已修（路径指 tmp + 回归测试），教训要记。
 
 ## Agent skills
 
