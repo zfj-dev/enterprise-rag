@@ -1,0 +1,46 @@
+# Docker build context 排除清单。
+#
+# 为什么必须有：没有它，`docker build` 会把整个仓库（含 .venv 几个 GB、node_modules、
+# .git）打包发给 daemon。Dockerfile 是选择性 COPY 的，所以这些**不会进镜像**，但
+# 上下文本身会离开本机 —— 远程 builder / BuildKit / CI 场景下 `.env` 里的密钥就跟着走了
+# （安全审查 F6）。顺带让构建快一个数量级。
+
+# 密钥与本地配置（最要紧的一条）
+.env
+**/.env
+*.key
+deploy/.env
+
+# 运行时产物 / 用户数据
+*.db
+*.sqlite3
+logs/
+uploaded_files/
+backups/
+
+# 依赖与虚拟环境
+.venv/
+**/.venv/
+node_modules/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# 版本控制与编辑器和测试产物
+.git/
+.gitignore
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+test-results/
+playwright-report/
+
+# 大体积的样本文档与基准数据（可随时重新下载，镜像里用不到）
+backend/data/rgb/
+backend/data/samples/
+backend/paper.pdf
+backend/verify_paper.pdf

@@ -10,7 +10,7 @@ import time
 import pytest
 
 
-def _reg(client, username: str, password: str = "pw123456") -> None:
+def _reg(client, username: str, password: str = "pw1234567890") -> None:
     r = client.post("/api/v1/auth/register", json={"username": username, "password": password})
     assert r.status_code == 200, r.text
 
@@ -23,7 +23,7 @@ def _login(client, username: str, password: str):
 def test_login_success_valid_credentials(client):
     """正确用户名密码返回 200 + access_token。"""
     _reg(client, "alice")
-    r = _login(client, "alice", "pw123456")
+    r = _login(client, "alice", "pw1234567890")
     assert r.status_code == 200
     body = r.json()
     assert body["access_token"]
@@ -42,7 +42,7 @@ def test_login_wrong_password(client):
 # 用例 3
 def test_login_nonexistent_user(client):
     """不存在的用户返回 401，且与错误密码的文案一致（防用户名枚举）。"""
-    r = _login(client, "nobody", "pw123456")
+    r = _login(client, "nobody", "pw1234567890")
     assert r.status_code == 401
     assert r.json()["detail"] == "用户名或密码错误"
 
@@ -50,7 +50,7 @@ def test_login_nonexistent_user(client):
 # 用例 4
 def test_login_empty_username(client):
     """空用户名返回 422（LoginRequest min_length=1）。"""
-    r = _login(client, "", "pw123456")
+    r = _login(client, "", "pw1234567890")
     assert r.status_code == 422
 
 
@@ -64,7 +64,7 @@ def test_login_empty_password(client):
 # 用例 6
 def test_login_sql_injection_attempt(client):
     """username 输入 SQL 注入 payload 返回 401（ORM 参数化查询安全处理，不会注入）。"""
-    r = _login(client, "' OR '1'='1", "pw123456")
+    r = _login(client, "' OR '1'='1", "pw1234567890")
     assert r.status_code == 401
     assert r.json()["detail"] == "用户名或密码错误"
 
@@ -72,7 +72,7 @@ def test_login_sql_injection_attempt(client):
 # 用例 7
 def test_login_xss_attempt(client):
     """username 输入 <script> 返回 401，服务端不执行脚本（仅作普通字符串校验）。"""
-    r = _login(client, "<script>alert(1)</script>", "pw123456")
+    r = _login(client, "<script>alert(1)</script>", "pw1234567890")
     assert r.status_code == 401
     assert r.json()["detail"] == "用户名或密码错误"
 
@@ -80,7 +80,7 @@ def test_login_xss_attempt(client):
 # 用例 8
 def test_login_super_long_username(client):
     """超长用户名（>256 字符）当前不触发 422（LoginRequest 无 max_length），因用户不存在而返回 401。"""
-    r = _login(client, "x" * 300, "pw123456")
+    r = _login(client, "x" * 300, "pw1234567890")
     assert r.status_code == 401
     assert r.json()["detail"] == "用户名或密码错误"
 
@@ -98,7 +98,7 @@ def test_login_unicode_username(client):
     """中文/emoji/特殊 Unicode 用户名可正常注册并登录。"""
     uname = "用户😀"
     _reg(client, uname)
-    r = _login(client, uname, "pw123456")
+    r = _login(client, uname, "pw1234567890")
     assert r.status_code == 200
     assert r.json()["access_token"]
 
@@ -107,8 +107,8 @@ def test_login_unicode_username(client):
 def test_login_case_sensitivity(client):
     """用户名大小写敏感：'Alice' 注册后，'alice' 登录失败、'Alice' 成功（sqlite 二进制排序实现）。"""
     _reg(client, "Alice")
-    assert _login(client, "alice", "pw123456").status_code == 401
-    assert _login(client, "Alice", "pw123456").status_code == 200
+    assert _login(client, "alice", "pw1234567890").status_code == 401
+    assert _login(client, "Alice", "pw1234567890").status_code == 200
 
 
 # 用例 12
@@ -117,7 +117,7 @@ def test_login_response_time(client):
     _reg(client, "alice")
     t0 = time.perf_counter()
     for _ in range(5):
-        assert _login(client, "alice", "pw123456").status_code == 200
+        assert _login(client, "alice", "pw1234567890").status_code == 200
     elapsed = (time.perf_counter() - t0) / 5
     assert elapsed < 0.5, f"登录平均耗时 {elapsed:.3f}s"
 

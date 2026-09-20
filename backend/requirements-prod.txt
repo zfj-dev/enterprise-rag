@@ -1,4 +1,6 @@
 # 生产依赖(容器镜像用):核心 + PostgreSQL(psycopg/pgvector) + Redis
+#
+# ⚠️ 这些是**下限**，不是锁 —— 见 requirements.txt 顶部关于 lock 的说明（安全审查 F8）。
 fastapi>=0.110
 uvicorn[standard]>=0.29
 pydantic>=2.6
@@ -8,7 +10,8 @@ httpx>=0.27
 PyJWT>=2.8
 cryptography>=42  # BYOK：凭据加密落库（票 32）
 rank-bm25>=0.2.2
-python-multipart>=0.0.9
+# 见 requirements.txt：0.0.9~0.0.17 受 CVE-2024-53981 影响
+python-multipart>=0.0.18
 
 # 文档解析(常见格式,无 GPU 依赖)
 pymupdf>=1.24

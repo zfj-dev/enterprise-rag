@@ -9,13 +9,14 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db, get_runtime
+from app.api.deps import get_current_user, get_db, get_owned_kb, get_runtime
 from app.config import get_settings
 from app.core.quota import check_quota
 from app.core.container import Runtime
-from app.core.schemas import ChatRequest
-from app.models.entities import ChatMessage, ChatSession, KnowledgeBase, User
+from app.core.schemas import ChatRequest, RenameSessionIn
+from app.models.entities import ChatMessage, ChatSession, Feedback, User
 from app.services.chat_service import prepare, stream_answer
+from app.utils.ratelimit import SlidingWindowLimiter
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -77,6 +78,11 @@ class _SlotReleasingStream(StreamingResponse):
 
 _stream_guard = _StreamGuard(get_settings().max_concurrent_streams_per_user)
 
+# 每用户每分钟的问答次数上限。`_stream_guard` 管的是「**同时**几个流」，管不住
+# 「一个接一个地发」—— 后者才是烧钱的方式（安全审查 F5）。键是用户 id，
+# 所以各用户互不影响。
+_chat_limiter = SlidingWindowLimiter(60.0, max_keys=4096)
+
 
 @router.post("/stream")
 def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
@@ -87,13 +93,16 @@ def chat_stream(body: ChatRequest, user: User = Depends(get_current_user),
             from fastapi import HTTPException
             raise HTTPException(404, "会话不存在")
 
-    # 知识库同样按属主校验：检索本身按 owner 过滤、不会泄内容，但 kb_id 会一路进
+    # 知识库按属主校验：检索本身按 owner 过滤、不会泄内容，但 kb_id 会一路进
     # **语义缓存的键**（(question, kb_id) 不按属主隔离），拿别人的 kb_id 能命中别人的
     # 缓存答案（#64）。不属主一律 404，不泄漏它存不存在。
-    kb = db.get(KnowledgeBase, body.kb_id)
-    if not kb or kb.owner_id != user.id:
+    get_owned_kb(db, body.kb_id, user)
+
+    # 频率限制放在**干活之前**：放在 prepare 之后就等于让对方先把检索跑一遍再拒绝，
+    # 用完限额还能照样消耗算力（安全审查 F5）。
+    if not _chat_limiter.allow(user.id, get_settings().chat_rate_limit_per_min):
         from fastapi import HTTPException
-        raise HTTPException(404, "知识库不存在")
+        raise HTTPException(429, "提问过于频繁，请稍后再试")
 
     # 预算硬拦（票 29）：判定在**生成之前**、依据此前已累计的用量 —— 所以拦截只对**下一个**
     # 请求生效，已在进行中的流不被打断；管理员豁免（用量照记）。
@@ -173,13 +182,13 @@ def get_session(session_id: str, user: User = Depends(get_current_user), db: Ses
 
 
 @router.patch("/sessions/{session_id}")
-def rename_session(session_id: str, body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def rename_session(session_id: str, body: RenameSessionIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """重命名会话标题。"""
     from fastapi import HTTPException
     s = db.get(ChatSession, session_id)
     if not s or s.user_id != user.id:
         raise HTTPException(404, "会话不存在")
-    title = (body.get("title") or "").strip()[:50]
+    title = body.title.strip()[:50]
     if title:
         s.title = title
         db.commit()
@@ -188,12 +197,21 @@ def rename_session(session_id: str, body: dict, user: User = Depends(get_current
 
 @router.delete("/sessions/{session_id}")
 def delete_session(session_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """删除会话及其消息。"""
+    """删除会话及其消息。
+
+    **必须先删 feedback**：`feedback.message_id` 有外键指向 `chat_messages`，而
+    `db.query(...).delete()` 是 bulk delete、**不走 ORM 的级联**。Postgres 会强制外键 →
+    用户只要给某条消息点过赞，这个会话就再也删不掉（500）。SQLite 默认不校验外键，
+    所以测试环境一直是绿的（安全审查 F3）。
+    """
     from fastapi import HTTPException
     s = db.get(ChatSession, session_id)
     if not s or s.user_id != user.id:
         raise HTTPException(404, "会话不存在")
-    db.query(ChatMessage).filter(ChatMessage.session_id == s.id).delete()
+    msg_ids = [m.id for m in db.query(ChatMessage.id).filter(ChatMessage.session_id == s.id).all()]
+    if msg_ids:
+        db.query(Feedback).filter(Feedback.message_id.in_(msg_ids)).delete(synchronize_session=False)
+    db.query(ChatMessage).filter(ChatMessage.session_id == s.id).delete(synchronize_session=False)
     db.delete(s)
     db.commit()
     return {"ok": True}

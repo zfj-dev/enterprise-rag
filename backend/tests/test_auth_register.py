@@ -1,6 +1,6 @@
 """注册接口 POST /api/v1/auth/register 测试。
 
-对真实实现的契约：RegisterRequest(username 1-64, password 6-128, 无 role 字段)。
+对真实实现的契约：RegisterRequest(username 1-64, password `MIN_PASSWORD_CHARS`-128, 无 role 字段)。
 成功返回 200 + TokenResponse(access_token/token_type/role)，role 恒为 viewer（硬编码）；
 重复用户名返回 400（不是 409）；密码用标准库 pbkdf2 哈希（不是 bcrypt）。
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 
-def _reg(client, username: str, password: str = "pw123456", extra: dict | None = None):
+def _reg(client, username: str, password: str = "pw1234567890", extra: dict | None = None):
     payload = {"username": username, "password": password}
     if extra:
         payload.update(extra)
@@ -38,9 +38,13 @@ def test_register_duplicate_username(client):
 
 # 用例 16
 def test_register_weak_password(client):
-    """弱密码（<6 位）返回 422（RegisterRequest min_length=6）。5 位拒绝、恰好 6 位接受。"""
-    assert _reg(client, "u1", "12345").status_code == 422
-    assert _reg(client, "u2", "123456").status_code == 200
+    """弱口令返回 422（下限是 `schemas.MIN_PASSWORD_CHARS` = 12）。
+
+    安全审查 F12：注册下限原来是 6 位、改密却是 12 位 —— 新账号能拿 6 位口令进来。
+    现在两边共用同一个常量，所以这条同时钉住「11 位仍拒绝」。
+    """
+    assert _reg(client, "u1", "12345678901").status_code == 422     # 11 位
+    assert _reg(client, "u2", "123456789012").status_code == 200    # 恰好 12 位
 
 
 # 用例 17
@@ -58,7 +62,7 @@ def test_register_sql_injection(client):
     r = _reg(client, u)
     assert r.status_code == 200, r.text
     # 该字面量用户名确实被创建，且能正常登录（证明没有注入、没有匹配到别的用户）
-    login = client.post("/api/v1/auth/login", json={"username": u, "password": "pw123456"})
+    login = client.post("/api/v1/auth/login", json={"username": u, "password": "pw1234567890"})
     assert login.status_code == 200
 
 
@@ -68,7 +72,7 @@ def test_register_xss_payload(client):
     u = "<script>alert(1)</script>"
     r = _reg(client, u)
     assert r.status_code == 200, r.text
-    login = client.post("/api/v1/auth/login", json={"username": u, "password": "pw123456"})
+    login = client.post("/api/v1/auth/login", json={"username": u, "password": "pw1234567890"})
     assert login.status_code == 200
 
 
@@ -83,7 +87,7 @@ def test_register_default_role(client):
 # 用例 21
 def test_register_password_hashing(client):
     """密码以 pbkdf2 哈希存储而非明文（规范称为 bcrypt，当前实现为标准库 pbkdf2_hmac）。"""
-    _reg(client, "bob", "pw123456")
+    _reg(client, "bob", "pw1234567890")
     from app.db.session import SessionLocal
     from app.models.entities import User
 
@@ -91,10 +95,10 @@ def test_register_password_hashing(client):
     try:
         u = db.query(User).filter(User.username == "bob").first()
         assert u and u.password_hash, "应存在用户"
-        assert u.password_hash != "pw123456"
+        assert u.password_hash != "pw1234567890"
         assert u.password_hash.startswith("pbkdf2$"), "应使用 pbkdf2 哈希（非 bcrypt $2b$，非明文）"
         from app.utils.security import verify_password
-        assert verify_password("pw123456", u.password_hash)
+        assert verify_password("pw1234567890", u.password_hash)
         assert not verify_password("wrong", u.password_hash)
     finally:
         db.close()

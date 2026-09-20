@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import threading
+import time
 
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
@@ -48,6 +50,46 @@ def get_progress(doc_id: str, status: str | None = None) -> int:
 # 这些还没写进去，于是删完内容又被写回来 —— 已删的文档仍然能被检索到（#64 批 2）。
 # 进门后各自**再确认一次文档还在不在**，光互斥是不够的。
 DOC_WRITE_LOCK = threading.RLock()
+
+
+def drop_document_file(db: Session, path: str | None) -> None:
+    """删掉这个文档**独占**的文件。
+
+    还有别的文档指向同一路径就不动它 —— 老库里的文档可能是共用一个路径存下来的
+    （#64 之前按文件名全局存），删文件会把别人的文档一起弄坏。
+
+    放在这一层（而不是某个路由里）：删文档与删知识库都要清盘，两边共用同一份
+    「独占才删」的判断，免得抄一遍走样（安全审查 F2）。
+    """
+    if not path:
+        return
+    if db.query(Document).filter(Document.file_path == path).count():
+        return
+    try:
+        os.remove(path)
+    except OSError as e:      # noqa: BLE001 —— 清磁盘失败不该让删除接口失败
+        logger.warning("删除文档文件失败(%s): %s", path, e)
+
+
+# 上传文件的落盘约定：`<UPLOAD_ROOT>/<owner_id>/<kb_id>/<uuid>.<ext>`。
+# 收口在这里，别让路由各写一份路径拼接（安全审查 F2）。
+UPLOAD_ROOT = "uploaded_files"
+
+
+def kb_upload_dir(owner_id: str, kb_id: str) -> str:
+    return os.path.join(UPLOAD_ROOT, owner_id, kb_id)
+
+
+def drop_kb_files(db: Session, owner_id: str, kb_id: str, paths: list[str]) -> None:
+    """删一个知识库在磁盘上的全部文件。
+
+    两步：先按 `Document.file_path` 逐个删（走上面「独占才删」的老逻辑，兼容 #64 之前
+    那种全局共享路径）；再把这个库的目录整个清掉 —— 目录约定决定了底下只可能有这个库
+    的文件，所以顺带带走**回滚 / 覆盖留下的孤儿**（安全审查 F2）。
+    """
+    for p in paths:
+        drop_document_file(db, p)
+    shutil.rmtree(kb_upload_dir(owner_id, kb_id), ignore_errors=True)
 
 
 def _doc_still_exists(doc_id: str) -> bool:
@@ -237,6 +279,43 @@ def process_document_background(doc_id: str) -> None:
             db.close()
 
 
+# 在跑的后台索引线程：启动时登记、跑完就摘掉。关停时靠它等收尾（安全审查 F14）。
+_live_threads: set[threading.Thread] = set()
+_live_lock = threading.Lock()
+
+SHUTDOWN_WAIT_SECONDS = 20.0
+
+
+def _tracked(doc_id: str) -> None:
+    try:
+        process_document_background(doc_id)
+    finally:
+        with _live_lock:
+            _live_threads.discard(threading.current_thread())
+
+
 def launch_processing(doc_id: str) -> None:
     """上传接口调用：立刻返回，解析/嵌入在后台线程执行。"""
-    threading.Thread(target=process_document_background, args=(doc_id,), daemon=True).start()
+    t = threading.Thread(target=_tracked, args=(doc_id,), daemon=True)
+    with _live_lock:
+        _live_threads.add(t)
+    t.start()
+
+
+def wait_for_processing(timeout: float = SHUTDOWN_WAIT_SECONDS) -> int:
+    """优雅关停：等在跑的后台索引收尾，返回**超时后仍在跑**的线程数（0 = 干净）。
+
+    不等的话，正在索引的文档会被腰斩在「写了一半」的状态 —— 下次启动
+    `fail_stale_processing` 会把它们标成 failed 让用户重传（那条兜底还在），
+    但用户白传一次、也白解析一次。能等就等。
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with _live_lock:
+            alive = [t for t in _live_threads if t.is_alive()]
+        if not alive:
+            return 0
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return len(alive)
+        alive[0].join(timeout=left)

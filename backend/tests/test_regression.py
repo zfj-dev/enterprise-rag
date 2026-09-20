@@ -11,7 +11,7 @@ import pytest
 
 
 def _reg(client, name):
-    r = client.post("/api/v1/auth/register", json={"username": name, "password": "pw123456"})
+    r = client.post("/api/v1/auth/register", json={"username": name, "password": "pw1234567890"})
     assert r.status_code == 200, r.text
     return {"Authorization": f"Bearer {r.json()['access_token']}"}
 

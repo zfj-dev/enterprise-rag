@@ -175,8 +175,17 @@ class Settings(BaseSettings):
     semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
     login_rate_limit_per_min: int = 10  # 登录限流:每用户名每分钟最多尝试次数,超限 429
+    # 注册限流（**按 IP**）：注册接口不鉴权，不限流就等于开放建号 —— 每个号都能烧
+    # 服务端的 LLM 额度（安全审查 F5）。演示/测试若一次建很多号，把这个调大。
+    register_rate_limit_per_hour: int = 10
+    # 问答限流（**按用户**）：`max_concurrent_streams_per_user` 管的是「同时几个流」，
+    # 管不住「一个接一个地发」—— 后者才是烧钱的方式（安全审查 F5）。
+    chat_rate_limit_per_min: int = 30
 
     max_upload_mb: int = 50
+    # **非上传**接口的请求体上限（MB）。字段级的 max_length 不省内存（校验在 body 读完
+    # 之后），所以必须有这一道读前拦截；直连 uvicorn 的部署形态只有它能挡（安全审查 F1）。
+    max_body_mb: int = 1
     upload_dir: str = "./uploaded_files"
     data_dir: str = "./data"
 

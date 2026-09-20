@@ -3,6 +3,11 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+# 口令最短长度（**唯一出处**）。注册与改密共用同一个数，免得两处各写一遍、
+# 改了一边另一边开始说谎。历史老账号不受影响 —— 登录**刻意不校验长度**
+# （短口令应返回 401 而不是 422，也不该泄漏校验规则）。
+MIN_PASSWORD_CHARS = 12
+
 
 # ---- Auth ----
 class LoginRequest(BaseModel):
@@ -12,9 +17,9 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    # 注册：校验强度（用户名1-64、密码6-128）
+    # 注册：校验强度（用户名1-64、口令下限见 MIN_PASSWORD_CHARS）
     username: str = Field(min_length=1, max_length=64)
-    password: str = Field(min_length=6, max_length=128)
+    password: str = Field(min_length=MIN_PASSWORD_CHARS, max_length=128)
 
 
 class TokenResponse(BaseModel):
@@ -24,10 +29,37 @@ class TokenResponse(BaseModel):
 
 
 class ChangePasswordIn(BaseModel):
-    """改自己的口令。新口令的强度门槛比注册**更高**（12 位）—— 这是要长期用下去的那个。"""
+    """改自己的口令。新口令与注册共用同一个下限（`MIN_PASSWORD_CHARS`）。"""
 
     old_password: str = Field(min_length=1)
-    new_password: str = Field(min_length=12, max_length=128)
+    new_password: str = Field(min_length=MIN_PASSWORD_CHARS, max_length=128)
+
+
+class RenameDocumentIn(BaseModel):
+    """文档改名。
+
+    原来这个接口吃的是裸 `dict` —— 那就等于**没有请求体上限**：任何长度、任何字段都能
+    塞进来，而 filename 还会写进 `Content-Disposition`。收成模型后字段与长度一起卡住
+    （安全审查 F1）。
+    """
+
+    filename: str = Field(default="", max_length=256)
+
+
+class RenameSessionIn(BaseModel):
+    """会话改名（同 F1；原为裸 dict）。"""
+
+    title: str = Field(default="", max_length=256)
+
+
+class ClientErrorIn(BaseModel):
+    """前端 `window.onerror` 上报。**故意不鉴权**（登录页自己的报错也要能上来），
+    所以字段与长度都得卡死，否则它是一条免费的写盘通道（安全审查 F1/H2）。"""
+
+    msg: str = Field(default="", max_length=2000)
+    src: str = Field(default="", max_length=512)
+    line: int | None = None
+    col: int | None = None
 
 
 # ---- Knowledge base ----
@@ -59,8 +91,10 @@ class DocumentOut(BaseModel):
 
 # ---- Chat ----
 class ChatRequest(BaseModel):
-    kb_id: str
-    question: str
+    kb_id: str = Field(min_length=1, max_length=64)
+    # 上限 4000 字符：正常提问远达不到，而**没有上限就等于没有请求体大小限制**
+    # （安全审查 F1 —— 未鉴权的 `/client-error` 实测能收下 8MB body）。
+    question: str = Field(max_length=4000)
     session_id: str | None = None
     stream: bool = True
     # 「深度思考」= 这一次走代理链路（票 37）。**默认 False**：不发就是原来的确定性链路，
@@ -84,9 +118,9 @@ class ChatResponse(BaseModel):
 
 # ---- Feedback ----
 class FeedbackRequest(BaseModel):
-    message_id: str
+    message_id: str = Field(min_length=1, max_length=64)
     rating: int  # 1 赞 / -1 踩
-    comment: str = ""
+    comment: str = Field(default="", max_length=2000)
 
 
 class FeedbackOut(BaseModel):

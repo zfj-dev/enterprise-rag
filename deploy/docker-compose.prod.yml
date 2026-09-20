@@ -8,12 +8,15 @@ services:
       context: ..
       dockerfile: backend/Dockerfile
     container_name: rag-api-prod
-    env_file: .env                    # SECRET_KEY / LLM_API_KEY / EMBEDDING_API_KEY / RERANK_API_KEY / POSTGRES_PASSWORD / CADDY_DOMAIN
+    env_file: .env                    # SECRET_KEY / ADMIN_PASSWORD / LLM_API_KEY / EMBEDDING_API_KEY / RERANK_API_KEY / POSTGRES_PASSWORD / CADDY_DOMAIN
     environment:
       DATABASE_URL: postgresql+psycopg://rag:${POSTGRES_PASSWORD}@postgres:5432/rag
       REDIS_URL: redis://redis:6379/0
       USE_REAL: "true"
       SECRET_KEY: ${SECRET_KEY}
+      # 管理员 admin 的初始口令。**真实模式必须给**（不给的话首次建号会直接拒绝启动，
+      # 绝不回落公开口令）。留空 = 库里已经有 admin，不需要再建。
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
       # 推理走云 GPU 节点(经 SSH 隧道落到编排机 host.docker.internal:9000)
       EMBEDDING_PROVIDER: api
       EMBEDDING_API_BASE: ${EMBEDDING_API_BASE:-http://host.docker.internal:9000}
@@ -25,11 +28,31 @@ services:
       PARSER_USE_DOCLING: "false"
       VECTOR_STORE: inmemory          # 单 worker, 启动 reindex_all 重建;pgvector 待验证后再切
       MAX_UPLOAD_MB: "50"
+      # 反代后取**真实客户端 IP**：uvicorn 只信任来自 127.0.0.1 的 X-Forwarded-For，
+      # 而容器里 Caddy 的地址不是它 —— 不设这个的话 `request.client.host` 全是 Caddy
+      # 容器的 IP，按 IP 的限流（注册 / client-error）会退化成「全站共用一个桶」。
+      # ⚠️ 信任全部来源**只在当前拓扑下安全**：api 没有对外发布端口，只有 Caddy 能连到它。
+      # 一旦给 api 加了 ports 映射（哪怕只为调试），必须改成具体网段，否则直连者可以伪造
+      # X-Forwarded-For 绕过限流。
+      FORWARDED_ALLOW_IPS: "*"
+      # 对外暴露时把前端来源显式列出来（留空 = `*`，任意站点都能调本 API）。
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # 额度硬拦（安全审查 F5）：对外给用户用就该设上限 —— 否则一个号能无限烧服务端的 Key。
+      # QUOTA_LIMIT<=0 表示不设上限（启动会告警，不会静默）。
+      QUOTA_ENABLED: ${QUOTA_ENABLED:-false}
+      QUOTA_WINDOW: ${QUOTA_WINDOW:-day}
+      QUOTA_LIMIT: ${QUOTA_LIMIT:-0}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - rag_upload:/app/uploaded_files
       - rag_logs:/app/logs
+      # ⚠️ 升级注意：镜像现在以**非 root 用户 app** 运行。新建的具名卷会从镜像目录继承
+      # app 的属主；但**卷已存在**的话它是 root 属主，app 写不进去（上传会失败）。一次性修：
+      #     docker run --rm -v rag_rag_upload:/d alpine chown -R 1000:1000 /d
+      #     docker run --rm -v rag_rag_logs:/d   alpine chown -R 1000:1000 /d
+    # 健康检查由**镜像里的 HEALTHCHECK** 提供（backend/Dockerfile）—— 这里不再抄一遍，
+    # 免得两处漂移。
     depends_on:
       postgres:
         condition: service_healthy

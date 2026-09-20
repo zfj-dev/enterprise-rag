@@ -1,7 +1,7 @@
 """认证：注册 / 登录（JWT）/ 改密 / 登出。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,10 @@ _login_limiter = SlidingWindowLimiter(_LOGIN_WINDOW, max_keys=_LOGIN_MAX_KEYS)
 # 底层计数表（测试与 conftest 按用户名清理它）
 _login_attempts = _login_limiter.table
 
+# 注册限流：窗口一小时、键是**客户端 IP**（还没登录，拿不到用户身份）。
+_REGISTER_WINDOW = 3600.0
+_register_limiter = SlidingWindowLimiter(_REGISTER_WINDOW, max_keys=_LOGIN_MAX_KEYS)
+
 
 @router.get("/health")
 def health():
@@ -30,7 +34,12 @@ def health():
 
 
 @router.post("/register", response_model=TokenResponse)
-def register(body: RegisterRequest, db: Session = Depends(get_db)):
+def register(body: RegisterRequest, request: Request, db: Session = Depends(get_db)):
+    # 按 IP 限流：这个接口不鉴权，不限流就是「开放建号」—— 每个号都能烧服务端的 LLM 额度
+    # （安全审查 F5）。键只能是 IP（还没登录，没有用户身份可用）。
+    ip = (request.client.host if request.client else "") or "?"
+    if not _register_limiter.allow(ip, get_settings().register_rate_limit_per_hour):
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "注册过于频繁,请稍后再试")
     if db.query(User).filter(User.username == body.username).first():
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "用户名已存在")
     u = User(username=body.username, password_hash=hash_password(body.password), role="viewer")

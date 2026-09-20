@@ -170,7 +170,7 @@ def test_an_existing_usage_table_gains_the_new_columns(tmp_path):
     """老库的 usage_records 没有 cost / price_note —— 补列漏了就会在记账那一刻撞 no such column。"""
     from sqlalchemy import create_engine, inspect, text
 
-    from app.db.migrate import ensure_sqlite_columns
+    from app.db.migrate import ensure_missing_columns
 
     engine = create_engine("sqlite:///%s" % (tmp_path / "old.db").as_posix())
     with engine.begin() as conn:          # 造一张票 27 时期的旧表
@@ -179,7 +179,7 @@ def test_an_existing_usage_table_gains_the_new_columns(tmp_path):
                           "input_tokens INTEGER, output_tokens INTEGER, source VARCHAR(16), "
                           "source_note TEXT)"))
 
-    added = ensure_sqlite_columns(engine)
+    added = ensure_missing_columns(engine)
 
     have = {c["name"] for c in inspect(engine).get_columns("usage_records")}
     assert {"cost", "price_note"} <= have

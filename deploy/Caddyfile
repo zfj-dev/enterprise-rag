@@ -3,14 +3,40 @@
 # CADDY_DOMAIN set    -> auto HTTPS (needs ports 80/443 + DNS)
 {$CADDY_DOMAIN::80} {
 	encode zstd gzip
-	reverse_proxy api:8000
+
+	# 请求体总量上限 —— **取最大的那一档（上传）**。
+	#
+	# 为什么不在这里按路径分设：Caddy 对同一 site block 里的多条 `request_body` 是
+	# **串联**（都生效）而不是「局部覆盖全局」，全局那条 1MB 会照样作用在放宽的路径上，
+	# 把 1~50MB 的正常上传一并挡掉。要做分路径得改用互斥的 `handle` 块，那条依赖指令
+	# 执行序、本机没有 Caddy 可验证，不值得为一个「兜底」引入不确定性。
+	#
+	# 细粒度按路径的限制交给应用层（`app/utils/bodylimit.py`）：JSON 接口 1MB、上传
+	# 放宽到 MAX_UPLOAD_MB+5，且它在**读 body 之前**就按 Content-Length 拒绝 —— 效果
+	# 相同，而且它同时覆盖「直连 8000 / 没上反代」的部署形态。
+	# ⚠️ 这里改大时记得与后端 MAX_UPLOAD_MB 对齐。
+	request_body {
+		max_size 64MB
+	}
 
 	header {
 		X-Content-Type-Options nosniff
 		X-Frame-Options DENY
 		Referrer-Policy no-referrer
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		# HSTS（安全审查 F10）：没有它，HTTPS 站点首次访问仍可被降级到 http。
+		# 局域网明文 HTTP（CADDY_DOMAIN 留空）时浏览器会忽略 HSTS，加了无害。
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		# 强制这一小撮：只限制「谁能嵌入 / 以谁为 base / 能不能用插件」，不影响正常
+		# 加载脚本样式，不会白屏。
+		Content-Security-Policy "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		# 完整策略先走 **Report-Only 观察**：前端是单文件内联脚本 + 内联 onclick + blob
+		# iframe 预览 PDF，直接强制 'self' 很可能挡到自己。等前端那轮在真浏览器里跑过、
+		# 把违规项收干净，再把这条改成强制的 Content-Security-Policy。
+		Content-Security-Policy-Report-Only "default-src 'self'; img-src 'self' data: blob:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-src 'self' blob:; worker-src 'self' blob:"
 	}
+
+	reverse_proxy api:8000
 
 	# SSE(chat stream) needs no buffering
 	@stream path /api/v1/chat/stream

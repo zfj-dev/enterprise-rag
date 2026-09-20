@@ -30,6 +30,11 @@ services:
     volumes:
       - rag_data:/app/data
       - rag_upload:/app/uploaded_files
+      # ⚠️ 升级注意：镜像现在以**非 root 用户 app** 运行。全新创建的具名卷会从镜像目录
+      # 继承 app 的属主，没问题；但**这个 compose 以前跑过**、卷已经存在的话，那卷是
+      # root 属主，app 写不进去（上传/建库会失败）。一次性修一下：
+      #     docker run --rm -v rag_rag_upload:/d alpine chown -R 1000:1000 /d
+      #     docker run --rm -v rag_rag_data:/d   alpine chown -R 1000:1000 /d
     restart: unless-stopped
 
 volumes:

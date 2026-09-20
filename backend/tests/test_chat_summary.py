@@ -132,7 +132,7 @@ def test_an_existing_db_gains_the_new_columns(tmp_path):
     """老库缺新列时补上 —— 不然升级后第一句话就是 500（本仓库没有迁移框架）。"""
     from sqlalchemy import create_engine, inspect, text
 
-    from app.db.migrate import ensure_sqlite_columns
+    from app.db.migrate import ensure_missing_columns
 
     engine = create_engine("sqlite:///%s" % (tmp_path / "old.db").as_posix())
     with engine.begin() as conn:      # 造一张「老版本」的会话表：没有 summary 两列
@@ -140,7 +140,7 @@ def test_an_existing_db_gains_the_new_columns(tmp_path):
                           "id VARCHAR(32) PRIMARY KEY, user_id VARCHAR(32), "
                           "kb_id VARCHAR(32), title VARCHAR(256))"))
 
-    added = ensure_sqlite_columns(engine)
+    added = ensure_missing_columns(engine)
 
     have = {c["name"] for c in inspect(engine).get_columns("chat_sessions")}
     assert {"summary", "summary_upto"} <= have

@@ -2,6 +2,14 @@
 
 加列本身是幂等的、也不需要回填（默认值就是语义），所以这里只做「缺了就补」这一件事，
 并把补了哪些列返回给启动日志 —— 免得升级后第一句话撞上 no such column 才知道。
+
+**名字不再带 `sqlite`**（原来叫 `ensure_sqlite_columns`）：这里用的 DDL 与判断
+（`ALTER TABLE x ADD COLUMN y` + `inspect()`）是引擎中立的，对 Postgres 同样成立 ——
+名字写着 sqlite 会让人误以为生产走的是另一条路（安全审查 F14）。
+
+⚠️ 已知边界：只补列，不建表、不改类型、不删列。长期演进还是得上 Alembic；在那之前，
+加字段请一律「只加带默认值的列」。（Postgres 这条路径**未经真机验证** —— 仓库的测试
+全跑 sqlite。）
 """
 from __future__ import annotations
 
@@ -22,8 +30,8 @@ _NEEDED: dict[str, dict[str, str]] = {
 }
 
 
-def ensure_sqlite_columns(engine) -> list[str]:
-    """给已有的 sqlite 库补上新增列；返回这次补了哪些（"表.列"）。"""
+def ensure_missing_columns(engine) -> list[str]:
+    """给已有的库补上缺失的列；返回这次补了哪些（"表.列"）。"""
     from sqlalchemy import inspect, text
 
     added: list[str] = []

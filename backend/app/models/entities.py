@@ -187,7 +187,11 @@ class Feedback(Base):
     __tablename__ = "feedback"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_id)
-    message_id: Mapped[str] = mapped_column(ForeignKey("chat_messages.id"), index=True)
+    # ondelete=CASCADE：删消息时连带删反馈。**只对新建的表生效** —— 既有库的外键改不了
+    # （本仓库没有迁移框架），所以删会话的接口显式清 feedback 才是真正兜底的那道
+    # （安全审查 F3）。
+    message_id: Mapped[str] = mapped_column(
+        ForeignKey("chat_messages.id", ondelete="CASCADE"), index=True)
     user_id: Mapped[str] = mapped_column(String(32), index=True)
     rating: Mapped[int] = mapped_column(Integer)  # 1=赞 -1=踩
     comment: Mapped[str] = mapped_column(Text, default="")

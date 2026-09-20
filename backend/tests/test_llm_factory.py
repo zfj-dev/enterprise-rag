@@ -97,7 +97,7 @@ def _seed_user(client, name: str, kb_name: str):
     from app.models.entities import User
 
     tok = client.post("/api/v1/auth/register",
-                      json={"username": name, "password": "pw123456"}).json()["access_token"]
+                      json={"username": name, "password": "pw1234567890"}).json()["access_token"]
     H = {"Authorization": f"Bearer {tok}"}
     kb = client.post("/api/v1/knowledge", json={"name": kb_name, "description": ""}, headers=H).json()["id"]
     up = client.post(f"/api/v1/documents?kb_id={kb}", headers=H,

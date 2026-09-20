@@ -1,16 +1,21 @@
 """进程内滑动窗口限流。
 
-两处在用，形状完全一样，只是窗口/上限/键不同：
-- `api/v1/auth.py`：按**用户名**限登录（键是攻击者可控的用户名）；
-- `main.py`：按**客户端 IP** 限前端错误上报（那个端点必须未鉴权，所以只能用 IP）。
+四处共用同一套形状，只有窗口/上限/键不同：
+- `api/v1/auth.py`：按**用户名**限登录、按**客户端 IP** 限注册；
+- `api/v1/chat.py`：按**用户**限问答频率；
+- `main.py`：按**客户端 IP** 限前端错误上报（那个端点必须未鉴权，只能用 IP）。
 
 **已知边界**（与部署形态绑定，别当成 bug）：计数只在**本进程内** —— 多 worker 时各算各的，
-要跨进程得换 Redis（配置里已有 `redis_url`）。上面的调用方各自也在注释里写了这条。
+要跨进程得换 Redis（配置里已有 `redis_url`）。调用方各自也在注释里写了这条。
 """
 from __future__ import annotations
 
 import threading
 import time
+
+# 实例登记表，**只给测试用**：`clear_all()` 一把清空，省得每新增一个限流器就得记得去
+# `tests/conftest.py` 补一行清理（漏了就是计数跨用例累积、测试莫名 429）。
+_ALL: list["SlidingWindowLimiter"] = []
 
 
 class SlidingWindowLimiter:
@@ -26,6 +31,7 @@ class SlidingWindowLimiter:
         self.max_keys = max_keys
         self._hits: dict[str, list[float]] = {}
         self._lock = threading.Lock()
+        _ALL.append(self)
 
     @property
     def table(self) -> dict[str, list[float]]:
@@ -62,3 +68,9 @@ class SlidingWindowLimiter:
             stale = sorted(self._hits, key=lambda k: self._hits[k][-1])
             for k in stale[: self.max_keys // 2]:
                 self._hits.pop(k, None)
+
+
+def clear_all() -> None:
+    """清空**所有**限流器的计数（测试用）。"""
+    for limiter in _ALL:
+        limiter.clear()

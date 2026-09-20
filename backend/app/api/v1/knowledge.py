@@ -9,6 +9,7 @@ from app.api.deps import get_current_user, get_db, get_runtime
 from app.core.container import Runtime
 from app.core.schemas import KnowledgeBaseCreate, KnowledgeBaseOut
 from app.models.entities import Chunk, Document, KnowledgeBase, User
+from app.services import document_service
 
 router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
@@ -55,12 +56,19 @@ def delete_kb(kb_id: str, user: User = Depends(get_current_user),
     if not kb or kb.owner_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "知识库不存在")
     docs = db.query(Document).filter(Document.kb_id == kb_id).all()
-    for doc in docs:
-        db.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
-    rt.vector_store.delete_by(kb_id=kb_id)
-    rt.bm25.remove_by(kb_id=kb_id)
-    for doc in docs:
-        db.delete(doc)
-    db.delete(kb)
-    db.commit()
+    paths = [d.file_path for d in docs if d.file_path]
+    # 与后台索引线程互斥：否则「正在索引的文档」会在我们删完之后又被写回索引
+    with document_service.DOC_WRITE_LOCK:
+        for doc in docs:
+            db.execute(delete(Chunk).where(Chunk.doc_id == doc.id))
+        rt.vector_store.delete_by(kb_id=kb_id)
+        rt.bm25.remove_by(kb_id=kb_id)
+        for doc in docs:
+            db.delete(doc)
+        db.delete(kb)
+        db.commit()
+    # **行删完再清盘**，顺序不能反：`drop_document_file` 靠「还有没有别的 Document
+    # 指向这个路径」判断独占，行还在的时候它一个都不会删 —— 那样知识库删了、磁盘上的
+    # 原文件却原封不动地留着（安全审查 F2）。
+    document_service.drop_kb_files(db, user.id, kb_id, paths)
     return {"ok": True, "deleted_docs": len(docs)}

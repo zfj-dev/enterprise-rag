@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -17,8 +16,10 @@ from app.api.v1 import (auth, chat, debug, documents, feedback, knowledge, llm, 
 from app.config import DEMO_ADMIN_PASSWORD, get_settings
 from app.db.session import SessionLocal, engine
 from app.models.entities import Base, User
-from app.utils.security import hash_password, verify_password
+from app.core.schemas import MIN_PASSWORD_CHARS, ClientErrorIn
+from app.utils.bodylimit import BodySizeLimitMiddleware
 from app.utils.ratelimit import SlidingWindowLimiter
+from app.utils.security import hash_password, verify_password
 
 import logging
 import logging.handlers
@@ -55,13 +56,29 @@ _client_error_limiter = SlidingWindowLimiter(_CE_WINDOW, max_keys=_CE_MAX_KEYS)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     Base.metadata.create_all(bind=engine)
-    from app.db.migrate import ensure_sqlite_columns
+    from app.db.migrate import ensure_missing_columns
 
-    ensure_sqlite_columns(engine)     # 已有库补上新增列（create_all 只会建表）
+    ensure_missing_columns(engine)     # 已有库补上新增列（create_all 只会建表）
     _seed_admin()
     _recover_stale_documents()
     _reindex()
     yield
+    _drain_indexing()
+
+
+def _drain_indexing() -> None:
+    """优雅关停：给在跑的（异步）索引线程一点时间收尾。
+
+    不等的话，正在索引的文档会被腰斩在「写了一半」的状态；下次启动
+    `fail_stale_processing` 会标成 failed 让用户重传（兜底还在），但用户白传一次。
+    """
+    from app.services import document_service
+
+    left = document_service.wait_for_processing()
+    if left:
+        print(f"[shutdown] {left} 个索引线程未在 "
+              f"{document_service.SHUTDOWN_WAIT_SECONDS:.0f}s 内收尾 —— "
+              "下次启动会把它们标成失败，请让用户重传")
 
 
 def create_app() -> FastAPI:
@@ -78,6 +95,17 @@ def create_app() -> FastAPI:
             {"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")}
             for e in exc.errors()
         ]})
+
+    # 请求体封顶。**加在 CORS 之前 = 更内层**（Starlette 的 add_middleware 是前插，
+    # 最后加的走在最前面）—— 这样它拒掉的 413 会经过 CORS 从而带上跨域响应头；
+    # 反过来放最外层的话，跨域前端会把 413 看成「CORS 失败」。它仍在路由读 body 之前，
+    # 所以该拦的照样拦得住。上传天然大得多，按路径前缀单独放宽 —— 但也不是无上限。
+    app.add_middleware(
+        BodySizeLimitMiddleware,
+        max_bytes=settings.max_body_mb * 1024 * 1024,
+        overrides={settings.api_prefix + "/documents":
+                   (settings.max_upload_mb + 5) * 1024 * 1024},
+    )
 
     _origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     if "*" in _origins and settings.use_real:
@@ -118,7 +146,13 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health():
-        # agent_enabled 一并发给前端：代理按钮该不该出现由服务端说了算，前端别自己猜（票 37）
+        """健康检查 + 前端启动时要的两个开关。
+
+        **这两个字段故意不鉴权**：前端在**登录之前**就要按它们渲染 —— 模式徽章看
+        `use_real`、「深度思考」按钮该不该出现看 `agent_enabled`（票 37，由服务端说了算，
+        前端别自己猜）。安全审查 F13 建议把它们挪到鉴权接口后面，但那样会把这两处 UI
+        打回「自己猜」。两个值的敏感度也低：只是「是不是演示模式」和「代理链路开没开」。
+        """
         return {"status": "ok", "app": settings.app_name, "use_real": settings.use_real,
                 "agent_enabled": settings.agent_enabled}
 
@@ -131,64 +165,70 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=500, content={"detail": "服务器内部错误"})
 
     @app.post("/api/v1/client-error")
-    async def client_error(payload: dict, request: Request):
+    async def client_error(payload: ClientErrorIn, request: Request):
         """前端 window.onerror 上报 JS 错误；落进 error.log 以便聚合。
 
         **故意不要求鉴权**：登录页自己的报错也得能上来。代价是这个端点是公开的，
-        所以补两道（安全审查 H2）：
+        所以补三道（安全审查 H2 / F1）：
         - 按 IP 限流 —— 否则就是一条把磁盘写满的路径；
-        - 剥掉 `\\r`/`\\n` —— 否则上报内容能伪造出整行日志（日志注入）。
+        - 剥掉 `\\r`/`\\n` —— 否则上报内容能伪造出整行日志（日志注入）；
+        - 字段与长度由 `ClientErrorIn` 卡死，请求体本身再由 BodySizeLimitMiddleware 封顶。
         """
         ip = (request.client.host if request.client else "") or "?"
         if not _client_error_limiter.allow(ip, _CE_MAX):
             return JSONResponse(status_code=429, content={"ok": False, "reason": "上报过于频繁"})
-        msg = str(payload.get("msg", ""))[:2000]
         _error_logger.error("CLIENT_JS_ERROR ip=%s %s",
-                            ip, msg.replace("\r", " ").replace("\n", " "))
+                            ip, payload.msg.replace("\r", " ").replace("\n", " "))
         return {"ok": True}
 
     return app
 
 
 def _seed_admin() -> None:
-    """首次启动建一个管理员。**口令不写死**。
+    """首次启动建一个管理员。**口令不写死、也不打进日志**。
 
-    安全审查 B1：原来无条件用 `admin123`，而这个口令写在 README 与 CLAUDE.md 里 ——
-    等于把管理员身份公开。现在分三种情况：
-    - 配了 `ADMIN_PASSWORD` → 用它（真实模式要求至少 12 位，太短直接拒绝启动）；
-    - 真实模式没配 → **随机生成并打印一次**（宁可让操作者去日志里抄一次，
-      也不能让一个全网都知道的口令留在线上）；
-    - 演示模式没配 → 保留 `admin123`，但**每次都提醒**这是公开口令。
+    安全审查 B1 + F11：
+    - 配了 `ADMIN_PASSWORD` → 用它（真实模式要求至少 12 位，太短拒绝启动）；
+    - 真实模式没配、且**确实要建号** → 拒绝启动。不生成、不打印：容器日志往往会被采集，
+      把初始口令写进去等于换个地方泄漏；而真实模式本来也没有「合理的默认口令」可言；
+    - 演示模式没配 → 保留公开的 `admin123`，但**每次启动都提醒**。
 
-    另外：库里已存在 admin 时不动它（口令轮换走 `POST /auth/change-password`），
-    但会检查它是不是还挂着那个公开口令，是就喊一声。
+    库里已存在 admin 时**不会**重建（口令轮换走 `POST /auth/change-password`）——
+    所以这条规则不会让既有部署起不来；但会验一下它是不是还挂着那个公开口令，是就喊一声。
     """
     s = get_settings()
     # 读**配置字段**而不是 os.environ：`.env` 里的值 pydantic 只灌进 Settings，
     # 裸读环境变量会让「按 .env.example 配好」的人静默回落公开口令。
     pwd = (s.admin_password or "").strip()
-    if pwd:
-        if s.use_real and len(pwd) < 12:
-            raise RuntimeError("ADMIN_PASSWORD 太短（真实模式至少 12 字符）")
-    elif s.use_real:
-        pwd = secrets.token_urlsafe(12)
-        print(f"[seed] 管理员 admin 的初始口令（**仅本次打印**，登录后请立即修改）：{pwd}")
-    else:
-        pwd = DEMO_ADMIN_PASSWORD
-        print(f"[seed] 注意：演示模式 admin 的口令是公开的 {DEMO_ADMIN_PASSWORD}。"
-              "上线前请设 ADMIN_PASSWORD，或登录后用 /auth/change-password 改掉。")
 
     db: Session = SessionLocal()
     try:
         admin = db.query(User).filter(User.username == "admin").first()
-        if admin is None:
-            db.add(User(username="admin", password_hash=hash_password(pwd), role="admin"))
-            db.commit()
-        elif verify_password(DEMO_ADMIN_PASSWORD, admin.password_hash):
+        if admin is not None:
             # 口令是公开的这件事，光看数据库看不出来 —— 主动验一次并在日志里说清楚，
             # 否则「已经建成 admin」这件事会让人以为「口令的问题已经处理过了」。
-            print(f"[seed] 注意：管理员 admin 的口令仍是公开的 {DEMO_ADMIN_PASSWORD} —— "
-                  "请立刻用 POST /api/v1/auth/change-password 改掉。")
+            if verify_password(DEMO_ADMIN_PASSWORD, admin.password_hash):
+                print(f"[seed] 注意：管理员 admin 的口令仍是公开的 {DEMO_ADMIN_PASSWORD} —— "
+                      "请立刻用 POST /api/v1/auth/change-password 改掉。")
+            return
+
+        # 口令强度只在**确实要建号**时校验：库里已有 admin 的既有部署不该因为 .env 里
+        # 那个值（压根不会被用到）而拒绝启动。
+        if pwd and s.use_real and len(pwd) < MIN_PASSWORD_CHARS:
+            raise RuntimeError("ADMIN_PASSWORD 太短（真实模式至少 %d 字符）" % MIN_PASSWORD_CHARS)
+
+        if not pwd:
+            if s.use_real:
+                raise RuntimeError(
+                    "首次启动要建管理员，但没配 ADMIN_PASSWORD —— 真实模式不接受默认口令，"
+                    "也不会把生成的口令打进日志（那是换个地方泄漏）。"
+                    "请设 ADMIN_PASSWORD（≥%d 字符）后重启。" % MIN_PASSWORD_CHARS)
+            pwd = DEMO_ADMIN_PASSWORD
+            print(f"[seed] 注意：演示模式 admin 的口令是公开的 {DEMO_ADMIN_PASSWORD}。"
+                  "上线前请设 ADMIN_PASSWORD，或登录后用 /auth/change-password 改掉。")
+
+        db.add(User(username="admin", password_hash=hash_password(pwd), role="admin"))
+        db.commit()
     finally:
         db.close()
 

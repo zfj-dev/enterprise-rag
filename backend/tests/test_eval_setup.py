@@ -12,7 +12,7 @@ def test_ensure_schema_backfills_columns_too(monkeypatch):
     from app import eval_setup
 
     seen: list = []
-    monkeypatch.setattr(migrate, "ensure_sqlite_columns", lambda engine: seen.append(engine))
+    monkeypatch.setattr(migrate, "ensure_missing_columns", lambda engine: seen.append(engine))
 
     eval_setup.ensure_schema()
 

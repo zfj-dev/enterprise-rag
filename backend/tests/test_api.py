@@ -5,7 +5,7 @@ from tests.helpers import sse_events
 
 
 def _token(client, username: str) -> str:
-    r = client.post("/api/v1/auth/register", json={"username": username, "password": "pw123456"})
+    r = client.post("/api/v1/auth/register", json={"username": username, "password": "pw1234567890"})
     assert r.status_code == 200, r.text
     return r.json()["access_token"]
 
@@ -92,7 +92,7 @@ def test_chatting_against_someone_elses_knowledge_base_is_not_found(client):
 def test_auth_flow(client):
     tok = _token(client, "alice")
     assert tok
-    ok = client.post("/api/v1/auth/login", json={"username": "alice", "password": "pw123456"})
+    ok = client.post("/api/v1/auth/login", json={"username": "alice", "password": "pw1234567890"})
     assert ok.status_code == 200
     bad = client.post("/api/v1/auth/login", json={"username": "alice", "password": "wrong091"})
     assert bad.status_code == 401

@@ -23,7 +23,7 @@ def register_and_kb(client, name: str):
     from app.models.entities import User
 
     tok = client.post("/api/v1/auth/register",
-                      json={"username": name, "password": "pw123456"}).json()["access_token"]
+                      json={"username": name, "password": "pw1234567890"}).json()["access_token"]
     H = {"Authorization": "Bearer {}".format(tok)}
     kb_id = client.post("/api/v1/knowledge", json={"name": "{}-kb".format(name), "description": ""},
                         headers=H).json()["id"]

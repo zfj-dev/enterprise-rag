@@ -14,7 +14,7 @@ from app.api.deps import get_current_user, get_db, get_runtime
 from app.config import get_settings
 from app.core.container import Runtime
 from app.core.parser import detect_kind
-from app.core.schemas import DocumentOut
+from app.core.schemas import DocumentOut, RenameDocumentIn
 from app.models.entities import Chunk, Document, KnowledgeBase, User
 from app.services import document_service
 
@@ -35,22 +35,6 @@ def _to_out(d: Document) -> DocumentOut:
                        page_count=d.page_count, chunk_count=d.chunk_count, error=d.error,
                        progress=document_service.get_progress(d.id, d.status), size=size,
                        created_at=d.created_at.isoformat() if d.created_at else "")
-
-
-def _drop_file(db: Session, path: str | None) -> None:
-    """删掉这个文档**独占**的文件。
-
-    还有别的文档指向同一路径就不动它 —— 老库里的文档可能是共用一个路径存下来的
-    （#64 之前按文件名全局存），删文件会把别人的文档一起弄坏。
-    """
-    if not path:
-        return
-    if db.query(Document).filter(Document.file_path == path).count():
-        return
-    try:
-        os.remove(path)
-    except OSError as e:      # noqa: BLE001 —— 清磁盘失败不该让删除接口失败
-        logger.warning("删除文档文件失败(%s): %s", path, e)
 
 
 _READ_CHUNK = 1 << 20      # 1MB
@@ -108,7 +92,7 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
     # 磁盘路径**不能只按文件名**：那是个全局命名空间，同名文件互相覆盖；而
     # /documents/{id}/file 是照着 file_path 把字节直接发出去的 —— 等于把别人的文件
     # 发给当前用户，后台线程还会拿被覆盖后的内容去索引（#64）。
-    dest_dir = os.path.join("uploaded_files", user.id, kb_id)
+    dest_dir = document_service.kb_upload_dir(user.id, kb_id)
     os.makedirs(dest_dir, exist_ok=True)
     dest = os.path.join(dest_dir, uuid4().hex + os.path.splitext(name)[1].lower())
     with open(dest, "wb") as f:
@@ -122,7 +106,7 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
             old_path = existing.file_path
             db.delete(existing)
             db.commit()
-        _drop_file(db, old_path)
+        document_service.drop_document_file(db, old_path)
 
     doc = Document(kb_id=kb_id, owner_id=user.id, filename=name,
                    file_path=dest, status="processing")
@@ -133,7 +117,7 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
         db.rollback()
         # 行没落库，刚写的文件就没人认领了 —— 留着就是永远没人清的垃圾
         # （清理逻辑是照着 Document.file_path 做的，没有行就没有入口）。
-        _drop_file(db, dest)
+        document_service.drop_document_file(db, dest)
         raise
     db.refresh(doc)
     document_service.launch_processing(doc.id)  # 后台异步解析+嵌入
@@ -184,11 +168,11 @@ def doc_file(doc_id: str, user: User = Depends(get_current_user), db: Session = 
 
 
 @router.patch("/{doc_id}", response_model=DocumentOut)
-def rename_doc(doc_id: str, body: dict, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def rename_doc(doc_id: str, body: RenameDocumentIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     doc = db.get(Document, doc_id)
     if not doc or doc.owner_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "文档不存在")
-    name = (body.get("filename") or "").strip()
+    name = body.filename.strip()
     if name:
         doc.filename = name
         db.commit()
@@ -209,5 +193,5 @@ def delete_doc(doc_id: str, user: User = Depends(get_current_user),
         path = doc.file_path
         db.delete(doc)
         db.commit()
-    _drop_file(db, path)
+    document_service.drop_document_file(db, path)
     return {"ok": True}

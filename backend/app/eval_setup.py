@@ -15,12 +15,12 @@ def ensure_schema() -> None:
     `create_all` 只建表、不会给已有的表加列：少了补列这一步，老库上跑评测会当场撞
     `no such column`（与 app 启动的 lifespan 走同一处，见 app/db/migrate.py）。
     """
-    from app.db.migrate import ensure_sqlite_columns
+    from app.db.migrate import ensure_missing_columns
     from app.db.session import engine
     from app.models.entities import Base
 
     Base.metadata.create_all(bind=engine)
-    ensure_sqlite_columns(engine)
+    ensure_missing_columns(engine)
 
 
 def write_report(path: str, lines: list[str]) -> None:

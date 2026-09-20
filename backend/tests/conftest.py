@@ -54,9 +54,15 @@ def fresh_state():
     import app.api.deps as deps
 
     deps._runtime = None
-    import app.api.v1.auth as _auth_mod
+    # 所有滑动窗口限流器一把清（登录 / 注册 / 问答 / client-error）。
+    # 用集中清理而不是逐个 `.clear()`：新增限流器时不必再回来改这里（漏了就跨用例累积）。
+    # 限流器是在各模块**导入时**建出来的，所以先确保那几个模块都已导入，清才算数。
+    import app.api.v1.auth    # noqa: F401
+    import app.api.v1.chat    # noqa: F401
+    from app import main as _main                          # noqa: F401
+    from app.utils import ratelimit as _ratelimit
 
-    _auth_mod._login_attempts.clear()   # 登录限流计数按测试清空,避免跨用例累积
+    _ratelimit.clear_all()
 
     from app.utils import security as _security
 

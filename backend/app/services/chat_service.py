@@ -63,13 +63,31 @@ def _maybe_rewrite(llm: LLM, question: str, history: list[dict]) -> str:
     return rewritten or question
 
 
+def _owned(db: Session, session_id: str, user: User) -> ChatSession | None:
+    """取会话并**断言属主**。
+
+    会话 id 由客户端提供（前端拿 UUID 当 conversationId），所以「拿别人的会话 id 来读
+    历史」是一条现成的路。调用方各自的前置校验（`chat.py` / `debug.py`）负责给出人话的
+    404；这里是**最后一道** —— 漏了校验的调用方会在这里失败，而不是静默越权
+    （安全审查 F4）。
+
+    抛的是 `PermissionError`（不是 HTTPException）：走到这里说明**有调用方漏了校验**，
+    是个程序错误，应该以 500 暴露出来并进日志，而不是被包装成「你没权限」的 404 让人
+    以为是一次正常的拒绝。
+    """
+    sess = db.get(ChatSession, session_id)
+    if sess is not None and sess.user_id != user.id:
+        raise PermissionError("会话不属于当前用户：%s" % session_id)
+    return sess
+
+
 def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str | None) -> ChatSession:
     if session_id:
         # 前端以 UUID(v4) 作为 conversationId 直接当会话 id，以便多对话互相隔离、多轮上下文对得上。
         # **查了没有就插** 是 check-then-act：同一条会话的第一句话并发进来时两边都查不到、
         # 都去插，后插的撞 UNIQUE 直接 500。撞了就用已经插进去的那条。
         for _ in range(2):
-            sess = db.get(ChatSession, session_id)
+            sess = _owned(db, session_id, user)
             if sess:
                 return sess
             db.add(ChatSession(id=session_id, user_id=user.id, kb_id=kb_id, title=""))
@@ -79,7 +97,12 @@ def _get_or_create_session(db: Session, user: User, kb_id: str, session_id: str 
                 db.rollback()          # 另一条请求刚插进去 —— 下一轮取它的
                 continue
             return db.get(ChatSession, session_id)
-        return db.get(ChatSession, session_id)
+        # 两轮都撞 UNIQUE：说明这个 id 已被占用（并发下是同一用户的另一条请求，
+        # 攻击者场景下可能是别人的会话）。`_owned` 会先过属主断言。
+        sess = _owned(db, session_id, user)
+        if sess is None:               # 理论上到不了：UNIQUE 冲突说明那行一定在
+            raise RuntimeError("会话 %s 既建不出来也取不到" % session_id)
+        return sess
     sess = ChatSession(user_id=user.id, kb_id=kb_id, title="")
     db.add(sess)
     db.commit()
