@@ -127,6 +127,12 @@ class FakeLLM(LLM):
             yield piece
 
 
+# 「等会儿再来」的明确信号 —— 与「你的请求有问题」是两回事（#66 复核，真机上踩到）
+_RETRYABLE_STATUSES = (429, 502, 503, 504)
+_STREAM_ATTEMPTS = 3        # 含第一次；限流时最多再试 2 次
+_RETRY_BACKOFF = 1.0        # 秒；第 n 次重试等 n * backoff
+
+
 class CloudLLM(LLM):
     """OpenAI 兼容接口（DeepSeek / SiliconFlow / qwen），text-event-stream 增量。"""
 
@@ -191,17 +197,37 @@ class CloudLLM(LLM):
         payload = self._post_payload(messages)
         # 让 OpenAI 兼容的 provider 在最后一个 chunk 里带上 usage（与账单同口径）
         payload["stream_options"] = {"include_usage": True}
-        try:
-            yield from self._stream_lines(url, payload, headers, usage)
-            return
-        except self._httpx.HTTPStatusError as e:
-            if not (400 <= e.response.status_code < 500):
-                raise
-            # provider 不认这个字段 —— 去掉它重来一次（这一次拿不到 usage，记账回退本地口径）。
-            # 状态码是在吐第一个字之前就检查的，所以重试不会把正文吐两遍。
-            logger.warning("provider 拒绝了 stream_options（%s），去掉后重试：本次拿不到账单口径", e)
-        payload.pop("stream_options", None)
-        yield from self._stream_lines(url, payload, headers, usage)
+        dropped = False
+        for attempt in range(_STREAM_ATTEMPTS):
+            emitted = False
+            try:
+                for piece in self._stream_lines(url, payload, headers, usage):
+                    emitted = True
+                    yield piece
+                return
+            except self._httpx.HTTPStatusError as e:
+                code = getattr(e.response, "status_code", None)
+                # 限流 / 暂时不可用：等一会儿**原样**再来。只在这一步还没吐出任何字时重试，
+                # 否则正文会被吐两遍（状态码是在吐第一个字之前检查的，所以这里是安全的）。
+                if (code in _RETRYABLE_STATUSES and not emitted
+                        and attempt < _STREAM_ATTEMPTS - 1):
+                    wait = _RETRY_BACKOFF * (attempt + 1)
+                    logger.warning("provider 暂时不可用（model=%s，%s），%.0f 秒后重试（第 %d 次）",
+                                   self.model, e, wait, attempt + 1)
+                    time.sleep(wait)
+                    continue
+                if code != 400 or dropped:
+                    # 401/403（没配好 / 没权限 / 额度用尽）重试多少次都一样，如实抛出去。
+                    # 以前这里把**任何 4xx** 都当成「字段不认」：429 限流会被误读成字段问题，
+                    # 于是删掉字段再打一遍 —— 对已经限流的端点又打一次，日志还写着错的原因，
+                    # 排查时根本看不出真因（#66 复核，真机上就是这么被误导的）。
+                    raise
+                # 400 才是「这个字段我不认」的信号 —— 去掉它重来一次（这一次拿不到账单口径）
+                logger.warning("provider 用 400 拒了带 stream_options 的请求（model=%s，%s），"
+                               "去掉后重试：本次拿不到账单口径（若是别的原因，重试会照原样再失败）",
+                               self.model, e)
+                payload.pop("stream_options", None)
+                dropped = True
 
     def chat_with_tools(self, messages: list[dict],
                         tools: Sequence[dict] | None = None,

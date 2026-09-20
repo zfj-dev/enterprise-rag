@@ -21,6 +21,9 @@ expect 若只是几个关键词，这一项会退化成 0/1 —— 报告口径�
 from __future__ import annotations
 
 import re
+import threading
+import time
+
 from concurrent.futures import ThreadPoolExecutor
 
 from app.config import get_settings
@@ -92,7 +95,8 @@ class RagasJudge:
 
     def __init__(self, llm, embedding, label: str | None = None,
                  n_questions: int = DEFAULT_N_QUESTIONS,
-                 concurrency: int | None = None):
+                 concurrency: int | None = None,
+                 min_interval: float | None = None):
         if getattr(llm, "api_key", None) == "":
             raise JudgeUnavailable("未配置 LLM API Key，RAGAS 裁判不可用")
         s = get_settings()
@@ -101,6 +105,12 @@ class RagasJudge:
         self._n = n_questions
         # 逐条判定彼此独立 → 并行跑（#55）。设 1 退回串行。
         self._workers = concurrency if concurrency is not None else s.ragas_judge_concurrency
+        # 匀速发（#66 复核）：并发只解决「互相等网络」，不解决**发出多快** —— 而限流卡的是
+        # 后者。裁判一条问答能发出几十次小调用，并发一起打就是一波突发。
+        self._min_interval = (float(min_interval) if min_interval is not None
+                              else float(getattr(s, "ragas_judge_min_interval", 0.0) or 0.0))
+        self._pace_lock = threading.Lock()
+        self._last_call = 0.0
         # 口径字符串要与真正在用的裁判对齐 —— 模型与温度都优先读对象自身的，读不到才回落配置
         model = getattr(llm, "model", None) or s.ragas_judge_model
         temp = getattr(llm, "temperature", None)
@@ -170,7 +180,25 @@ class RagasJudge:
 
     # ---- 与模型打交道 ----
 
+    def _pace(self) -> None:
+        """两次调用之间至少隔 `ragas_judge_min_interval` 秒。
+
+        百炼的限流是「每分钟请求数 + 秒级突发」两档；触发后**要等窗口过去**（通常 1 分钟），
+        所以 1-2 秒的退避没用 —— 得一开始就别把请求堆在一起。锁是故意的：并发度只用来
+        重叠网络等待，发出去的节奏由这里说了算。
+        """
+        if self._min_interval <= 0:
+            return
+        with self._pace_lock:
+            now = time.monotonic()
+            start_at = max(now, self._last_call + self._min_interval)
+            self._last_call = start_at        # **预约**一个发车时刻，锁立刻放掉
+        wait = start_at - now
+        if wait > 0:
+            time.sleep(wait)                  # 睡在锁外面：并发仍然能重叠网络等待
+
     def _ask(self, prompt: str) -> str:
+        self._pace()
         try:
             return "".join(self._llm.stream([{"role": "user", "content": prompt}]))
         except Exception as e:   # noqa: BLE001 —— 裁判的任何失败都转成「不可用」，绝不静默

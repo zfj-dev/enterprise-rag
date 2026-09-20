@@ -69,6 +69,20 @@ def _answer_fn(db, rt, user):
     return answer_with
 
 
+_PROGRESS_EVERY = 20
+
+
+def _progress(step: str, done: int, total: int) -> None:
+    """长段落的心跳：每 20 步打一行，最后一步一定打。
+
+    两百条、每条十几秒 —— 一步可能几十秒，不打进度的话外面看就是「卡死」
+    （#65 复核：跑了一整段，终端一片空白，只能靠数库里的用量记录猜进度）。
+    `flush=True`：输出重定向到文件时也不会卡在缓冲区里。
+    """
+    if done % _PROGRESS_EVERY == 0 or done == total:
+        print("[rgb] %s %d/%d" % (step, done, total), flush=True)
+
+
 def _answer_cursor(entries: list, kbs: list, answer_with):
     """按**条目顺序**取这一条自己的库，返回 core 要的 answer_fn。
 
@@ -84,6 +98,7 @@ def _answer_cursor(entries: list, kbs: list, answer_with):
         if i >= len(entries) or entries[i]["question"] != question:
             raise RuntimeError("问答函数与条目顺序对不上（第 %d 条：期望 %r，实际 %r）"
                                % (i, entries[i]["question"] if i < len(entries) else None, question))
+        _progress("答题", i + 1, len(entries))     # 打在做题**之前**：能看出当前卡在哪一题
         return answer_with(kbs[i], question)
 
     return ask
@@ -136,9 +151,12 @@ def main() -> None:
     rt = build_runtime()
     kbs: list = []
     t0 = time.time()
+    print("[rgb] 开始：%d 条，建索引与答题各每 %d 条报一次进度" % (len(entries), _PROGRESS_EVERY),
+          flush=True)
     for i, e in enumerate(entries):
         kbs.append("rgbeval%d" % i)
         _index_entry(rt, e, kbs[-1], "rgb%d" % i, user.id)
+        _progress("建索引", i + 1, len(entries))
     lines.append("建索引耗时 %.1fs（%d 条）" % (time.time() - t0, len(entries)))
     lines.append("")
 

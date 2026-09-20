@@ -98,6 +98,12 @@ def _answer_fn(client: httpx.Client, kb_id: str, headers: dict, session_id: str 
         # 印成「事实命中 0%」。宁可整段标「未跑」，也不产一个 0%（#64 批 4）。
         if r.status_code != 200:
             raise RuntimeError("问答接口返回 %d：%s" % (r.status_code, r.text[:200]))
+        # 状态码 200 ≠ 这一问跑成了：**流可能中途断掉**（生成模型报错、连接被掐）。那时
+        # `_parse_sse` 只拿到残缺的 answer，报告照样印成「事实命中 0%」—— 与上面那条同一类
+        # 假数字（实测踩过：生成模型换成没权限的，每问都吐完 sources 就断）。
+        # 服务端每条正常结束的流都以 `data: [DONE]` 收尾，拿它当「跑完了」的凭据。
+        if "data: [DONE]" not in r.text:
+            raise RuntimeError("问答流没跑完（没收到 [DONE]）—— 这一问不作数，别当成没命中")
         return _parse_sse(r.text)
     return ask
 
@@ -128,9 +134,16 @@ def _build_judge():
 
 
 def _upload_line(upload: dict) -> str:
-    """上传结果的一行描述。"""
-    return "上传: %s chunks=%s 页数=%s" % (upload.get("status"), upload.get("chunk_count"),
-                                           upload.get("page_count"))
+    """上传结果的一行描述；**失败时把原因带上**。
+
+    只写「failed」等于把排查的第一步丢给读者 —— 实测真机上就是
+    `上传: failed chunks=0 页数=46`，失败原因明明就在同一个 dict 里（#66 复核）。
+    """
+    line = "上传: %s chunks=%s 页数=%s" % (upload.get("status"), upload.get("chunk_count"),
+                                          upload.get("page_count"))
+    if upload.get("status") == "failed" and upload.get("error"):
+        line += " —— %s" % upload["error"]
+    return line
 
 
 def _truthy(raw) -> bool:
@@ -155,6 +168,12 @@ def run_online(base=None, golden_path=None, doc_path=None):
 
     sess = OnlineSession.open(base, doc_path)
     c, H, kb, upload = sess.client, sess.headers, sess.kb_id, sess.upload
+    # 文档没入库就别往下算：这 10 题会变成「模型拿自己的知识硬答」，而报告里那几个
+    # 「事实命中 100%」看着跟真跑出来的一模一样（实测踩过：上传 failed、chunks=0，
+    # 而后三题来源为空、答案里还写着 [来源: 已知信息]）。缺前置一律写「未跑」。
+    if upload.get("status") != "indexed":
+        raise RuntimeError("被评文档没入库（%s）—— 这一段的数字不成立"
+                           % _upload_line(upload))
 
     # EVAL_MULTI_TURN=1：同一个会话里连着问 —— 历史累积后压缩才会触发，降幅才有数
     multi = _truthy(os.environ.get("EVAL_MULTI_TURN"))

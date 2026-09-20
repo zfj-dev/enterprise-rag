@@ -23,6 +23,9 @@ os.environ.update({
     "LLM_API_KEY": "",
     "MAX_CONCURRENT_STREAMS_PER_USER": "2",
     "RERANK_STRICT": "false",
+    # 裁判匀速发默认 1.2 秒一次（真机限流），测试里钉成 0 —— 否则每个裁判用例
+    # 都要真等上好几秒。要测匀速的那两条自己显式给 min_interval。
+    "RAGAS_JUDGE_MIN_INTERVAL": "0",
 })
 
 import pytest  # noqa: E402

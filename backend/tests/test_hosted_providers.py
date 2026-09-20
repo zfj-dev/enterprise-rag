@@ -256,3 +256,111 @@ def test_a_dimension_mismatch_is_an_error_not_a_silent_wrong_score(monkeypatch):
     with pytest.raises(RuntimeError) as e:
         SiliconFlowEmbedding().encode(["甲"])
     assert "EMBEDDING_DIM" in str(e.value)          # 报错要告诉人怎么改
+
+
+# ---------- 临时故障要重试（#66 复核：真机上被一次超时废掉一整轮评测）----------
+
+def _embed_llm(monkeypatch, actions):
+    """造一个照剧本应答的 httpx.Client；`actions` 每次请求取一项，异常则让它抛出来。"""
+    import httpx
+
+    from app.core import embedding as emb
+
+    seen: list = []
+
+    class Resp:
+        def __init__(self, action):
+            self.action = action
+
+        def raise_for_status(self):
+            if isinstance(self.action, Exception):
+                raise self.action
+
+        def json(self):
+            return {"data": [{"index": 0, "embedding": [0.0] * 1024}]}
+
+    class Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+        def post(self, url, json=None, headers=None):
+            seen.append(url)
+            return Resp(actions[min(len(seen) - 1, len(actions) - 1)])
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    monkeypatch.setattr(emb, "_EMBED_BACKOFF", 0)          # 测试别真等
+    return emb.SiliconFlowEmbedding(base="https://x/v1", api_key="k"), seen
+
+
+def _timeout():
+    import httpx
+    return httpx.ReadTimeout("The read operation timed out")
+
+
+def test_a_timed_out_batch_is_retried(monkeypatch):
+    """一次网络抖动不该毁掉整份文档 —— 真机上就是这么废掉一整轮评测的。"""
+    llm, seen = _embed_llm(monkeypatch, [_timeout(), "ok"])
+
+    got = llm.encode(["一"])
+
+    assert len(got) == 1 and len(seen) == 2      # 超时那次 + 成功那次
+
+
+def test_a_persistent_timeout_still_fails_loudly(monkeypatch):
+    """重试完还是不通就如实抛 —— 嵌入拿不到就得报错，绝不降级成空向量。"""
+    import httpx
+
+    import pytest
+
+    llm, seen = _embed_llm(monkeypatch, [_timeout()])
+
+    with pytest.raises(httpx.ReadTimeout):
+        llm.encode(["一"])
+
+    assert len(seen) == 3                        # 试满次数才放弃
+
+
+def test_a_bad_request_is_not_retried(monkeypatch):
+    """参数错这类不会自愈的错误立刻抛，别浪费三次往返。"""
+    import httpx
+
+    import pytest
+
+    req = httpx.Request("POST", "https://x/v1")
+    err = httpx.HTTPStatusError("bad", request=req,
+                                response=httpx.Response(400, request=req))
+    llm, seen = _embed_llm(monkeypatch, [err])
+
+    with pytest.raises(httpx.HTTPStatusError):
+        llm.encode(["一"])
+
+    assert len(seen) == 1
+
+
+def test_a_malformed_response_is_not_retried(monkeypatch):
+    """条数对不上是**逻辑错**，重试也是白搭 —— 直接抛。"""
+    import httpx
+
+    import pytest
+
+    from app.core import embedding as emb
+
+    class Resp:
+        def raise_for_status(self): pass
+        def json(self): return {"data": []}
+
+    class Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, url, json=None, headers=None): return Resp()
+
+    monkeypatch.setattr(httpx, "Client", Client)
+    calls = {"n": 0}
+    real = emb.SiliconFlowEmbedding(base="https://x/v1", api_key="k")
+
+    with pytest.raises(RuntimeError):
+        real.encode(["一"])
+    calls["n"] += 1
+    assert calls["n"] == 1
