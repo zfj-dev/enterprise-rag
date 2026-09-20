@@ -10,7 +10,7 @@ import logging
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,30 @@ logger = logging.getLogger(__name__)
 # 托管嵌入/重排的默认站点（SiliconFlow）。两者共用一份，改一家只需改这里；
 # 要接别家 OpenAI 兼容的托管服务，用 EMBEDDING_API_BASE / RERANK_API_BASE 覆盖即可。
 SILICONFLOW_BASE = "https://api.siliconflow.cn/v1"
+
+# 仓库里出现过、或一眼可猜的「公开密钥」。拿它们签 JWT = 把管理员身份发给所有人 ——
+# 这些值在 README / .env.example / 部署编排 / 运行脚本里都能读到，所以点名拒绝。
+# （下面另有一道长度闸兜底：黑名单挡不住随手写的 `my-secret-123`。）
+#
+# 范围是**部署默认值**，不是「仓库里出现过的每一串」：`tests/conftest.py` 的测试密钥也在
+# 仓库里，但它不是任何人的部署值 —— 把它拉黑只会让整套测试起不来。真正的兜底是长度闸。
+_PUBLIC_SECRETS = frozenset({
+    "dev-secret-change-me-0123456789abcdef",              # 本文件的代码默认值
+    "change-me",                                          # .env.example
+    "change-me-in-prod",                                  # deploy/docker-compose.yml
+    "change-me-strong-0123456789abcdef0123456789",        # deploy/.env.example
+    "dev-rag-secret-0123456789abcdef0123456789",          # scripts/run_real.ps1.example
+    "changeme", "secret", "test", "password",
+})
+
+# 密钥最短长度。黑名单只能挡住**已经公开**的那几个，挡不住随手写的 `my-secret-123`；
+# 长度闸是兜底。32 字符 ≈ 192 bit，足够抗离线爆破。
+_MIN_SECRET_CHARS = 32
+
+# 演示模式的管理员初始口令。**真实模式不用它**（要么配 ADMIN_PASSWORD，要么随机生成）。
+# 放在这里而不是 main.py：服务端与几个客户端脚本（selftest / eval_http）要共用同一个值，
+# 「这个口令是公开的」这件事只该写一次。
+DEMO_ADMIN_PASSWORD = "admin123"
 
 
 class Settings(BaseSettings):
@@ -35,6 +59,13 @@ class Settings(BaseSettings):
     secret_key: str = "dev-secret-change-me-0123456789abcdef"
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 60 * 24
+    # 管理员 admin 的**初始**口令（只在该用户还不存在时生效）。
+    # ⚠️ 必须走配置字段而不是裸读 `os.environ`：pydantic-settings 会把 `.env` 灌进
+    # Settings 对象、**不**写进 `os.environ`；裸读的话，按 .env.example 写进 `.env` 的值
+    # 会被静默忽略、回落成公开口令（安全审查的修复第一版就踩了这个坑，与 core/tokenizer.py
+    # 里 HF_ENDPOINT 是同一类问题）。
+    # 加 `repr=False`：这是口令，随手 `print(settings)` 就泄漏了（同 BYOK 的 key）。
+    admin_password: str = Field(default="", repr=False)
 
     cors_origins: str = "*"  # 允许跨域来源,逗号分隔; 默认* = 局域网 demo,生产用 CORS_ORIGINS=http://a,http://b
     max_concurrent_streams_per_user: int = 2  # 每用户同时流式对话上限,防单客户端打爆后台 LLM/GPU
@@ -150,10 +181,25 @@ class Settings(BaseSettings):
     data_dir: str = "./data"
 
     @model_validator(mode="after")
-    def _enforce_secret_in_real(self):
-        """真实模式必须用强 SECRET_KEY，避免用默认 dev 值伪造 JWT。"""
-        if self.use_real and self.secret_key == "dev-secret-change-me-0123456789abcdef":
-            raise ValueError("真实模式(USE_REAL=true)必须设置强 SECRET_KEY 环境变量，不能使用默认值")
+    def _enforce_strong_secret(self):
+        """**任何模式**都不许拿公开密钥签 JWT。
+
+        原来只在 `USE_REAL=true` 时拦，而 `deploy/docker-compose.yml` 恰好是 `USE_REAL=false`
+        —— 于是那份「开箱即用」的编排带着仓库里公开的 SECRET_KEY 起来，任何人
+        `jwt.encode({"sub": "admin", "role": "admin"}, "change-me-in-prod")` 就能伪造管理员令牌。
+        密钥的强度与「调不调真实模型」无关，所以这道闸不再看 use_real。
+        """
+        if self.secret_key.strip() in _PUBLIC_SECRETS:
+            raise ValueError(
+                "SECRET_KEY 用了仓库里公开的默认值 —— 任何人都能伪造 JWT。"
+                "请生成一个随机串：python -c \"import secrets;print(secrets.token_urlsafe(48))\""
+            )
+        if len(self.secret_key.strip()) < _MIN_SECRET_CHARS:
+            raise ValueError(
+                "SECRET_KEY 太短（至少 %d 字符）—— 短密钥可被离线爆破，伪造出的 JWT 无法分辨。"
+                "请生成一个随机串：python -c \"import secrets;print(secrets.token_urlsafe(48))\""
+                % _MIN_SECRET_CHARS
+            )
         return self
 
     @model_validator(mode="after")

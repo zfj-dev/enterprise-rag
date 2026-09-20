@@ -53,6 +53,30 @@ def _drop_file(db: Session, path: str | None) -> None:
         logger.warning("删除文档文件失败(%s): %s", path, e)
 
 
+_READ_CHUNK = 1 << 20      # 1MB
+
+
+def _read_capped(file: UploadFile, max_bytes: int) -> bytes:
+    """**边读边数**，超限立刻停。
+
+    原来是 `file.file.read()` —— 全量读完之后才判大小，也就是校验发生在内存**已经吃满**
+    之后。一个超大文件（或几个并发的中等文件）就能把进程打爆，而这是条不需要登录之外
+    任何前提的路径（安全审查 H1）。
+    """
+    if not max_bytes:
+        return file.file.read()
+    buf = bytearray()
+    while True:
+        chunk = file.file.read(_READ_CHUNK)
+        if not chunk:
+            break
+        buf += chunk
+        if len(buf) > max_bytes:
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
+                                f"文件超过 {get_settings().max_upload_mb}MB 上限")
+    return bytes(buf)
+
+
 @router.post("", response_model=DocumentOut)
 def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
            user: User = Depends(get_current_user), db: Session = Depends(get_db),
@@ -72,10 +96,7 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "不支持的文件类型（仅支持 PDF/Word/Excel/Markdown/TXT/图片）")
     max_bytes = get_settings().max_upload_mb * 1024 * 1024
-    content = file.file.read()
-    if max_bytes and len(content) > max_bytes:
-        raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE,
-                            f"文件超过 {get_settings().max_upload_mb}MB 上限")
+    content = _read_capped(file, max_bytes)
 
     # 先判重名，**再**动盘上的文件 —— 反过来（老代码）会让「跳过重名」也把原文件覆盖掉。
     existing = (db.query(Document)

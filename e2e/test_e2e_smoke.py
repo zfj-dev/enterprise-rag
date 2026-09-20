@@ -2,6 +2,7 @@
 """Playwright 端到端冒烟：登录 -> 提问 -> 断言有 AI 回复（用于 make test-e2e / 回归防线）。
 需要先启动服务：http://localhost:8000
 """
+import os
 import sys
 from playwright.sync_api import sync_playwright
 
@@ -17,7 +18,7 @@ def main() -> int:
         page.goto(BASE)
         page.wait_for_selector("#u", timeout=10000)
         page.fill("#u", "admin")
-        page.fill("#p", "admin123")
+        page.fill("#p", os.environ.get("ADMIN_PASSWORD", "admin123"))
         page.click("button:has-text('登录')")
         page.wait_for_selector("#question", timeout=10000)
         page.fill("#question", "端到端冒烟测试")

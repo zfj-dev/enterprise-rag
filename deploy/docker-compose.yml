@@ -1,5 +1,9 @@
 # A+B 部署（本机 + 局域网给身边人用）——演示模式开箱即用（sqlite + 内存向量 + 假模型）。
 # 前端已烤进镜像，不依赖宿主挂载/文件共享。
+#
+# ⚠️ 启动前必须在本目录放一个 .env（可从 .env.example 复制），并设一个**真随机**的 SECRET_KEY：
+#     python -c "import secrets;print(secrets.token_urlsafe(48))"
+#   这里刻意**不给默认值**：SECRET_KEY 是签 JWT 的密钥，写死在编排里等于把管理员身份公开。
 services:
   api:
     build:
@@ -10,7 +14,10 @@ services:
       - "8000:8000"
     environment:
       - DATABASE_URL=sqlite:////app/data/rag.db
-      - SECRET_KEY=change-me-in-prod
+      - SECRET_KEY=${SECRET_KEY:?请在 deploy/.env 里设置 SECRET_KEY，见文件头注释}
+      # 管理员 admin 的初始口令。留空 -> 演示模式回落公开的 admin123（启动日志会提醒）。
+      # 设了就按它建（只在该用户还不存在时生效；之后改密走 /auth/change-password）。
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
       - USE_REAL=false
       - EMBEDDING_PROVIDER=fake
       - RERANKER_PROVIDER=fake

@@ -4,10 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>企业智能文档问答</title>
-<script src="https://cdn.bootcdn.net/ajax/libs/marked/12.0.2/marked.min.js"></script>
-<script src="https://cdn.bootcdn.net/ajax/libs/dompurify/3.1.5/purify.min.js"></script>
-<link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.css">
-<script src="https://cdn.bootcdn.net/ajax/libs/KaTeX/0.16.9/katex.min.js"></script>
+<!-- 三个库**本地自带**（frontend/vendor/，由 FastAPI 在 /static 下托管），不再走 CDN：
+     ① 自托管/局域网部署本来就可能出不了网，CDN 挂掉前端就残；
+     ② CDN 脚本没有 SRI 时被投毒 = 你的前端被任意代码替换；
+     ③ renderMd 的消毒依赖它 —— 详见 renderMd 里「拿不到 DOMPurify 就拒绝放行」那段。 -->
+<script src="/static/vendor/marked.min.js"></script>
+<script src="/static/vendor/purify.min.js"></script>
+<link rel="stylesheet" href="/static/vendor/katex.min.css">
+<script src="/static/vendor/katex.min.js"></script>
 <style>
   :root{
     --text-primary:#1a1a1a;
@@ -460,7 +464,12 @@ function renderMd(text,skipMath){
       .replace(/(?<!\$)\$(?!\$)([^$\n]+?)\$(?!\$)/g,(m,la)=>{maths.push({la:(la||'').trim(),block:false});return'@@MATH'+(maths.length-1)+'@@'});
     let html;
     try{html=window.marked?marked.parse(t):esc(t)}catch(e){html=esc(t)}
-    if(window.DOMPurify)html=DOMPurify.sanitize(html);
+    // 消毒器拿不到就**退回纯文本**，绝不放行 marked 产出的原始 HTML。
+    // marked 默认放行内联 HTML，而这里的内容源自模型回答（其依据是上传的文档）——
+    // 一旦 fail-open，文档里写一句 <img src=x onerror=...> 就能执行，而令牌就在
+    // localStorage 里。库也一并本地自带，避免「CDN 抽风 = 消毒静默失效」（安全审查 B3）。
+    if(!window.DOMPurify)return esc(text);
+    html=DOMPurify.sanitize(html);
     const fill=(m,i)=>{const it=maths[+i];if(!it)return'';if(skipMath||!window.katex)return `<span class="math-raw" data-latex="${encodeURIComponent(it.la)}">${it.block?('$$'+it.la+'$$'):('$'+it.la+'$')}</span>`;try{return katex.renderToString(it.la,{displayMode:it.block,throwOnError:false})}catch(e){return it.block?('$$'+it.la+'$$'):('$'+it.la+'$')}};
     html=html.replace(/@@MATH(\d+)@@/g,fill);
     return html;
@@ -565,12 +574,47 @@ function toggleUserMenu(){
     <div class="um-row"><span class="k">用户名</span><span class="v">${esc(name)}</span></div>
     <div class="um-row"><span class="k">语言</span><span class="v">跟随系统</span></div>
     <div class="um-row"><span class="k">色彩主题</span><span class="v">${dark?'深色':'浅色'}</span></div>
-    <div class="um-btns"><button class="btn-cancel" onclick="toggleTheme();document.getElementById('userMenu').remove();toggleUserMenu()">切换主题</button><button class="btn-danger" onclick="logout()">退出登录</button></div></div>`;
+    <div class="um-btns"><button class="btn-cancel" onclick="toggleTheme();document.getElementById('userMenu').remove();toggleUserMenu()">切换主题</button><button class="btn-cancel" onclick="document.getElementById('userMenu').remove();showChangePw()">修改密码</button><button class="btn-danger" onclick="logout()">退出登录</button></div></div>`;
   m.onclick=e=>{if(e.target===m)m.remove()};
   document.body.appendChild(m);
 }
-function logout(){clearAuth();location.reload();}
+async function logout(){
+  // 必须先叫服务端**吊销**这个令牌：JWT 是自包含的，只清 localStorage 的话
+  // 它在服务端照样有效到过期 —— 那样「退出登录」就只是个视觉效果。
+  // 吊销失败（断网等）也照样退出：本地清干净，服务端那条交给它自然过期。
+  try{await fetch(API+'/auth/logout',{method:'POST',headers:{'Authorization':'Bearer '+TOKEN}})}catch(e){}
+  clearAuth();location.reload();
+}
 function clearAuth(){TOKEN='';localStorage.removeItem('_rag_tok');document.getElementById('appCard').classList.add('hide');document.getElementById('loginCard').classList.remove('hide')}
+
+function showChangePw(){
+  const m=document.createElement('div');m.id='pwMenu';m.className='modal-mask';
+  m.innerHTML='<div class="modal byok-c"><h3>修改密码</h3>'
+    +'<div class="byok-desc">改完旧密码立即失效。新密码至少 12 位 —— 服务端会拒绝更短的。</div>'
+    +'<div class="byok-field"><label>当前密码</label><input id="pwOld" type="password" autocomplete="current-password"></div>'
+    +'<div class="byok-field"><label>新密码（≥12 位）</label><input id="pwNew" type="password" autocomplete="new-password"></div>'
+    +'<div class="byok-field"><label>再输一次新密码</label><input id="pwNew2" type="password" autocomplete="new-password"></div>'
+    +'<div class="byok-msg" id="pwMsg"></div>'
+    +'<div class="byok-btns"><button class="btn-cancel" onclick="document.getElementById(\'pwMenu\').remove()">取消</button>'
+    +'<button id="pwOk" onclick="doChangePw()">确认修改</button></div></div>';
+  m.onclick=e=>{if(e.target===m)m.remove()};
+  document.body.appendChild(m);
+  const f=()=>document.getElementById('pwOld')&&document.getElementById('pwOld').focus();setTimeout(f,0);
+}
+
+async function doChangePw(){
+  const oldP=document.getElementById('pwOld').value, a=document.getElementById('pwNew').value, b=document.getElementById('pwNew2').value;
+  const msg=document.getElementById('pwMsg');msg.className='byok-msg';
+  if(!oldP||!a){msg.textContent='请填写当前密码与新密码';return}
+  if(a.length<12){msg.textContent='新密码至少 12 位';return}
+  if(a!==b){msg.textContent='两次输入的新密码不一致';return}
+  const btn=document.getElementById('pwOk');btn.disabled=true;
+  const r=await api('/auth/change-password',{method:'POST',body:{old_password:oldP,new_password:a}});
+  btn.disabled=false;
+  if(!r.ok){msg.textContent=fmtErr(r.data.detail)||'修改失败';return}
+  msg.className='byok-msg ok';msg.textContent='已修改。旧密码立即失效；其它设备上已登录的会话不受影响，仍会有效到各自的令牌自然过期 —— 要立刻踢掉就在那台设备上退出登录。';
+  setTimeout(()=>{const el=document.getElementById('pwMenu');if(el)el.remove()},1200);
+}
 function positionRpResize(){var rp=document.getElementById('rightPanel');var h=document.getElementById('rpResize');if(!rp||!h)return;h.style.right=(rp.offsetWidth-6)+'px';h.style.top='0px';h.style.height=window.innerHeight+'px';}
 (function(){var h=document.getElementById('rpResize');if(!h)return;h.addEventListener('mousedown',function(e){e.preventDefault();var rp=document.getElementById('rightPanel');var sx=e.clientX,sw=rp.offsetWidth;rp.style.transition='none';function mv(ev){var w=sw+(sx-ev.clientX);var maxw=Math.min(window.innerWidth*0.62,820);w=Math.max(260,Math.min(w,maxw));rp.style.width=w+'px';positionRpResize();}function up(){document.removeEventListener('mousemove',mv);document.removeEventListener('mouseup',up);rp.style.transition='';var fm=document.querySelector('#rightPanel .src-flash');if(fm){try{fm.scrollIntoView({block:'center'});}catch(e){fm.scrollIntoView();}}}document.addEventListener('mousemove',mv);document.addEventListener('mouseup',up);});window.addEventListener('resize',positionRpResize);positionRpResize();})();
 async function checkMode(){try{const r=await fetch('/health');const d=await r.json();const b=document.getElementById('modeBadge');if(b)b.style.display=d.use_real?'none':'inline-block';// 代理按钮该不该出现由服务端说了算；不允许时连状态一起清掉，免得误发 deep

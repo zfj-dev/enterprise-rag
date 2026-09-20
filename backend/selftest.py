@@ -12,9 +12,13 @@ import traceback
 
 import httpx
 
+from app.config import DEMO_ADMIN_PASSWORD, get_settings
+
 BASE = os.environ.get("SELFTEST_BASE", "http://localhost:8000")
 REPORT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "selftest-report.log")
-ADMIN = ("admin", "admin123")
+# 口令与 _seed_admin 对齐，且**读配置而不是 os.environ**：`.env` 里的值 pydantic 只灌进
+# Settings。要让 CWD=backend 才能读到 `backend/.env` —— scripts/selftest.ps1 已 Set-Location 过去。
+ADMIN = ("admin", (get_settings().admin_password or "").strip() or DEMO_ADMIN_PASSWORD)
 
 results: list[tuple[str, bool, str]] = []
 

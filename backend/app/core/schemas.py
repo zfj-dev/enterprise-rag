@@ -23,6 +23,13 @@ class TokenResponse(BaseModel):
     role: str
 
 
+class ChangePasswordIn(BaseModel):
+    """改自己的口令。新口令的强度门槛比注册**更高**（12 位）—— 这是要长期用下去的那个。"""
+
+    old_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=12, max_length=128)
+
+
 # ---- Knowledge base ----
 class KnowledgeBaseCreate(BaseModel):
     name: str

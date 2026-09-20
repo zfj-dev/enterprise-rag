@@ -12,8 +12,13 @@ if (-not (Test-Path $py)) {
 
 # ===== EDIT: your DashScope (Aliyun Bailian) API key =====
 $env:LLM_API_KEY = "YOUR_DASHSCOPE_API_KEY_HERE"
-$env:SECRET_KEY    = "dev-rag-secret-0123456789abcdef0123456789"
 $env:LLM_MODEL   = "qwen-plus"
+
+# SECRET_KEY is NOT set here on purpose: it signs JWTs, so a value committed to the
+# repo would let anyone forge an admin token. Put it in backend\.env instead
+# (pydantic reads .env relative to the CWD, and we Set-Location $backend above):
+#     Add-Content backend\.env "SECRET_KEY=$(python -c 'import secrets;print(secrets.token_urlsafe(48))')"
+# The server refuses to start on a value that appears in this repo or is under 32 chars.
 
 # HF mirror for downloading bge models in China
 $env:HF_ENDPOINT = "https://hf-mirror.com"

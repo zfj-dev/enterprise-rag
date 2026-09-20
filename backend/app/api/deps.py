@@ -10,9 +10,11 @@ from sqlalchemy.orm import Session
 from app.core.container import Runtime, build_runtime
 from app.db.session import get_db
 from app.models.entities import User
-from app.utils.security import decode_token
+from app.utils.security import decode_token, is_revoked
 
-_bearer = HTTPBearer(auto_error=False)
+# 对外可见（auth.py 的 /logout 直接用它取令牌）：不因缺凭证而 401，
+# 拿不到就交给调用方自己决定怎么处理。
+bearer_optional = HTTPBearer(auto_error=False)
 _runtime: Runtime | None = None
 _runtime_lock = threading.Lock()
 
@@ -33,7 +35,7 @@ def get_runtime() -> Runtime:
 
 
 def get_current_user(
-    cred: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    cred: HTTPAuthorizationCredentials | None = Depends(bearer_optional),
     db: Session = Depends(get_db),
 ) -> User:
     if cred is None:
@@ -41,6 +43,9 @@ def get_current_user(
     payload = decode_token(cred.credentials)
     if not payload:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证无效/过期")
+    # 登出过的令牌在自然过期前一律拒绝（否则「登出」只是前端清了个缓存）
+    if is_revoked(payload.get("jti")):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "凭证已登出")
     user = db.query(User).filter(User.username == payload["sub"]).first()
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户不存在")

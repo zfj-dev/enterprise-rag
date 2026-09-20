@@ -6,7 +6,7 @@ _D = tempfile.mkdtemp(prefix="rag_test_")
 os.environ["DATABASE_URL"] = f"sqlite:///{_D}/test_rag.db"
 # 测试不接真实分词器：既不联网下载 Qwen tokenizer，也让「token 指标不可用」成为确定行为
 os.environ["TOKENIZER_MODEL"] = ""
-os.environ["SECRET_KEY"] = "test-secret"
+os.environ["SECRET_KEY"] = "test-secret-0123456789abcdef0123456789"   # ≥32 字符，过 config 的密钥长度闸
 
 # ⚠️ **把档位钉死**：环境变量优先于 .env，而开发者本机的 backend/.env 里是真实模式
 # （USE_REAL=true + 托管嵌入 + 真 Key）。不钉的话，跑测试会真的去打网络、用真实模型 ——
@@ -57,6 +57,10 @@ def fresh_state():
     import app.api.v1.auth as _auth_mod
 
     _auth_mod._login_attempts.clear()   # 登录限流计数按测试清空,避免跨用例累积
+
+    from app.utils import security as _security
+
+    _security._REVOKED.clear()          # 令牌吊销表同理：不按测试清就会跨用例残留
     yield
 
 

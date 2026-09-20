@@ -40,7 +40,12 @@ class OnlineSession:
         import httpx
 
         c = httpx.Client(base_url=base, timeout=300)
-        r = c.post("/api/v1/auth/login", json={"username": "admin", "password": "admin123"})
+        # 口令与 _seed_admin 对齐，且**读配置而不是 os.environ**：`.env` 里的值 pydantic
+        # 只灌进 Settings，裸读环境变量会让「在 .env 里配了 ADMIN_PASSWORD」的人登不上。
+        from app.config import DEMO_ADMIN_PASSWORD, get_settings
+
+        pwd = (get_settings().admin_password or "").strip() or DEMO_ADMIN_PASSWORD
+        r = c.post("/api/v1/auth/login", json={"username": "admin", "password": pwd})
         r.raise_for_status()
         headers = {"Authorization": "Bearer %s" % r.json().get("access_token")}
         kb_id = c.post("/api/v1/knowledge", json={"name": name, "description": ""},

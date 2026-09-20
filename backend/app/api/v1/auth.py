@@ -1,53 +1,27 @@
-"""认证：注册 / 登录（JWT）。"""
+"""认证：注册 / 登录（JWT）/ 改密 / 登出。"""
 from __future__ import annotations
 
-import threading
-import time
-
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import bearer_optional, get_current_user, get_db
 from app.config import get_settings
-from app.core.schemas import LoginRequest, RegisterRequest, TokenResponse
+from app.core.schemas import ChangePasswordIn, LoginRequest, RegisterRequest, TokenResponse
 from app.models.entities import User
-from app.utils.security import create_access_token, hash_password, verify_password
+from app.utils.ratelimit import SlidingWindowLimiter
+from app.utils.security import (create_access_token, decode_token, hash_password,
+                                revoke_token, verify_password)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
-# 登录限流(单 worker 假设,进程内滑动窗口)
-_login_attempts: dict[str, list[float]] = {}
-_login_lock = threading.Lock()
+# 登录限流（单 worker 假设，进程内滑动窗口，按**用户名**计）。
+# 键是攻击者可控的，所以表必须封顶 —— 上限与清理策略都在 SlidingWindowLimiter 里。
 _LOGIN_WINDOW = 60.0
-# 这张表的键是**攻击者可控的用户名**：不清就是个只涨不跌的内存泄漏
-# （拿一万个随机用户名登录一万次就够了）。
 _LOGIN_MAX_KEYS = 4096
-
-
-def _login_allowed(username: str, limit: int) -> bool:
-    """60 秒滑动窗口内允许 limit 次;超限返回 False。"""
-    now = time.time()
-    with _login_lock:
-        ts = [t for t in _login_attempts.get(username, []) if now - t < _LOGIN_WINDOW]
-        if len(ts) >= limit:
-            _login_attempts[username] = ts
-            return False
-        ts.append(now)
-        if len(_login_attempts) >= _LOGIN_MAX_KEYS and username not in _login_attempts:
-            _prune_login_attempts(now)
-        _login_attempts[username] = ts
-        return True
-
-
-def _prune_login_attempts(now: float) -> None:
-    """先清过期的窗口；还满就按「最后尝试时间」丢掉最旧的一半。调用方须已持 `_login_lock`。"""
-    for key in [k for k, v in _login_attempts.items()
-                if not v or now - v[-1] >= _LOGIN_WINDOW]:
-        _login_attempts.pop(key, None)
-    if len(_login_attempts) >= _LOGIN_MAX_KEYS:
-        stale = sorted(_login_attempts, key=lambda k: _login_attempts[k][-1])
-        for key in stale[: _LOGIN_MAX_KEYS // 2]:
-            _login_attempts.pop(key, None)
+_login_limiter = SlidingWindowLimiter(_LOGIN_WINDOW, max_keys=_LOGIN_MAX_KEYS)
+# 底层计数表（测试与 conftest 按用户名清理它）
+_login_attempts = _login_limiter.table
 
 
 @router.get("/health")
@@ -68,9 +42,38 @@ def register(body: RegisterRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(body: LoginRequest, db: Session = Depends(get_db)):
-    if not _login_allowed(body.username, get_settings().login_rate_limit_per_min):
+    if not _login_limiter.allow(body.username, get_settings().login_rate_limit_per_min):
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "尝试过于频繁,请稍后再试")
     u = db.query(User).filter(User.username == body.username).first()
     if not u or not verify_password(body.password, u.password_hash):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "用户名或密码错误")
     return TokenResponse(access_token=create_access_token(u.username, u.role), role=u.role)
+
+
+@router.post("/change-password")
+def change_password(body: ChangePasswordIn, user: User = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    """改自己的口令。
+
+    这是**收回一个泄漏口令的唯一途径**：seed 出来的 `admin123` 是公开的，没有这个接口
+    就只能去改数据库。旧口令必须对得上，所以拿到的令牌并不能直接改掉密码。
+    """
+    if not verify_password(body.old_password, user.password_hash):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "原密码不正确")
+    user.password_hash = hash_password(body.new_password)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/logout")
+def logout(cred: HTTPAuthorizationCredentials | None = Depends(bearer_optional)):
+    """把当前令牌拉黑至它自然过期。
+
+    只用 `bearer_optional` 而不要求 `get_current_user`：用户行被删掉时也应该能登出。
+    没有令牌、或令牌已过期/伪造 → 什么都不记（`decode_token` 过不了签名），直接返回 ok，
+    所以这个接口即便不带凭证也不会成为一张只涨不跌的表。
+    """
+    payload = decode_token(cred.credentials) if cred else None
+    if payload:
+        revoke_token(payload.get("jti"), float(payload.get("exp") or 0))
+    return {"ok": True}

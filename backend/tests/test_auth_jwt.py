@@ -100,6 +100,37 @@ def test_jwt_refresh_flow(client):
 
 
 # 用例 31
-def test_jwt_logout_invalidation(client):
-    """当前未实现登出/黑名单机制（无 /auth/logout 端点），测试整体跳过（记录为未实现功能）。"""
-    pytest.skip("当前实现无登出接口、无 token 黑名单/Redis 失效机制")
+def test_jwt_logout_invalidation(client, auth_headers):
+    """登出后**同一个令牌**在自然过期前一律被拒（安全审查 B1）。
+
+    这里断言的是**服务端**行为。前端 `logout()` 只清了 localStorage —— 没有服务端吊销，
+    那个令牌照样有效到 exp，「登出」就只是个视觉效果。
+    """
+    h = auth_headers("logout_user")
+    assert client.get(EP, headers=h).status_code == 200      # 登出前能用
+
+    assert client.post("/api/v1/auth/logout", headers=h).status_code == 200
+
+    assert client.get(EP, headers=h).status_code == 401      # 登出后同一令牌被拒
+
+
+def test_jwt_logout_only_revokes_that_token(client, auth_headers):
+    """吊销按令牌粒度：别人（以及自己另一次登录）的令牌不受影响。"""
+    h1 = auth_headers("multi_user")
+    h2 = auth_headers("multi_user")          # 同一用户再登一次，拿到另一个 jti
+
+    assert client.post("/api/v1/auth/logout", headers=h1).status_code == 200
+
+    assert client.get(EP, headers=h1).status_code == 401
+    assert client.get(EP, headers=h2).status_code == 200
+
+
+def test_jwt_logout_without_credentials_is_noop(client):
+    """没带凭证也返回 200（幂等），且**不往吊销表里写东西** —— 否则它就成了只涨不跌的表。"""
+    from app.utils import security
+
+    before = len(security._REVOKED)
+    assert client.post("/api/v1/auth/logout").status_code == 200
+    assert client.post("/api/v1/auth/logout",
+                       headers={"Authorization": "Bearer fake.token.here"}).status_code == 200
+    assert len(security._REVOKED) == before

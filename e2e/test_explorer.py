@@ -38,7 +38,7 @@ def login(page):
     page.goto(BASE)
     page.wait_for_selector("#u", timeout=10000)
     page.fill("#u", "admin")
-    page.fill("#p", "admin123")
+    page.fill("#p", os.environ.get("ADMIN_PASSWORD", "admin123"))
     page.click("button:has-text('登录')")
     try:
         page.wait_for_selector("#question", timeout=10000)

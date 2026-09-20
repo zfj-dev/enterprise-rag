@@ -43,7 +43,7 @@ def flag(r, case):
 
 
 def main():
-    token = login("admin", "admin123")
+    token = login("admin", os.environ.get("ADMIN_PASSWORD", "admin123"))
     if not token:
         print("无 token，退出")
         return

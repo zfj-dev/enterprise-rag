@@ -13,7 +13,12 @@ if (-not (Test-Path $py)) {
 
 # ===== EDIT: your private GPU inference node + DashScope key =====
 $env:USE_REAL = "true"
-$env:SECRET_KEY = "change-me-strong-0123456789abcdef0123456789"
+
+# SECRET_KEY is NOT set here on purpose: it signs JWTs, so a value committed to the
+# repo would let anyone forge an admin token. Put it in backend\.env instead
+# (pydantic reads .env relative to the CWD, and we Set-Location $backend above):
+#     Add-Content backend\.env "SECRET_KEY=$(python -c 'import secrets;print(secrets.token_urlsafe(48))')"
+# The server refuses to start on a value that appears in this repo or is under 32 chars.
 
 # --- embedding / rerank via private GPU node (NOT the local RTX 4050) ---
 $env:EMBEDDING_PROVIDER = "api"

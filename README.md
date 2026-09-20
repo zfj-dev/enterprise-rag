@@ -202,12 +202,17 @@ npm run e2e
 **① 演示 / 局域网给身边人用** — [deploy/docker-compose.yml](deploy/docker-compose.yml)
 
 ```bash
-cd deploy && docker compose up -d
+cd deploy
+cp .env.example .env        # 填一个**真随机**的 SECRET_KEY（见文件头注释，一条命令生成）
+docker compose up -d
 ```
 
 - 后端绑 `0.0.0.0`，同 WiFi 下访问 `http://<内网IP>:8000`（`ipconfig` 查内网 IP）。
 - ⚠️ **Windows 需放行入站端口 8000** —— 局域网访问最常卡在这一步（防火墙 → 高级设置 → 入站规则 → 新建端口规则）。
 - 各自注册账号；知识库按 `owner` 隔离，检索时过滤。
+- ⚠️ 首次启动会建管理员 `admin`。演示模式默认口令是**公开的** `admin123`，启动日志里也会提醒 ——
+  登录后请立刻改掉（页面右下角用户菜单，或 `POST /api/v1/auth/change-password`），
+  或启动前设 `ADMIN_PASSWORD`。真实模式不设则随机生成、只打印一次。
 
 **② 生产编排** — [deploy/docker-compose.prod.yml](deploy/docker-compose.prod.yml) + [deploy/Caddyfile](deploy/Caddyfile)
 
@@ -219,7 +224,10 @@ cd deploy && docker compose up -d
 
 > 当前生产编排用 `VECTOR_STORE=inmemory`（单 worker，启动 `reindex_all` 从库重建索引）。
 > `PgVectorStore.search` 已实现并有单测覆盖，切换前建议真机验证。
-> 安全：`USE_REAL=true` 时**强制**要求非默认 `SECRET_KEY`（启动即校验），CORS 默认收紧为显式白名单。
+> 安全：`SECRET_KEY` 在**任何模式**下都拒绝仓库里出现过的公开值、以及短于 32 字符的值
+> （启动即校验）—— 它签的是 JWT，拿公开值签等于把管理员身份发给所有人。
+> CORS 默认 `*`（局域网演示方便）：鉴权走 `Authorization` 头而非 Cookie，所以不等于 CSRF；
+> 生产请用 `CORS_ORIGINS` 显式列出前端来源。管理员初始口令见上面 ① 那条。
 
 **③ 私有推理节点** — [inference_service/app.py](inference_service/app.py)
 
