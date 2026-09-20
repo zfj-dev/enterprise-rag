@@ -213,3 +213,51 @@ def test_semantic_cache(client):
     assert s1 == 200 and s2 == 200
     assert hit1 is False
     assert hit2 is True
+
+
+# ---------- 文档列表分页（安全审查 G9）----------
+
+def _up_docs(client, H, kb, n):
+    from tests.helpers import wait_until
+
+    ids = []
+    for i in range(n):
+        up = client.post(f"/api/v1/documents?kb_id={kb}", headers=H,
+                         files={"file": (f"p{i}.txt", "比亚迪安全手册内容", "text/plain")}).json()
+        ids.append(up["id"])
+    assert wait_until(lambda: all(
+        client.get(f"/api/v1/documents/{d}", headers=H).json().get("status") in ("indexed", "failed")
+        for d in ids)), "文档未入库"
+    return ids
+
+
+def test_documents_limit_offset_pagination(client):
+    """`limit`/`offset` 分页：不漏不重；**不传 limit 仍是全部**（既有行为不变）。"""
+    from tests.helpers import register_and_kb
+
+    H, _, kb = register_and_kb(client, "pager")
+    ids = _up_docs(client, H, kb, 3)
+
+    all_docs = client.get(f"/api/v1/documents?kb_id={kb}", headers=H).json()
+    assert len(all_docs) == 3, "不传 limit 应当返回全部"
+
+    p1 = client.get(f"/api/v1/documents?kb_id={kb}&limit=2&offset=0", headers=H).json()
+    p2 = client.get(f"/api/v1/documents?kb_id={kb}&limit=2&offset=2", headers=H).json()
+    assert len(p1) == 2 and len(p2) == 1
+    assert not ({d["id"] for d in p1} & {d["id"] for d in p2}), "两页不该重叠"
+    assert {d["id"] for d in p1} | {d["id"] for d in p2} == set(ids)
+
+    # 分页不能变成绕过 owner 过滤的口子
+    H2, _, _ = register_and_kb(client, "pager2")
+    assert client.get(f"/api/v1/documents?kb_id={kb}&limit=2&offset=0", headers=H2).json() == []
+
+
+def test_documents_limit_is_validated_not_silently_clamped(client):
+    """越界的 limit/offset 直接 422 —— 静默夹取会把调用方的错藏起来。"""
+    from tests.helpers import register_and_kb
+
+    H, _, kb = register_and_kb(client, "cap")
+    assert client.get(f"/api/v1/documents?kb_id={kb}&limit=999999", headers=H).status_code == 422
+    assert client.get(f"/api/v1/documents?kb_id={kb}&limit=0", headers=H).status_code == 422
+    assert client.get(f"/api/v1/documents?kb_id={kb}&offset=-5", headers=H).status_code == 422
+    assert client.get(f"/api/v1/documents?kb_id={kb}&limit=1000", headers=H).status_code == 200

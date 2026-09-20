@@ -6,7 +6,7 @@ import os
 
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
@@ -125,11 +125,27 @@ def upload(kb_id: str, file: UploadFile, overwrite: bool = False,
 
 
 @router.get("", response_model=list[DocumentOut])
-def list_docs(kb_id: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    docs = (db.query(Document)
-            .filter(Document.kb_id == kb_id, Document.owner_id == user.id)
-            .order_by(Document.created_at.desc()).all())
-    return [_to_out(d) for d in docs]
+def list_docs(kb_id: str,
+              limit: int | None = Query(default=None, ge=1, le=1000),
+              offset: int = Query(default=0, ge=0),
+              user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """列文档。`limit`/`offset` 可选 —— **不传就是全部**（既有调用方与测试的行为不变）。
+
+    分页是为了前端别一次渲染成百上千张卡片（安全审查 G9）。上限 1000 是防止有人拿它
+    当「一次拉全库」的通道。排序补了 `id` 兜底：分页要求**确定的全序**，否则同一时间戳
+    的行在两次请求间可能换位、造成漏读或重读。
+
+    越界的 `limit`/`offset` 直接 422（`Query(ge/le)`），**不静默夹取** —— 夹取会把调用方
+    的错藏起来（他以为拿到了自己请求的范围）。
+    """
+    q = (db.query(Document)
+         .filter(Document.kb_id == kb_id, Document.owner_id == user.id)
+         .order_by(Document.created_at.desc(), Document.id.desc()))
+    if offset:
+        q = q.offset(offset)
+    if limit is not None:
+        q = q.limit(limit)
+    return [_to_out(d) for d in q.all()]
 
 
 @router.get("/{doc_id}", response_model=DocumentOut)
